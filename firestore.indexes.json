@@ -1,19 +1,11 @@
 {
   "indexes": [
     {
-      "collectionGroup": "users",
+      "collectionGroup": "discovery",
       "queryScope": "COLLECTION",
       "fields": [
         { "fieldPath": "profileComplete", "order": "ASCENDING" },
         { "fieldPath": "preferences.discoverable", "order": "ASCENDING" },
-        { "fieldPath": "lastActiveAt", "order": "DESCENDING" }
-      ]
-    },
-    {
-      "collectionGroup": "users",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "profile.age", "order": "ASCENDING" },
         { "fieldPath": "lastActiveAt", "order": "DESCENDING" }
       ]
     },

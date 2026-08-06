@@ -90,16 +90,25 @@ Build → **Firestore Database** → *Create database*.
 Open [`firestore.rules`](../firestore.rules). It is the only server-side security this app
 has, so it is worth the five minutes:
 
-- `users/{uid}` — readable by any signed-in user (discovery needs that), writable only by the
-  owner. Writes are validated: `plan` must be `free` or `premium`, `profile.bio` ≤ 500 chars,
-  `profile.interests` ≤ 12, `profile.photos` ≤ 6, `preferences.ageMin ≥ 18`, `ageMax ≤ 100`,
-  `ageMin ≤ ageMax`, and `uid` / `email` / `createdAt` are immutable after creation.
+- `users/{uid}` — readable and writable **only by the owner**. Email, birthdate, block lists,
+  usage counters and learned affinities never leave the account. Writes are validated: `plan`
+  must be `free` or `premium`, `profile.bio` ≤ 500 chars, `profile.interests` ≤ 12,
+  `profile.photos` ≤ 6, `preferences.ageMin ≥ 18`, `ageMax ≤ 100`, `ageMin ≤ ageMax`, and
+  `uid` / `email` / `createdAt` are immutable after creation.
+- `discovery/{uid}` — the public projection other users actually see: display name, age (not
+  birthdate), bio, interests, personality, ~1 km-rounded coordinates and the mutual filters.
+  Readable by any signed-in user, writable only by the owner, and the key list is **closed**
+  (`hasOnly`), so a tampered client cannot smuggle private fields into the readable copy. The
+  app mirrors it automatically on every profile save.
 - `swipes/{swipeId}` — create only when you are the `from` user **and** the document id is
-  exactly `from_to`. Read and delete your own only. No updates.
+  exactly `from_to`. Read your own (either direction). Delete your own, or one aimed at you —
+  account deletion purges inbound likes too. No updates.
 - `matches/{matchId}` — read and update only if you are one of the two `users`; create only
-  with `users.size() == 2`, yourself among them, and an id equal to the sorted join.
+  with `users.size() == 2`, yourself among them, an id equal to the sorted join, and proof the
+  other person actually liked you first.
 - `matches/{matchId}/messages/{msgId}` — read if you participate in the parent match; create
-  only as yourself with 1–1000 characters of text. No update, no delete.
+  only as yourself with 1–1000 characters of text. Never editable; deletable by participants
+  so unmatch and account deletion can purge the conversation before the match goes.
 - Everything else: denied.
 
 If you change the data model, change these rules in the same commit. They are not decoration —
@@ -198,7 +207,9 @@ instead:
 2. **Import the seed with admin credentials, outside this repo.** A short script using
    `firebase-admin` and a service-account key bypasses rules by design. That means an
    `npm install` and a downloaded private key, which is why it is not shipped here — keep it in
-   a separate throwaway directory and never commit the key.
+   a separate throwaway directory and never commit the key. If you go this way, write each
+   profile to **both** `users/{uid}` and its public `discovery/{uid}` projection (the app
+   normally mirrors the projection itself on every profile save).
 3. **Use the console.** Firestore → Data lets you add documents by hand. Fine for two or three
    profiles, painful for thirty.
 4. **Temporarily relax the rules.** Possible; also the easiest way to end up with an open

@@ -210,6 +210,18 @@ into the other and the matching engine cannot tell the difference.
 `ZC.store.DEFAULT_USER` is this shape with sane defaults; every writer merges into it, so a
 document written by the profile editor and one written by sign-up are structurally identical.
 
+### `discovery/{uid}` — the public projection (Firebase mode)
+
+In Firebase mode `users/{uid}` is readable **only by its owner**. What other people see is
+`discovery/{uid}`, a projection the store mirrors automatically on every profile save:
+display name, `profileComplete`, `lastActiveAt`, the public `profile.*` subset (derived age
+but never the birthdate; coordinates rounded to ~1 km) and the mutual filter preferences
+(`interestedIn`, `ageMin`, `ageMax`, `maxDistanceKm`, `discoverable`). Email, birthdate,
+block lists, usage counters and learned affinities never leave the private document, and the
+rules close the projection's key list with `hasOnly` so a tampered client cannot widen it.
+Candidate listing, the matches list and "who liked you" all read the projection; the demo
+adapter keeps a single local store since nothing ever leaves the browser there.
+
 ### The rest
 
 | Collection | Id | Shape |

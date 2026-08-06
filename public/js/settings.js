@@ -747,72 +747,95 @@
   }
 
   /**
-   * Remove every trace of a demo account: the profile, swipes in both
-   * directions, matches, their messages and the saved credentials.
-   * @param {string} uid the account
-   * @param {string} email the address its credentials are keyed by
+   * Drop a demo account's saved credentials. The account's data itself is
+   * removed by ZC.store.deleteAccountData; the credential vault is auth's
+   * private key-by-email map, so it is cleared separately here.
+   * @param {string} email the address the credentials are keyed by
    * @returns {void}
    */
-  function purgeDemoAccount(uid, email) {
-    const keys = (ZC.store && ZC.store.KEYS) || {
-      users: 'zc.demo.users',
-      swipes: 'zc.demo.swipes',
-      matches: 'zc.demo.matches',
-      messages: 'zc.demo.messages'
-    };
-
-    const users = readMap(keys.users);
-    delete users[uid];
-    writeMap(keys.users, users);
-
-    // Swipes you made and swipes made about you both go.
-    const swipes = readMap(keys.swipes);
-    Object.keys(swipes).forEach(function (id) {
-      const swipe = swipes[id];
-      if (!swipe || swipe.from === uid || swipe.to === uid) delete swipes[id];
-    });
-    writeMap(keys.swipes, swipes);
-
-    const matches = readMap(keys.matches);
-    const messages = readMap(keys.messages);
-    Object.keys(matches).forEach(function (id) {
-      const match = matches[id];
-      if (!match || !Array.isArray(match.users) || match.users.indexOf(uid) === -1) return;
-      delete matches[id];
-      delete messages[id];
-    });
-    writeMap(keys.matches, matches);
-    writeMap(keys.messages, messages);
-
-    // The demo credential vault is keyed by lowercased email.
+  function removeDemoCredentials(email) {
     const address = String(email || '').trim().toLowerCase();
-    if (address) {
-      const credentials = readMap(CREDENTIALS_KEY);
-      if (credentials[address]) {
-        delete credentials[address];
-        writeMap(CREDENTIALS_KEY, credentials);
-      }
+    if (!address) return;
+    const credentials = readMap(CREDENTIALS_KEY);
+    if (credentials[address]) {
+      delete credentials[address];
+      writeMap(CREDENTIALS_KEY, credentials);
     }
   }
 
   /**
-   * Delete the Firestore user document, then the sign-in itself. A login that
-   * is too old to delete is reported, never swallowed.
-   * @param {string} uid the account
+   * Ask for the account password and reauthenticate a stale Firebase session
+   * so it becomes fresh enough to delete itself. Google sign-ins reauth via
+   * the provider popup instead.
+   * @param {Object} account firebase.auth().currentUser
+   * @returns {Promise<boolean>} true when reauthentication succeeded
+   */
+  async function reauthenticateForDeletion(account) {
+    const providers = Array.isArray(account.providerData) ? account.providerData : [];
+    const usesPassword = providers.some(function (p) { return p && p.providerId === 'password'; });
+
+    if (!usesPassword) {
+      // Google (or any popup provider): re-run the provider flow.
+      try {
+        await account.reauthenticateWithPopup(new firebase.auth.GoogleAuthProvider());
+        return true;
+      } catch (err) {
+        console.warn('[zc] Reauthentication popup failed.', err);
+        return false;
+      }
+    }
+
+    // Email/password: collect the password in a modal and reauthenticate.
+    let password = '';
+    const input = ZC.util.el('input', {
+      class: 'input',
+      attrs: { type: 'password', autocomplete: 'current-password', 'aria-label': 'Current password' },
+      on: { input: function (event) { password = event.target.value; } }
+    });
+    const body = ZC.util.el('div', { class: 'stack stack-sm' }, [
+      ZC.util.el('p', { text: 'Deleting an account needs a recent sign-in. Enter your password to continue.' }),
+      input
+    ]);
+    const choice = await ZC.ui.modal({
+      title: 'Confirm it’s you',
+      body: body,
+      actions: [
+        { id: 'cancel', label: 'Cancel', variant: 'ghost' },
+        { id: 'confirm', label: 'Continue', variant: 'danger' }
+      ]
+    });
+    if (choice !== 'confirm' || !password) return false;
+    try {
+      const credential = firebase.auth.EmailAuthProvider.credential(account.email, password);
+      await account.reauthenticateWithCredential(credential);
+      return true;
+    } catch (err) {
+      console.warn('[zc] Reauthentication failed.', err);
+      return false;
+    }
+  }
+
+  /**
+   * Delete the Firebase sign-in itself, reauthenticating first if the session
+   * is too old. Throws when the login could not be removed, so the caller
+   * never reports a deletion that did not fully happen.
    * @returns {Promise<void>}
    */
-  async function purgeFirebaseAccount(uid) {
+  async function deleteFirebaseSignIn() {
     const handles = ZC.firebase;
-    if (!handles || !handles.db) throw new Error('Firestore is not available.');
-    await handles.db.collection('users').doc(uid).delete();
-
-    const account = handles.auth && handles.auth.currentUser;
+    const account = handles && handles.auth && handles.auth.currentUser;
     if (!account || typeof account.delete !== 'function') return;
     try {
       await account.delete();
     } catch (err) {
-      console.warn('[zc] Profile deleted, but the sign-in could not be removed.', err);
-      toast('Your profile and data are gone. Firebase needs a fresh sign-in before it will delete the login itself.', 'warn', 7000);
+      if (!err || err.code !== 'auth/requires-recent-login') throw err;
+      const fresh = await reauthenticateForDeletion(account);
+      if (!fresh) {
+        const abort = new Error('Reauthentication was cancelled or failed.');
+        abort.code = 'auth/requires-recent-login';
+        throw abort;
+      }
+      await account.delete();
     }
   }
 
@@ -831,32 +854,21 @@
     const uid = me.uid;
     const email = me.email;
     busy(dom.deleteButton, true, 'Deleting…');
+    let dataGone = false;
     try {
-      // 1. Undo every swipe — this removes any match a swipe created.
-      const swipes = await ZC.store.getSwipes(uid);
-      for (let i = 0; i < swipes.length; i += 1) {
-        try {
-          await ZC.store.undoSwipe(uid, swipes[i].to);
-        } catch (err) {
-          console.warn('[zc] Could not remove one swipe.', err);
-        }
-      }
+      // 1. Every stored trace of the account: swipes in both directions,
+      //    matches with their messages, the discovery projection and the
+      //    account document.
+      await ZC.store.deleteAccountData(uid);
+      dataGone = true;
 
-      // 2. Anything still standing — matches created by the other person's swipe.
-      const matches = await ZC.store.getMatches(uid);
-      for (let i = 0; i < matches.length; i += 1) {
-        try {
-          await ZC.store.unmatch(matches[i].matchId, uid);
-        } catch (err) {
-          console.warn('[zc] Could not remove one match.', err);
-        }
-      }
+      // 2. The sign-in itself. In firebase mode this reauthenticates a stale
+      //    session first and throws if the login could not be removed — the
+      //    flow never claims success while the identity is still usable.
+      if (ZC.store.mode === 'firebase') await deleteFirebaseSignIn();
+      else removeDemoCredentials(email);
 
-      // 3. The account itself.
-      if (ZC.store.mode === 'firebase') await purgeFirebaseAccount(uid);
-      else purgeDemoAccount(uid, email);
-
-      // 4. End the session and leave.
+      // 3. End the session and leave.
       if (ZC.auth && typeof ZC.auth.signOut === 'function') {
         try {
           await ZC.auth.signOut();
@@ -870,9 +882,17 @@
     } catch (err) {
       console.error('[zc] Account deletion failed:', err);
       busy(dom.deleteButton, false);
-      setFieldError(dom.deleteField, dom.deleteError,
-        'Deletion did not finish. Nothing else was changed — please try again.', dom.deleteInput);
-      toast('Could not delete the account.', 'error');
+      if (dataGone) {
+        // The data was removed but the sign-in survives; be precise about it.
+        setFieldError(dom.deleteField, dom.deleteError,
+          'Your data was deleted, but the sign-in itself was not. Sign in again and repeat “Delete account” to finish.',
+          dom.deleteInput);
+        toast('Data deleted, but the sign-in remains. Sign in again to finish.', 'warn', 8000);
+      } else {
+        setFieldError(dom.deleteField, dom.deleteError,
+          'Deletion did not finish. Nothing else was changed — please try again.', dom.deleteInput);
+        toast('Could not delete the account.', 'error');
+      }
     }
   }
 

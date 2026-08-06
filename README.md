@@ -258,11 +258,16 @@ secrets and no deploy step — deploying stays a deliberate local `npm run deplo
 ## Security notes
 
 - **Firestore rules are the real boundary.** [`firestore.rules`](firestore.rules) validates
-  writes against the data model: only the owner writes their user document; `uid`, `email` and
-  `createdAt` are immutable after creation; bios are capped at 500 characters, interests at 12,
-  photos at 6; a swipe can only be created by its `from` user and its document id must be
-  `from_to`; matches are readable only by their two participants; messages require
-  participation and `from == request.auth.uid`. Everything else is denied by default.
+  writes against the data model: only the owner reads or writes their `users/{uid}` document;
+  `uid`, `email` and `createdAt` are immutable after creation; bios are capped at 500
+  characters, interests at 12, photos at 6; a swipe can only be created by its `from` user and
+  its document id must be `from_to`; matches are readable only by their two participants and
+  require proof of a reciprocal like to create; messages require participation and
+  `from == request.auth.uid`. Everything else is denied by default.
+- **Private fields stay private.** Other users only ever read `discovery/{uid}`, a projection
+  holding the public fields (derived age, never the birthdate; coordinates rounded to ~1 km).
+  Email, block lists, usage counters and learned affinities never leave `users/{uid}`, and the
+  projection's key list is closed with `hasOnly` so a tampered client cannot widen it.
 - **Strict CSP.** `firebase.json` ships
   `script-src 'self' https://www.gstatic.com https://apis.google.com`, `object-src 'none'`,
   `frame-ancestors 'none'` and friends. Consequently there is not one inline `<script>` or
@@ -300,9 +305,11 @@ These are real, and worth knowing before you show this to anyone:
 - **No photo uploads.** Cloud Storage requires the Blaze plan on new projects, so profiles use
   deterministic generated SVG avatars, or `https://` URLs you paste yourself. Those URLs are
   not proxied, scanned or moderated.
-- **Discovery loads a candidate page and ranks it in the browser.** That is fine for a deck of
-  tens or low hundreds of profiles and would need a server-side pre-filter well before it was
-  a real product. The engine is honest about this: `listCandidates` takes a `limit`.
+- **Discovery scans candidate pages and ranks them in the browser.** `listCandidates` walks
+  the public `discovery` collection with a cursor (newest-active first, with cheap mutual
+  gender/age pre-filters) until the deck is full or a scan cap is hit. That is fine for tens
+  or low hundreds of profiles and would need a server-side pre-filter well before it was a
+  real product.
 - **No moderation, reporting queue, or abuse tooling.** There is block and unmatch, and that
   is the extent of it.
 - **The "AI" is classical ML, deliberately.** TF‑IDF, cosine similarity, weighted vector

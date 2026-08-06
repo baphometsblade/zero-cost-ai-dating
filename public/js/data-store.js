@@ -99,6 +99,12 @@
     return !!value && typeof value === 'object' && !Array.isArray(value);
   }
 
+  /** A finite number, or null. */
+  function num(value) {
+    const n = Number(value);
+    return value === null || value === undefined || !isFinite(n) ? null : n;
+  }
+
   /**
    * Structural deep copy of JSON-ish data.
    * @param {*} value value to copy
@@ -872,6 +878,35 @@
       return true;
     },
 
+    async deleteAccountData(uid) {
+      // Swipes in both directions, matches (and their messages) either way,
+      // then the account document itself — mirroring the Firestore adapter.
+      const swipes = readSwipes();
+      Object.keys(swipes).forEach(function (id) {
+        const swipe = swipes[id];
+        if (swipe && (swipe.from === uid || swipe.to === uid)) delete swipes[id];
+      });
+      writeSwipes(swipes);
+
+      const matches = readMatches();
+      const messages = readMessages();
+      Object.keys(matches).forEach(function (id) {
+        const match = matches[id];
+        if (match && Array.isArray(match.users) && match.users.indexOf(uid) !== -1) {
+          delete matches[id];
+          delete messages[id];
+        }
+      });
+      writeMatches(matches);
+      writeMessages(messages);
+
+      const users = readUsers();
+      delete users[uid];
+      writeUsers(users);
+      pollAll();
+      return true;
+    },
+
     async seedDemo(force) {
       return demoSeed(!!force);
     },
@@ -940,6 +975,33 @@
   }
 
   /**
+   * Mutual gender and age eligibility, mirroring the matching engine's hard
+   * filters (an empty `interestedIn` means open to all; a missing age on the
+   * viewer never excludes anyone). Used only to keep pagination from spending
+   * its budget on profiles the engine would reject anyway.
+   * @param {Object} a one user
+   * @param {Object} b the other
+   * @returns {boolean} true when neither side's gender/age filters exclude the other
+   */
+  function mutuallyEligible(a, b) {
+    function open(user, candidate) {
+      const wants = user.preferences && Array.isArray(user.preferences.interestedIn)
+        ? user.preferences.interestedIn : [];
+      const gender = candidate.profile && candidate.profile.gender;
+      if (wants.length && gender && wants.indexOf(gender) === -1) return false;
+      const age = candidate.profile ? num(candidate.profile.age) : null;
+      if (age !== null && user.preferences) {
+        const lo = num(user.preferences.ageMin);
+        const hi = num(user.preferences.ageMax);
+        if (lo !== null && age < lo) return false;
+        if (hi !== null && age > hi) return false;
+      }
+      return true;
+    }
+    return open(a, b) && open(b, a);
+  }
+
+  /**
    * Shape a stored match into the MatchView pages render.
    * @param {Object} match MatchDoc
    * @param {string} uid the viewer
@@ -983,18 +1045,111 @@
   }
 
   /**
-   * Fetch several user docs at once, tolerating individual failures.
-   * @param {string[]} uids ids to fetch
-   * @returns {Promise<Object>} map of uid -> UserDoc
+   * Delete a list of document refs in write batches (Firestore caps a batch
+   * at 500 operations).
+   * @param {Array} refs document references
+   * @returns {Promise<void>}
    */
-  async function fetchUsers(uids) {
+  async function batchDelete(refs) {
+    for (let i = 0; i < refs.length; i += 400) {
+      const batch = db().batch();
+      refs.slice(i, i + 400).forEach(function (ref) { batch.delete(ref); });
+      await batch.commit();
+    }
+  }
+
+  /**
+   * Remove every message under a match. Runs before the match document is
+   * deleted, because the message-delete rule proves membership via the parent.
+   * @param {Object} matchRef the match document reference
+   * @returns {Promise<void>}
+   */
+  async function deleteMatchMessages(matchRef) {
+    for (;;) {
+      const snap = await matchRef.collection('messages').limit(200).get();
+      if (snap.empty) return;
+      await batchDelete(snap.docs.map(function (doc) { return doc.ref; }));
+      if (snap.size < 200) return;
+    }
+  }
+
+  /** Round a coordinate to ~1 km precision for the public projection. */
+  function roundCoord(value) {
+    const n = Number(value);
+    return isFinite(n) ? Math.round(n * 100) / 100 : 0;
+  }
+
+  /**
+   * The public projection of a UserDoc — the only shape other signed-in users
+   * can read. `users/{uid}` itself is owner-only: email, birthdate, block
+   * lists, usage counters and learned affinities never leave the account.
+   * Coordinates are rounded to ~1 km so exact positions are never published.
+   * @param {Object} user full UserDoc
+   * @returns {Object} discovery document
+   */
+  function projectDiscovery(user) {
+    const p = isPlainObject(user.profile) ? user.profile : {};
+    const f = isPlainObject(user.preferences) ? user.preferences : {};
+    const location = isPlainObject(p.location) ? {
+      label: String(p.location.label || ''),
+      lat: roundCoord(p.location.lat),
+      lng: roundCoord(p.location.lng)
+    } : null;
+    return {
+      uid: String(user.uid),
+      displayName: String(user.displayName || ''),
+      profileComplete: !!user.profileComplete,
+      lastActiveAt: user.lastActiveAt || nowIso(),
+      profile: {
+        age: num(p.age),
+        gender: p.gender || 'other',
+        pronouns: String(p.pronouns || ''),
+        bio: String(p.bio || ''),
+        photos: Array.isArray(p.photos) ? p.photos.slice(0, 6) : [],
+        interests: Array.isArray(p.interests) ? p.interests.slice(0, 12) : [],
+        personality: isPlainObject(p.personality) ? p.personality : null,
+        location: location,
+        showAge: p.showAge !== false,
+        showDistance: p.showDistance !== false
+      },
+      preferences: {
+        interestedIn: Array.isArray(f.interestedIn) ? f.interestedIn.slice(0, 4) : [],
+        ageMin: num(f.ageMin) === null ? 18 : num(f.ageMin),
+        ageMax: num(f.ageMax) === null ? 100 : num(f.ageMax),
+        maxDistanceKm: num(f.maxDistanceKm) === null ? 500 : num(f.maxDistanceKm),
+        discoverable: f.discoverable !== false
+      }
+    };
+  }
+
+  /**
+   * Keep the discovery projection in step with the private doc. Best-effort:
+   * a failed projection write must never fail the profile save that caused it.
+   * @param {Object} user full UserDoc
+   * @returns {Promise<void>}
+   */
+  async function writeDiscovery(user) {
+    try {
+      await db().collection('discovery').doc(String(user.uid)).set(projectDiscovery(user));
+    } catch (err) {
+      console.warn('[zc.store] Could not update the discovery profile.', err);
+    }
+  }
+
+  /**
+   * Fetch several public discovery profiles at once, tolerating individual
+   * failures. Other people are only ever read through this projection.
+   * @param {string[]} uids ids to fetch
+   * @returns {Promise<Object>} map of uid -> UserDoc-shaped public profile
+   */
+  async function fetchProfiles(uids) {
     const unique = [];
     (uids || []).forEach(function (uid) {
       if (uid && unique.indexOf(uid) === -1) unique.push(uid);
     });
     const results = await Promise.all(unique.map(function (uid) {
-      return db().collection('users').doc(uid).get().then(docToUser, function (err) {
-        console.warn('[zc.store] Could not load user ' + uid, err);
+      return db().collection('discovery').doc(uid).get().then(docToUser, function (err) {
+        console.warn('[zc.store] Could not load profile ' + uid, err);
         return null;
       });
     }));
@@ -1026,6 +1181,7 @@
       user.lastActiveAt = stamp;
       user.usage = normalizeUsage({ date: todayKey() });
       await db().collection('users').doc(user.uid).set(user);
+      await writeDiscovery(user);
       return user;
     },
 
@@ -1040,12 +1196,16 @@
       if (!user.createdAt) user.createdAt = nowIso();
       user.updatedAt = nowIso();
       await ref.set(user);
+      await writeDiscovery(user);
       return user;
     },
 
     async setLastActive(uid, iso) {
       try {
         await db().collection('users').doc(uid).update({ lastActiveAt: iso });
+        // The projection carries lastActiveAt too — it drives ranking's
+        // activity signal, so it has to stay as fresh as the private doc.
+        await db().collection('discovery').doc(uid).update({ lastActiveAt: iso }).catch(function () {});
         return true;
       } catch (err) {
         // Missing doc or offline — activity is a nicety, never an error path.
@@ -1056,26 +1216,8 @@
 
     async listCandidates(uid, options) {
       const limit = Math.max(1, Number((options || {}).limit) || DEFAULT_CANDIDATE_LIMIT);
-      const fetchSize = Math.min(300, limit * 3);
-      const users = db().collection('users');
-      let snap;
-      try {
-        // Matches the composite index shipped in firestore.indexes.json.
-        snap = await users
-          .where('profileComplete', '==', true)
-          .where('preferences.discoverable', '==', true)
-          .orderBy('lastActiveAt', 'desc')
-          .limit(fetchSize)
-          .get();
-      } catch (err) {
-        console.warn('[zc.store] Indexed candidate query unavailable, falling back.', err);
-        try {
-          snap = await users.orderBy('lastActiveAt', 'desc').limit(fetchSize).get();
-        } catch (innerErr) {
-          console.warn('[zc.store] Ordered candidate query unavailable, falling back again.', innerErr);
-          snap = await users.limit(fetchSize).get();
-        }
-      }
+      const pageSize = Math.min(200, Math.max(60, limit * 2));
+      const discovery = db().collection('discovery');
 
       const [me, mySwipes] = await Promise.all([
         firestoreAdapter.getUser(uid),
@@ -1084,17 +1226,60 @@
       const swiped = swipedSet(mySwipes, uid);
       const myBlocks = me ? me.blocked : [];
 
+      // Everyone recently active can be ineligible (already swiped, or failing
+      // the mutual filters), so a single newest-first slice would eventually
+      // report an empty deck while older eligible profiles still exist. Walk
+      // the collection with a cursor until the deck is full, the collection is
+      // exhausted, or a hard scan cap is hit.
       const out = [];
-      snap.forEach(function (doc) {
-        if (doc.id === uid) return;
-        if (swiped[doc.id]) return;
-        if (myBlocks.indexOf(doc.id) !== -1) return;
-        const candidate = docToUser(doc);
-        if (!candidate) return;
-        if (candidate.blocked.indexOf(uid) !== -1) return;
-        out.push(candidate);
-      });
-      return out.slice(0, limit);
+      let cursor = null;
+      let scanned = 0;
+      let ordered = true;
+      while (out.length < limit && scanned < 1500) {
+        let snap;
+        try {
+          // Matches the composite index shipped in firestore.indexes.json.
+          let query = discovery
+            .where('profileComplete', '==', true)
+            .where('preferences.discoverable', '==', true)
+            .orderBy('lastActiveAt', 'desc')
+            .limit(pageSize);
+          if (cursor) query = query.startAfter(cursor);
+          snap = await query.get();
+        } catch (err) {
+          console.warn('[zc.store] Indexed candidate query unavailable, falling back.', err);
+          try {
+            let query = discovery.orderBy('lastActiveAt', 'desc').limit(pageSize);
+            if (cursor) query = query.startAfter(cursor);
+            snap = await query.get();
+          } catch (innerErr) {
+            console.warn('[zc.store] Ordered candidate query unavailable, falling back again.', innerErr);
+            snap = await discovery.limit(pageSize).get();
+            ordered = false;
+          }
+        }
+        if (snap.empty) break;
+        cursor = snap.docs[snap.docs.length - 1];
+        scanned += snap.size;
+
+        snap.forEach(function (doc) {
+          if (out.length >= limit) return;
+          if (doc.id === uid) return;
+          if (swiped[doc.id]) return;
+          if (myBlocks.indexOf(doc.id) !== -1) return;
+          const candidate = docToUser(doc);
+          if (!candidate) return;
+          // Cheap mutual gender/age pre-filters (same semantics as the
+          // engine's hard filters) so ineligible profiles do not use up the
+          // page budget; distance and the rest stay with the engine.
+          if (me && !mutuallyEligible(me, candidate)) return;
+          out.push(candidate);
+        });
+
+        // The unordered fallback cannot paginate; take the one page it gives.
+        if (!ordered || snap.size < pageSize) break;
+      }
+      return out;
     },
 
     async getSwipes(uid) {
@@ -1213,7 +1398,7 @@
       const pending = senders.filter(function (from) {
         return !answered[from] && myBlocks.indexOf(from) === -1;
       });
-      const users = await fetchUsers(pending);
+      const users = await fetchProfiles(pending);
       return pending
         .map(function (from) { return users[from]; })
         .filter(function (user) { return !!user && user.blocked.indexOf(uid) === -1; });
@@ -1234,7 +1419,7 @@
         data.id = data.id || doc.id;
         docs.push(data);
       });
-      const users = await fetchUsers(docs.map(function (match) { return otherOf(match, uid); }));
+      const users = await fetchProfiles(docs.map(function (match) { return otherOf(match, uid); }));
       return docs
         .map(function (match) { return toMatchView(match, uid, users[otherOf(match, uid)]); })
         .sort(byRecency);
@@ -1247,7 +1432,7 @@
       data.id = data.id || snap.id;
       const viewer = uid || currentUid() || (Array.isArray(data.users) ? data.users[0] : null);
       const otherUid = otherOf(data, viewer);
-      const users = await fetchUsers([otherUid]);
+      const users = await fetchProfiles([otherUid]);
       return toMatchView(data, viewer, users[otherUid]);
     },
 
@@ -1259,7 +1444,9 @@
       if (uid && Array.isArray(data.users) && data.users.indexOf(uid) === -1) {
         throw new Error('You are not part of that match.');
       }
-      // Messages are immutable by the security rules, so only the match goes.
+      // Messages first: the delete rule checks membership of the parent match,
+      // which stops being checkable the moment the match document is gone.
+      await deleteMatchMessages(ref);
       await ref.delete();
       return { ok: true, removed: true };
     },
@@ -1331,6 +1518,32 @@
         console.warn('[zc.store] Could not clear the unread counter.', err);
         return false;
       }
+    },
+
+    async deleteAccountData(uid) {
+      // Swipes in both directions: the ones this account made, and the ones
+      // aimed at it — an inbound like is data about this account and must not
+      // outlive it.
+      const swipes = db().collection('swipes');
+      const directions = ['from', 'to'];
+      for (let d = 0; d < directions.length; d += 1) {
+        const snap = await swipes.where(directions[d], '==', uid).get();
+        await batchDelete(snap.docs.map(function (doc) { return doc.ref; }));
+      }
+
+      // Every match this account is in, messages first (see unmatch).
+      const matches = await db().collection('matches').where('users', 'array-contains', uid).get();
+      for (let i = 0; i < matches.docs.length; i += 1) {
+        await deleteMatchMessages(matches.docs[i].ref);
+        await matches.docs[i].ref.delete();
+      }
+
+      // The public projection, then the private document.
+      await db().collection('discovery').doc(uid).delete().catch(function (err) {
+        console.warn('[zc.store] Could not delete the discovery profile.', err);
+      });
+      await db().collection('users').doc(uid).delete();
+      return true;
     },
 
     // Demo-only helpers: inert against a real project.
@@ -1649,6 +1862,20 @@
       const used = Number(usage[field]) || 0;
       const remaining = limit === Infinity ? Infinity : Math.max(0, limit - used);
       return { allowed: remaining > 0, remaining: remaining, limit: limit, plan: plan };
+    },
+
+    /**
+     * Remove everything stored about an account: swipes in both directions,
+     * matches with their messages, the public discovery projection (firebase
+     * mode) and the account document itself. Deleting the sign-in credential
+     * is the caller's job — this only clears the data.
+     * @param {string} uid the account being deleted
+     * @returns {Promise<boolean>}
+     */
+    async deleteAccountData(uid) {
+      await ready;
+      if (!uid) throw new Error('deleteAccountData needs a uid.');
+      return adapter.deleteAccountData(uid);
     },
 
     /**

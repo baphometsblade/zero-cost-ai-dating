@@ -144,8 +144,10 @@ service cloud.firestore {
           && request.resource.data.createdAt == resource.data.createdAt;
       }
 
-      // Discovery needs to read other people's profiles, so any signed-in user may read.
-      allow read: if isSignedIn();
+      // Owner only. Other people are discovered through discovery/{uid}, a
+      // projection holding just the public fields — email, birthdate, block
+      // lists, usage counters and learned affinities never leave the account.
+      allow read: if isOwner(uid);
 
       // Create: only your own document, and the embedded uid must match the doc id.
       allow create: if isOwner(uid)
@@ -156,6 +158,69 @@ service cloud.firestore {
       allow update: if isOwner(uid)
         && userDocOk(request.resource.data)
         && identityUnchanged();
+
+      // Delete: account deletion, owner only.
+      allow delete: if isOwner(uid);
+    }
+
+    // ---------------------------------------------------------------------------
+    // discovery/{uid} — the public projection of a profile
+    // ---------------------------------------------------------------------------
+    //
+    // The on-device matching engine needs to scan other people's profiles, so this
+    // collection is readable by any signed-in user — and therefore it may contain
+    // ONLY fields meant for other users. `hasOnly` guarantees a tampered client
+    // cannot smuggle private fields (email, birthdate, blocked, learning, usage)
+    // into the readable copy. The app writes it as a mirror of users/{uid} on
+    // every profile save, with coordinates rounded to ~1 km.
+    match /discovery/{uid} {
+
+      // The public subset of profile.* — same bounds as the private doc, but the
+      // key list is closed: no birthdate here, only the derived age.
+      function discoveryProfileOk(p) {
+        return p is map
+          && p.keys().hasOnly(['age', 'gender', 'pronouns', 'bio', 'photos', 'interests',
+                               'personality', 'location', 'showAge', 'showDistance'])
+          && (!('bio' in p) || (p.bio is string && p.bio.size() <= 500))
+          && (!('interests' in p) || (p.interests is list && p.interests.size() <= 12))
+          && (!('photos' in p) || (p.photos is list && p.photos.size() <= 6))
+          && (!('gender' in p) || p.gender in ['woman', 'man', 'nonbinary', 'other'])
+          && (!('pronouns' in p) || (p.pronouns is string && p.pronouns.size() <= 40))
+          && (!('age' in p) || p.age == null || (p.age is number && p.age >= 18 && p.age <= 120))
+          && (!('showAge' in p) || p.showAge is bool)
+          && (!('showDistance' in p) || p.showDistance is bool);
+      }
+
+      // The public subset of preferences.* — just the mutual discovery filters.
+      function discoveryPrefsOk(f) {
+        return f is map
+          && f.keys().hasOnly(['interestedIn', 'ageMin', 'ageMax', 'maxDistanceKm', 'discoverable'])
+          && (!('ageMin' in f) || (f.ageMin is number && f.ageMin >= 18 && f.ageMin <= 100))
+          && (!('ageMax' in f) || (f.ageMax is number && f.ageMax >= 18 && f.ageMax <= 100))
+          && (!('maxDistanceKm' in f) || (f.maxDistanceKm is number && f.maxDistanceKm >= 1 && f.maxDistanceKm <= 500))
+          && (!('interestedIn' in f) || (f.interestedIn is list && f.interestedIn.size() <= 4))
+          && (!('discoverable' in f) || f.discoverable is bool);
+      }
+
+      // The whole projection: a closed key list at the top level too.
+      function discoveryOk(d) {
+        return d.keys().hasOnly(['uid', 'displayName', 'profileComplete', 'lastActiveAt',
+                                 'profile', 'preferences'])
+          && d.uid == uid
+          && d.displayName is string && d.displayName.size() <= 60
+          && (!('profileComplete' in d) || d.profileComplete is bool)
+          && (!('lastActiveAt' in d) || d.lastActiveAt is string)
+          && (!('profile' in d) || discoveryProfileOk(d.profile))
+          && (!('preferences' in d) || discoveryPrefsOk(d.preferences));
+      }
+
+      // Read: any signed-in user — this is the discovery surface.
+      allow read: if isSignedIn();
+
+      // Write: only your own projection, only in the public shape. The partial
+      // lastActiveAt refresh must also stay inside the closed key list.
+      allow create: if isOwner(uid) && discoveryOk(request.resource.data);
+      allow update: if isOwner(uid) && discoveryOk(request.resource.data);
 
       // Delete: account deletion, owner only.
       allow delete: if isOwner(uid);
@@ -201,8 +266,11 @@ service cloud.firestore {
       // Never editable — a rewind deletes and re-creates instead.
       allow update: if false;
 
-      // Delete: only your own swipe (this is the rewind path).
-      allow delete: if isSignedIn() && resource.data.from == request.auth.uid;
+      // Delete: your own swipe (the rewind path), or a swipe aimed at you — an
+      // inbound like is data about you, and account deletion must be able to
+      // purge it.
+      allow delete: if isSignedIn()
+        && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid);
     }
 
     // ---------------------------------------------------------------------------
@@ -288,9 +356,14 @@ service cloud.firestore {
           && request.resource.data.text.size() <= 1000
           && request.resource.data.createdAt is string;
 
-        // Messages are never edited or deleted — the log is append-only so neither side
-        // can rewrite a conversation after the fact.
-        allow update, delete: if false;
+        // Messages are never edited, so neither side can rewrite what was said.
+        // Deletes are allowed to participants because unmatch and account
+        // deletion must purge the conversation before removing the parent match
+        // (a deleted match would strand its messages forever, unreadable but
+        // undeletable). The trade-off is deliberate: participants can remove
+        // messages, nobody can alter them.
+        allow update: if false;
+        allow delete: if isParticipant(matchId);
       }
     }
 
