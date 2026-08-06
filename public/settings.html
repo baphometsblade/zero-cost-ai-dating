@@ -1,69 +1,274 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Settings - Zero Cost AI Dating</title>
-    <link rel="stylesheet" href="css/style.css">
-    <link rel="stylesheet" href="css/components.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Settings for Zero Cost AI Dating: your account, who you see and who sees you, theme and notifications, connecting your own Firebase project, and the tools to export or delete your data.">
+  <title>Settings · Zero Cost AI Dating</title>
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/components.css">
 </head>
-<body>
-    <div class="container">
-        <header>
-            <h1>Settings</h1>
-        </header>
-        
-        <main>
-            <div class="settings-form">
-                <h2>Account Settings</h2>
-                
-                <div class="setting-group">
-                    <label for="email">Email</label>
-                    <input type="email" id="email" disabled>
-                </div>
-                
-                <div class="setting-group">
-                    <label for="display-name">Display Name</label>
-                    <input type="text" id="display-name" placeholder="Enter your display name">
-                </div>
-                
-                <div class="setting-group">
-                    <label for="age">Age</label>
-                    <input type="number" id="age" min="18" max="100" placeholder="Enter your age">
-                </div>
-                
-                <div class="setting-group">
-                    <label for="location">Location</label>
-                    <input type="text" id="location" placeholder="Enter your location">
-                </div>
-                
-                <div class="setting-group">
-                    <label for="bio">Bio</label>
-                    <textarea id="bio" placeholder="Tell us about yourself..."></textarea>
-                </div>
-                
-                <div class="setting-group">
-                    <h3>Preferences</h3>
-                    <div class="preference-item">
-                        <label for="notifications">Enable Notifications</label>
-                        <input type="checkbox" id="notifications">
-                    </div>
-                    <div class="preference-item">
-                        <label for="show-age">Show Age on Profile</label>
-                        <input type="checkbox" id="show-age">
-                    </div>
-                </div>
-                
-                <div class="button-group">
-                    <button type="button" id="save-settings">Save Changes</button>
-                    <button type="button" id="logout-btn">Logout</button>
-                </div>
+<body class="app-shell">
+  <main class="container" id="main">
+    <div class="stack-lg" id="settings-page">
+
+      <header class="page-head">
+        <h1 class="page-title">Settings</h1>
+        <p class="page-sub">
+          Who you see, who sees you, how the app looks, and where your data lives. Everything
+          on this page is stored on your profile document — nothing here is sent to an
+          advertising, analytics or AI service, because the app does not talk to one.
+        </p>
+      </header>
+
+      <noscript>
+        <p class="notice notice-warn">
+          This page needs JavaScript: your settings are read from and written to your profile
+          in the browser, so there is nothing to show without it.
+        </p>
+      </noscript>
+
+      <!-- 1. Account -------------------------------------------------------- -->
+      <section class="card" aria-labelledby="account-heading">
+        <div class="card-head">
+          <h2 id="account-heading">Account</h2>
+          <span class="badge" id="account-badge">Free</span>
+        </div>
+        <form class="card-body stack" id="account-form" novalidate>
+          <div class="field">
+            <label class="field-label" for="input-email">Email</label>
+            <input class="input" type="email" id="input-email" name="email" readonly aria-describedby="hint-email">
+            <p class="field-hint" id="hint-email">Your sign-in address. Changing it is not supported yet.</p>
+          </div>
+
+          <div class="field" id="field-name">
+            <label class="field-label" for="input-name">Display name</label>
+            <input class="input" type="text" id="input-name" name="displayName" maxlength="40" autocomplete="name" aria-describedby="hint-name error-name">
+            <p class="field-hint" id="hint-name">2–40 characters. This is the name on your cards and in your chats.</p>
+            <p class="field-error" id="error-name"></p>
+          </div>
+
+          <div class="spread">
+            <p class="field-hint" id="account-status" role="status" aria-live="polite"></p>
+            <button class="btn btn-primary" type="submit" id="save-account">Save account</button>
+          </div>
+        </form>
+        <div class="card-foot">
+          <p class="field-hint">
+            Photos, bio, interests and personality live on the <a href="profile.html">profile page</a>.
+            Your plan lives on the <a href="subscription.html">plans page</a>.
+          </p>
+        </div>
+      </section>
+
+      <!-- 2. Discovery preferences ------------------------------------------ -->
+      <section class="card" aria-labelledby="discovery-heading">
+        <div class="card-head">
+          <h2 id="discovery-heading">Discovery</h2>
+        </div>
+        <form class="card-body stack" id="discovery-form" novalidate>
+
+          <fieldset class="field" id="field-interested">
+            <legend class="field-label">Show me</legend>
+            <div class="stack stack-sm">
+              <label class="checkbox"><input type="checkbox" id="interested-woman" data-gender="woman"> Women</label>
+              <label class="checkbox"><input type="checkbox" id="interested-man" data-gender="man"> Men</label>
+              <label class="checkbox"><input type="checkbox" id="interested-nonbinary" data-gender="nonbinary"> Non-binary people</label>
+              <label class="checkbox"><input type="checkbox" id="interested-other" data-gender="other"> Everyone else</label>
             </div>
-        </main>
+            <p class="field-hint">
+              This filter is mutual: you only see people whose own “show me” list includes your gender.
+            </p>
+            <p class="field-error" id="error-interested"></p>
+          </fieldset>
+
+          <div class="field">
+            <span class="field-label" id="age-label">Age range</span>
+            <output class="field-hint" id="age-value" for="age-min age-max">18 to 100</output>
+            <label class="sr-only" for="age-min">Youngest age to show</label>
+            <input class="range" type="range" id="age-min" min="18" max="100" step="1" value="18" aria-describedby="age-value">
+            <label class="sr-only" for="age-max">Oldest age to show</label>
+            <input class="range" type="range" id="age-max" min="18" max="100" step="1" value="100" aria-describedby="age-value">
+            <p class="field-hint">
+              Two handles: the top slider sets the youngest age, the bottom one the oldest. They
+              cannot cross. This filter is mutual too — your age has to fit inside their range.
+            </p>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="distance">Maximum distance</label>
+            <output class="field-hint" id="distance-value" for="distance">Anywhere</output>
+            <input class="range" type="range" id="distance" min="1" max="500" step="1" value="500" aria-describedby="distance-value">
+            <p class="field-hint">
+              At the far right this reads “Anywhere” and distance stops ruling anyone out. People
+              without a location on their profile are never filtered out by distance.
+            </p>
+          </div>
+
+          <div class="field">
+            <label class="switch"><input type="checkbox" id="switch-discoverable"> <span>Show me in other people’s decks</span></label>
+            <p class="field-hint">
+              Turn this off to disappear from discovery. Your existing matches and conversations
+              stay exactly where they are.
+            </p>
+          </div>
+
+          <div class="spread">
+            <p class="field-hint" id="discovery-status" role="status" aria-live="polite"></p>
+            <button class="btn btn-primary" type="submit" id="save-discovery">Save preferences</button>
+          </div>
+        </form>
+      </section>
+
+      <!-- 3. Appearance and notifications ----------------------------------- -->
+      <section class="card" aria-labelledby="appearance-heading">
+        <div class="card-head">
+          <h2 id="appearance-heading">Appearance &amp; notifications</h2>
+        </div>
+        <div class="card-body stack">
+
+          <fieldset class="field" id="field-theme">
+            <legend class="field-label">Theme</legend>
+            <div class="chip-group" id="theme-group">
+              <label class="chip" for="theme-system"><input type="radio" name="theme" value="system" id="theme-system"> System</label>
+              <label class="chip" for="theme-light"><input type="radio" name="theme" value="light" id="theme-light"> Light</label>
+              <label class="chip" for="theme-dark"><input type="radio" name="theme" value="dark" id="theme-dark"> Dark</label>
+            </div>
+            <p class="field-hint">Applies the moment you choose it, and saves itself. “System” follows your device setting.</p>
+          </fieldset>
+
+          <hr class="divider">
+
+          <div class="field">
+            <label class="switch"><input type="checkbox" id="switch-notifications"> <span>In-app notifications</span></label>
+            <p class="field-hint">
+              Controls the in-app messages this browser shows you. There is no push service and no
+              email service behind it — with no server there is nothing to send them from.
+            </p>
+          </div>
+
+          <p class="field-hint" id="appearance-status" role="status" aria-live="polite"></p>
+        </div>
+      </section>
+
+      <!-- 4. Bring your own Firebase project --------------------------------- -->
+      <section class="card" aria-labelledby="firebase-heading">
+        <div class="card-head">
+          <h2 id="firebase-heading">Connect your own Firebase project</h2>
+        </div>
+        <form class="card-body stack" id="firebase-form" novalidate>
+          <p class="notice notice-info" id="firebase-mode" role="status" aria-live="polite">Checking which mode this browser is in…</p>
+
+          <p class="field-hint">
+            Paste the web config from your Firebase console (Project settings → Your apps → Config)
+            as JSON. It is saved in this browser only, under the localStorage key
+            <code>zc.firebaseConfig</code>, and the app reads it on the next load — so you can leave
+            demo mode without editing a single file.
+          </p>
+
+          <div class="field" id="field-firebase">
+            <label class="field-label" for="firebase-config">Firebase config JSON</label>
+            <textarea class="textarea" id="firebase-config" name="firebaseConfig" rows="9" spellcheck="false" autocapitalize="none" aria-describedby="hint-firebase error-firebase"></textarea>
+            <p class="field-hint" id="hint-firebase">
+              Needs apiKey, authDomain, projectId and appId; storageBucket and messagingSenderId are
+              optional. Quote every key and value, JSON-style.
+            </p>
+            <p class="field-error" id="error-firebase"></p>
+          </div>
+
+          <div class="row">
+            <button class="btn btn-primary" type="submit" id="save-firebase">Save and reload</button>
+            <button class="btn btn-ghost" type="button" id="reset-firebase">Reset to demo mode</button>
+          </div>
+        </form>
+        <div class="card-foot">
+          <p class="field-hint">
+            A Firebase web config is not a secret — it identifies your project, it does not authorise
+            anything. What protects your data is the Firestore rules shipped in this repository.
+          </p>
+        </div>
+      </section>
+
+      <!-- 5. Data and account removal ---------------------------------------- -->
+      <section class="card danger-zone" aria-labelledby="danger-heading">
+        <div class="card-head">
+          <h2 id="danger-heading">Your data</h2>
+        </div>
+        <div class="card-body stack">
+
+          <div class="spread">
+            <div class="stack stack-sm">
+              <strong>Export my data</strong>
+              <p class="field-hint">
+                Downloads a JSON file with your profile, your swipes, your matches and your messages.
+                Other people's profiles are reduced to a name and an id — this is your export, not theirs.
+              </p>
+            </div>
+            <button class="btn btn-secondary" type="button" id="export-data">Download JSON</button>
+          </div>
+
+          <!-- Demo mode only: settings.js reveals this block. -->
+          <div class="stack hidden" id="demo-tools">
+            <hr class="divider">
+            <div class="spread">
+              <div class="stack stack-sm">
+                <strong>Reset the demo data</strong>
+                <p class="field-hint">
+                  Wipes the browser database and re-seeds the bundled sample profiles. Your swipes,
+                  matches and messages go with it. Handy when you have swiped through everyone.
+                </p>
+              </div>
+              <button class="btn btn-secondary" type="button" id="reset-demo">Reset demo data</button>
+            </div>
+          </div>
+
+          <hr class="divider">
+
+          <div class="spread">
+            <div class="stack stack-sm">
+              <strong>Sign out</strong>
+              <p class="field-hint" id="signout-hint">Ends the session in this browser.</p>
+            </div>
+            <button class="btn btn-secondary" type="button" data-signout>Sign out</button>
+          </div>
+
+          <hr class="divider">
+
+          <div class="stack stack-sm">
+            <strong>Delete my account</strong>
+            <p class="field-hint">
+              Removes your profile document, every swipe you have made and every match you are part
+              of, along with those conversations. This is permanent and there is no undo.
+            </p>
+            <div class="field" id="field-delete">
+              <label class="field-label" for="delete-confirm">Type DELETE to confirm</label>
+              <input class="input" type="text" id="delete-confirm" autocomplete="off" spellcheck="false" autocapitalize="characters" aria-describedby="hint-delete error-delete">
+              <p class="field-hint" id="hint-delete">The button below stays disabled until this box reads exactly DELETE.</p>
+              <p class="field-error" id="error-delete"></p>
+            </div>
+            <div class="row">
+              <button class="btn btn-danger" type="button" id="delete-account" disabled>Delete my account</button>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
     </div>
-    
-    <script src="js/firebase-config.js"></script>
-    <script src="js/auth.js"></script>
-    <script src="js/settings.js"></script>
+  </main>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js" crossorigin="anonymous"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js" crossorigin="anonymous"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js" crossorigin="anonymous"></script>
+  <script src="js/firebase-config.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/seed-data.js"></script>
+  <script src="js/data-store.js"></script>
+  <script src="js/matching-engine.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/app.js"></script>
+  <script src="js/settings.js"></script>
 </body>
 </html>

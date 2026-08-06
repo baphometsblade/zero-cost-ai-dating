@@ -1,0 +1,273 @@
+# Deploying to Firebase (free tier)
+
+Going from demo mode to a real, hosted app with accounts and a shared database. Every step
+below stays on the **Spark (free) plan** — no billing account is required at any point, and
+nothing in this repo will ask for one.
+
+Budget about fifteen minutes, most of which is waiting for Firestore indexes to build.
+
+---
+
+## Before you start
+
+| You need | Notes |
+| --- | --- |
+| A Google account | Any account can create Firebase projects. |
+| Node.js ≥ 18 | Only for the Firebase CLI and the tests. The app itself needs nothing. |
+| The Firebase CLI | `npm install -g firebase-tools`, then `firebase login`. |
+
+You do **not** need to run `npm install` in this repo. It has zero dependencies.
+
+---
+
+## 1. Create the project
+
+1. Open the [Firebase console](https://console.firebase.google.com/) → **Add project**.
+2. Name it (for example `zero-cost-ai-dating`). The project id it generates is what you will
+   use later — write it down.
+3. Google Analytics is optional and unnecessary here; skipping it keeps the project simpler.
+4. When the project is ready, confirm the plan badge in the sidebar says **Spark**. Do not
+   upgrade. Nothing in this app requires Blaze.
+
+---
+
+## 2. Register a web app and copy the config
+
+1. Project overview → the **`</>`** (Web) icon → give the app a nickname.
+2. **Do not** tick "Also set up Firebase Hosting" here; the CLI does that in step 6 with the
+   `firebase.json` already in this repo.
+3. Copy the `firebaseConfig` object it shows you. It looks like:
+
+```js
+{
+  apiKey: "AIzaSy…",
+  authDomain: "your-project.firebaseapp.com",
+  projectId: "your-project",
+  storageBucket: "your-project.appspot.com",
+  messagingSenderId: "123456789012",
+  appId: "1:123456789012:web:abc123"
+}
+```
+
+This is **not a secret**. It identifies your project; it authorises nothing. Access control
+lives entirely in `firestore.rules`, which is why step 5 matters more than this one.
+
+---
+
+## 3. Enable Authentication
+
+Build → **Authentication** → *Get started*, then under **Sign-in method**:
+
+1. Enable **Email/Password**. Leave "Email link (passwordless sign-in)" off — the app does not
+   use it.
+2. Enable **Google**. It asks for a public-facing name and a support email; both are required
+   by Google, not by this app. If you skip Google sign-in, the button simply stays hidden in
+   demo mode and errors politely otherwise — but enabling it takes twenty seconds.
+3. Under **Settings → Authorized domains**, confirm `localhost`,
+   `your-project.web.app` and `your-project.firebaseapp.com` are listed. Add any custom domain
+   you plan to use later, or Google sign-in will fail there with `auth/unauthorized-domain`.
+
+Optional but recommended: **Settings → User actions → Enable email enumeration protection.**
+The app's error messages are already written to avoid confirming whether an address exists.
+
+---
+
+## 4. Create the Firestore database
+
+Build → **Firestore Database** → *Create database*.
+
+1. Choose **Production mode**. The permissive test-mode rules expire in 30 days and would be
+   replaced by this repo's rules in step 6 anyway.
+2. Pick a location close to your users. **This cannot be changed later.**
+3. Ignore the "Storage" product entirely. This app never uses it, and `firebase.json`
+   deliberately contains no `storage` block — adding one breaks deploys on projects that have
+   not enabled it.
+
+---
+
+## 5. Read the rules before you ship them
+
+Open [`firestore.rules`](../firestore.rules). It is the only server-side security this app
+has, so it is worth the five minutes:
+
+- `users/{uid}` — readable by any signed-in user (discovery needs that), writable only by the
+  owner. Writes are validated: `plan` must be `free` or `premium`, `profile.bio` ≤ 500 chars,
+  `profile.interests` ≤ 12, `profile.photos` ≤ 6, `preferences.ageMin ≥ 18`, `ageMax ≤ 100`,
+  `ageMin ≤ ageMax`, and `uid` / `email` / `createdAt` are immutable after creation.
+- `swipes/{swipeId}` — create only when you are the `from` user **and** the document id is
+  exactly `from_to`. Read and delete your own only. No updates.
+- `matches/{matchId}` — read and update only if you are one of the two `users`; create only
+  with `users.size() == 2`, yourself among them, and an id equal to the sorted join.
+- `matches/{matchId}/messages/{msgId}` — read if you participate in the parent match; create
+  only as yourself with 1–1000 characters of text. No update, no delete.
+- Everything else: denied.
+
+If you change the data model, change these rules in the same commit. They are not decoration —
+they are the reason a client-only app can be shared with strangers at all.
+
+---
+
+## 6. Point the CLI at your project and deploy
+
+From the repo root:
+
+```bash
+firebase login
+firebase use --add          # pick your project, alias it "default"
+```
+
+`firebase use --add` rewrites `.firebaserc` for you; you can also edit it by hand:
+
+```json
+{ "projects": { "default": "your-project-id" } }
+```
+
+Then:
+
+```bash
+npm test                    # 3 suites, no install required
+npm run deploy              # firebase deploy --only hosting,firestore
+```
+
+That single command uploads `public/`, publishes `firestore.rules`, and creates the composite
+indexes from `firestore.indexes.json`. **Index builds take a few minutes** and the app will
+throw `failed-precondition` errors on Discover until they finish — the console's Firestore →
+Indexes tab shows the progress.
+
+Useful narrower commands while iterating:
+
+```bash
+firebase deploy --only hosting            # markup, CSS, JS
+firebase deploy --only firestore:rules    # rules only, near-instant
+firebase deploy --only firestore:indexes  # indexes only
+firebase hosting:channel:deploy preview   # a temporary preview URL, free
+```
+
+---
+
+## 7. Wire the app to your project
+
+The deployed site still boots in demo mode until it has a real config. Two ways to fix that,
+and you can use either:
+
+**Option A — from the app, no code change.** Open the deployed site → **Settings** → *Connect
+your own Firebase project* → paste the config object from step 2 → Save. It is validated,
+stored in `localStorage['zc.firebaseConfig']`, and applies on reload. This is per-browser: it
+is the right choice for trying things out, and the wrong choice for a site other people will
+visit.
+
+**Option B — in the file, for everyone.** Edit `BAKED_CONFIG` in
+[`public/js/firebase-config.js`](../public/js/firebase-config.js), replacing the six
+placeholder values, then `firebase deploy --only hosting`. Every visitor now gets Firebase
+mode.
+
+A stored override always wins over the baked-in values, so if a browser looks stuck in the
+wrong mode after option B, clear it with **Reset to demo mode** on that settings panel.
+
+---
+
+## 8. Verify
+
+1. Open `https://your-project.web.app`.
+2. Open devtools. You should see exactly one line like
+   `[zero-cost-ai-dating v1.0.0] Firebase mode — project "your-project"`. If it says
+   `Demo mode`, the config did not take — see Troubleshooting.
+3. Create an account. In the console, Firestore → Data should now show `users/{uid}` with the
+   full document shape from [ARCHITECTURE.md](ARCHITECTURE.md#4-data-model).
+4. Complete the profile, then open Discover. On a brand-new project the deck will be empty —
+   that is correct, and step 9 explains why.
+5. Check that navigating to `/dashboard.html` lands on `/dashboard`. `cleanUrls: true` in
+   `firebase.json` makes Hosting redirect the extension away; the in-app links use the `.html`
+   form so they also work from a plain local file server.
+
+---
+
+## 9. Seeding: what is and is not possible
+
+**In demo mode**, seeding is automatic. The 32 profiles in `seed/profiles.json` are written to
+`localStorage` on first run, with each `lastActiveOffsetHours` converted to a timestamp
+relative to *now*, so the cast never looks stale.
+
+**In Firebase mode, there is deliberately no seeding path from the browser** — and that is the
+rules doing their job. `firestore.rules` only lets a signed-in user write their own
+`users/{uid}` document, so a client cannot bulk-create 32 fictional people. Any of these work
+instead:
+
+1. **Just use real accounts.** Sign up a few times (incognito windows, or `+1` addresses on a
+   Gmail account) and fill in the profiles. Slow, but it is the honest shape of the product.
+2. **Import the seed with admin credentials, outside this repo.** A short script using
+   `firebase-admin` and a service-account key bypasses rules by design. That means an
+   `npm install` and a downloaded private key, which is why it is not shipped here — keep it in
+   a separate throwaway directory and never commit the key.
+3. **Use the console.** Firestore → Data lets you add documents by hand. Fine for two or three
+   profiles, painful for thirty.
+4. **Temporarily relax the rules.** Possible; also the easiest way to end up with an open
+   database. If you do it, do it on a throwaway project, and re-deploy the real rules the
+   moment you are done.
+
+For demos and screenshots, demo mode is genuinely the better tool: it is fully featured,
+instant, and cannot leak anything.
+
+---
+
+## 10. Optional: a custom domain
+
+Hosting → **Add custom domain**, follow the DNS instructions, and wait for the certificate
+(usually under an hour). Then go back to **Authentication → Settings → Authorized domains** and
+add the new domain, or Google sign-in will fail on it.
+
+Custom domains and their TLS certificates are included on the Spark plan.
+
+---
+
+## 11. Staying at $0
+
+The Spark plan's relevant free quotas:
+
+| Resource | Free allowance |
+| --- | --- |
+| Hosting storage | 10 GB |
+| Hosting transfer | 360 MB/day |
+| Firestore document reads | 50,000/day |
+| Firestore writes / deletes | 20,000 / 20,000 per day |
+| Firestore stored data | 1 GiB |
+| Authentication (email + Google) | Unlimited |
+
+The site is a few hundred kilobytes and a deck load costs roughly one read per candidate, so a
+small deployment sits far inside these limits. More importantly: **on Spark, exceeding a quota
+stops the operation rather than billing you.** There is no card on file and no way for this
+project to generate a charge, because the two products that can — Functions and Storage — are
+never enabled.
+
+If you ever do upgrade to Blaze for unrelated reasons, set a budget alert first.
+
+---
+
+## 12. Troubleshooting
+
+| Symptom | Cause and fix |
+| --- | --- |
+| Console says `Demo mode` after deploying | The config never took. Check `BAKED_CONFIG` in `firebase-config.js` for leftover `your-…` values, or clear a stale `localStorage['zc.firebaseConfig']` with Settings → *Reset to demo mode*. |
+| `Refused to load … Content Security Policy` | Something added an inline `<script>`, a `style="…"` attribute, or a third-party script. Run `npm test`; `tests/static.test.js` names the file and line. |
+| `auth/unauthorized-domain` on Google sign-in | Add the domain under Authentication → Settings → Authorized domains. |
+| `auth/operation-not-allowed` | The provider is not enabled in the console (step 3). |
+| Discover errors with `failed-precondition` and a console link | A composite index is still building, or was never deployed. Run `firebase deploy --only firestore:indexes` and wait. |
+| `permission-denied` on a write | The rules rejected it. Check the field limits in step 5 — an over-long bio or a 13th interest is the usual culprit. |
+| Everything works locally but not deployed | `npm run serve` bypasses `firebase.json` entirely, so headers and `cleanUrls` only exist in production. Use `firebase hosting:channel:deploy preview` to test the real configuration for free. |
+| Rules changes seem to have no effect | Rules deploy separately from hosting: `firebase deploy --only firestore:rules`. |
+
+---
+
+## 13. Rolling back and tearing down
+
+- **Hosting rollback:** Hosting → *Release history* → the ⋮ menu on any previous release →
+  *Rollback*. Instant, free, and it does not touch data.
+- **Rules rollback:** Firestore → Rules → *History* shows every published version with a
+  restore button.
+- **Delete everything:** Project settings → General → *Delete project*. Because nothing here
+  is billed, an abandoned project simply sits idle — but deleting is tidier.
+
+---
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit together, and the
+[README](../README.md#limitations) for what this deployment can and cannot enforce.

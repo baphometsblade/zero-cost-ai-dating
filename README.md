@@ -1,2 +1,316 @@
-# zero-cost-ai-dating
-Firebase-hosted Tinder-style AI dating app with zero cost features
+# Zero Cost AI Dating
+
+**Dating that actually explains itself.**
+
+A Tinder-style dating app where the matching is done by a real, inspectable ranking engine
+that runs **on your device** — no model API, no inference bill, no data leaving the browser
+to be scored. Every card in the deck arrives with a compatibility number *and* the reasons
+behind it: which interests you share, how your personalities line up, how far away they are,
+which words your two bios have in common.
+
+It is built to run on Firebase's **free Spark plan forever**: static hosting, Firestore, and
+Authentication. No Cloud Functions, no Cloud Storage, no server of any kind. And if you have
+no Firebase project at all, it still runs — the whole app falls back to `localStorage` with a
+bundled cast of 32 profiles, so you can try it in about thirty seconds.
+
+---
+
+## Why "explainable" is the whole point
+
+Most dating apps show you a person and a silence. This one shows you a person and its
+reasoning:
+
+> **78.4%** · Strong match
+> ✨ You both love Hiking, Live music and Cooking
+> 🧭 Very similar outlook — you match closely on warmth and openness
+> 📍 Just 12 km away
+
+Those lines are not decoration. They are generated from the same numbers that produced the
+score, by the same function, in the same pass. If the engine cannot justify a match, it does
+not claim one. The scoring code is roughly 1,250 lines of pure functions in
+[`public/js/matching-engine.js`](public/js/matching-engine.js) — you can read the entire
+thing, and its test suite asserts the behaviour rather than trusting it.
+
+---
+
+## Run it in 30 seconds
+
+```bash
+git clone https://github.com/<you>/zero-cost-ai-dating.git
+cd zero-cost-ai-dating
+npm run serve            # static server on http://localhost:5000
+```
+
+Then open <http://localhost:5000> and click **“Try the demo — no signup.”**
+
+There is nothing to install. The project has **zero runtime dependencies and zero dev
+dependencies** — `npm install` is not part of the workflow, and `npm run serve` is just
+`python3 -m http.server 5000 --directory public`. Any static file server works just as well;
+`public/` is the whole site.
+
+With no Firebase config present the app boots in **demo mode**: 32 seeded profiles across
+eleven US cities, a real swipe deck, real matching, real matches and chat — all persisted in
+`localStorage`. Sign-up, sign-in, likes, limits, premium gating and the "who liked you" list
+all work. Nothing is sent anywhere.
+
+---
+
+## What you get
+
+| Screen | What it does |
+| --- | --- |
+| **Landing** (`index.html`) | The pitch, a feature grid, a 3-step explainer, an FAQ, and a one-click demo entry. |
+| **Auth** (`auth.html`) | Email/password sign-in and sign-up with inline validation and a password strength meter, Google sign-in when Firebase is live, password reset, demo account entry. |
+| **Discover** (`dashboard.html`) | The deck. Pointer-driven swiping with rotation, stamps and velocity commit — plus a complete keyboard equivalent (`←` pass, `→` like, `↑` super like, `z` rewind, `i` details, `?` shortcuts). Compatibility ring, up to three reasons per card, daily limits with a countdown, match celebration with generated icebreakers. |
+| **Profile** (`profile.html`) | Bio with counter, 48 interest chips grouped by category, five personality sliders, 18+ birthdate guard, city picker or `navigator.geolocation`, up to six photo URLs, a live preview of your own card, and a completeness meter. |
+| **Matches** (`matches.html`) | New-matches strip, conversation list with unread dots, live chat with day separators, icebreaker suggestions on empty threads, unmatch/block, and the premium "who liked you" list. |
+| **Settings** (`settings.html`) | Discovery preferences, theme, notifications, **connect your own Firebase project** (paste a config, no code edits), data export, demo reset, account deletion. |
+| **Plans** (`subscription.html`) | An honest, non-deceptive plan comparison. Premium is a **local simulation** — see [Limitations](#limitations). |
+
+Everything is mobile-first, works in light and dark, respects `prefers-reduced-motion`, and
+is fully operable from the keyboard.
+
+---
+
+## How the matching engine works
+
+No network calls, no model weights, no randomness. Given the same two profiles and the same
+`now`, it returns the same score forever.
+
+### 1. Build a corpus
+
+Every visible bio is tokenised — lowercased, diacritics stripped, split on non-alphanumerics,
+stopwords removed, lightly stemmed (`ies→y`, `sses→ss`, trailing `s`, `ing`/`ed`) — and an
+inverse document frequency table is built: `idf = ln((docCount + 1) / (df + 1)) + 1`. This is
+classic TF‑IDF, which is exactly the right tool here: it is cheap, it is deterministic, and it
+naturally down-weights the words every dating bio contains.
+
+### 2. Apply hard filters
+
+Cheap, absolute, and evaluated in order — first hit wins and the candidate is dropped:
+
+`self` → `blocked` → `swiped` → `not-discoverable` → `incomplete` → `gender` → `age` → `distance`
+
+Gender and age are **mutual**: they have to want your gender *and* you have to want theirs;
+you must be in their age range *and* they in yours. A missing location never hard-fails — it
+scores neutrally instead of quietly deleting people who have not set one.
+
+### 3. Score seven components, each 0–1
+
+| Component | Weight | How it is computed |
+| --- | ---: | --- |
+| `interests` | **0.28** | Weighted Jaccard over interest slugs plus a category bonus: `0.75 × (\|A∩B\| / \|A∪B\|) + 0.25 × catBonus` |
+| `personality` | **0.22** | Five axes, weighted. Openness, warmth and reliability reward similarity; social energy tolerates a 25-point gap; emotional steadiness rewards both similarity *and* height |
+| `bio` | **0.16** | Cosine similarity of the two TF‑IDF vectors |
+| `distance` | **0.14** | `1 − (km / cap)^1.5`, where `cap = min(yourMax, theirMax, 500)` |
+| `age` | **0.08** | `1 − min(1, \|Δyears\| / 20)` |
+| `affinity` | **0.07** | Learned taste: the mean affinity you have shown toward this candidate's tags |
+| `activity` | **0.05** | `1 / (1 + daysSinceActive / 7)` |
+
+`score = 100 × Σ(weight × component)`, rounded to one decimal.
+
+The `affinity` term is premium-only (adaptive weighting). When it is off, the engine does not
+score it as `0` — it **drops the term and renormalises the remaining weights to sum to 1**, so
+a free-plan user is never silently penalised for not having the feature.
+
+### 4. A worked example
+
+Ada (31, Portland) is looking at Bo (34, Vancouver WA). Ada is on the free plan, so `affinity`
+is dropped and the other six weights are rescaled by `1 / 0.93`.
+
+```
+                component    weight    contribution
+interests         0.446       0.3011      0.1344     3 shared of 7, 4 shared categories
+bio               0.134       0.1720      0.0230     shared tokens: "cook", "record"
+personality       0.931       0.2366      0.2202     warmth 0.96, openness 0.92
+distance          0.911       0.1505      0.1371     12.0 km, cap 60 km
+age               0.850       0.0860      0.0731     3 years apart
+activity          0.903       0.0538      0.0486     last seen 18 hours ago
+                                        ────────
+                                          0.6364  ->  63.6
+```
+
+Which the engine renders as:
+
+```
+63.6% · Good match
+🧭 Very similar outlook — you match closely on warmth and openness
+📍 Just 12 km away
+✨ You both love Hiking, Live music and Cooking
+🎂 Only 3 years apart
+```
+
+Note what did *not* appear: the bio component scored 0.134, below the 0.15 threshold, so no
+"your bios both mention…" line was claimed. Reasons are emitted from evidence or not at all.
+
+### 5. It learns, gently
+
+Every swipe nudges a small map of per-tag affinities (`lr = 0.15`, super likes 1.5×, passes
+push down more softly than likes push up). Values are clamped to `[-1, 1]`, rounded to four
+decimals, pruned below `|0.01|` and capped at 60 entries so the user document stays tiny. It
+is a bag of scalars, not a model — which is precisely why it costs nothing to run and can be
+explained in a sentence.
+
+### 6. Icebreakers
+
+Template-based and deterministic: shared interests first, then shared bio tokens, then a
+shared city, then a personality-flavoured generic. A template with an unfilled placeholder is
+never emitted — if there is nothing specific to say, you get a good generic opener instead.
+
+---
+
+## The zero-cost architecture
+
+| Constraint | Consequence |
+| --- | --- |
+| Firebase **Spark (free)** plan only | **No Cloud Functions.** All logic is client-side. |
+| No paid LLM/embedding API | Matching is a local, deterministic engine (TF‑IDF + cosine + vector compatibility). There is no `fetch` to any AI provider, ever. |
+| No Cloud Storage (needs Blaze on new projects) | Photos are deterministic generated SVG avatars plus optional user-supplied external image URLs. No uploads. |
+| No build step at runtime | Plain classic `<script>` tags. No bundler, no npm runtime deps. Node is dev-only, for tests and the seed export. |
+| Must be demoable with zero setup | **Demo mode**: if Firebase is not configured or not reachable, the entire app runs off `localStorage`, seeded from bundled profiles. |
+
+The practical upshot: the free Spark tier's 10 GB/month of hosting bandwidth and 50k/20k daily
+Firestore reads/writes are far more than a project of this size will use, and there is no
+resource in the stack that can bill you by surprise, because none of them are enabled.
+
+---
+
+## Connecting your own Firebase project
+
+Two ways, neither of which requires a rebuild:
+
+1. **From the app.** Settings → *Connect your own Firebase project* → paste the config object
+   from the Firebase console. It is validated, stored in `localStorage['zc.firebaseConfig']`,
+   and takes effect on reload. There is a Reset button that puts you back in demo mode.
+2. **In the file.** Replace the placeholder values in
+   [`public/js/firebase-config.js`](public/js/firebase-config.js) and deploy.
+
+The app decides its mode at load: a placeholder-looking `apiKey`, an absent `firebase` global
+(offline, blocked, ad-blocker), or any throw from `initializeApp` all land you in demo mode
+with a single `console.info` line saying so. That fallback is a supported, tested path — never
+an error dialog.
+
+Full walkthrough: **[docs/DEPLOY.md](docs/DEPLOY.md)**.
+How the pieces fit together: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+
+---
+
+## Tests
+
+```bash
+npm test          # node --test   (no dependencies, no install)
+npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.json
+```
+
+Three suites, all on Node's built-in runner:
+
+| Suite | What it pins down |
+| --- | --- |
+| `tests/matching-engine.test.js` | Every hard filter including the mutual gender/age cases, the neutral missing-location path, score bounds, determinism, tokeniser and cosine behaviour, learning clamp/prune/cap, ranking tie-breaks, weight renormalisation, and a golden end-to-end score. |
+| `tests/seed.test.js` | The shape of all 32 seeded profiles against the data model, unique uids and emails, valid interest slugs, ages consistent with birthdates, and `seed-data.js` being in sync with `seed/profiles.json`. |
+| `tests/static.test.js` | Parses every HTML page: no dead local `src`/`href`, correct script load order, no inline scripts / `style=` / `on*=` handlers (the CSP would block them), no class token that the CSS does not define, and `lang` + `title` + viewport + description on every page. |
+
+CI (`.github/workflows/ci.yml`) runs exactly those two commands on every push and pull
+request, across a Node 20 and Node 22 matrix (`fail-fast: false`, so one version failing
+still reports the other). Two majors are deliberate: pinning a single one once hid a real
+breakage, because the test runner stopped matching a positional `tests/` directory
+argument after Node 20 and `npm test` silently ran nothing on newer runtimes. There are no
+secrets and no deploy step — deploying stays a deliberate local `npm run deploy`.
+
+---
+
+## Project layout
+
+```
+.
+├── public/                  # the entire deployed site
+│   ├── index.html           # landing
+│   ├── auth.html            # sign in / create account
+│   ├── dashboard.html       # the swipe deck
+│   ├── profile.html         # profile editor + live preview
+│   ├── matches.html         # match list + chat
+│   ├── settings.html        # preferences, Firebase config, danger zone
+│   ├── subscription.html    # plan comparison (simulated premium)
+│   ├── 404.html
+│   ├── css/
+│   │   ├── style.css        # design tokens, layout, forms, buttons
+│   │   └── components.css   # deck, chat, plans, overlays
+│   └── js/
+│       ├── firebase-config.js   # ZC.config / ZC.firebase — decides demo vs firebase
+│       ├── utils.js             # ZC.util / ZC.ui — DOM, avatars, toasts, modals
+│       ├── seed-data.js         # generated: ZC.SEED_PROFILES, ZC.INTEREST_TAGS
+│       ├── data-store.js        # ZC.store — one API over Firestore *or* localStorage
+│       ├── matching-engine.js   # ZC.matching — the ranking engine (also a Node module)
+│       ├── auth.js              # ZC.auth — sessions, guards, humanised errors
+│       ├── app.js               # ZC.app — nav, theme, toasts, badges
+│       └── <page>.js            # one controller per page
+├── seed/profiles.json       # source of truth for the demo cast
+├── scripts/build-seed.js    # regenerates public/js/seed-data.js
+├── tests/                   # node:test suites
+├── docs/                    # architecture + deployment
+├── firebase.json            # hosting, headers, CSP
+├── firestore.rules          # the actual security boundary
+└── firestore.indexes.json
+```
+
+---
+
+## Security notes
+
+- **Firestore rules are the real boundary.** [`firestore.rules`](firestore.rules) validates
+  writes against the data model: only the owner writes their user document; `uid`, `email` and
+  `createdAt` are immutable after creation; bios are capped at 500 characters, interests at 12,
+  photos at 6; a swipe can only be created by its `from` user and its document id must be
+  `from_to`; matches are readable only by their two participants; messages require
+  participation and `from == request.auth.uid`. Everything else is denied by default.
+- **Strict CSP.** `firebase.json` ships
+  `script-src 'self' https://www.gstatic.com https://apis.google.com`, `object-src 'none'`,
+  `frame-ancestors 'none'` and friends. Consequently there is not one inline `<script>` or
+  `style="…"` attribute in the codebase — styles that must be dynamic are set through the
+  CSSOM — and `tests/static.test.js` fails the build if one appears.
+- **No `innerHTML` with user data.** Every bio, name, message and location label is inserted
+  with `textContent` (via `ZC.util.el({ text })`). Photo URLs are restricted to `https://`.
+- **The Firebase web API key is not a secret.** It identifies your project; it does not
+  authorise anything. Access control lives in the rules file, which is why that file is worth
+  reading before you deploy.
+- **Geolocation is opt-in and degradable.** `Permissions-Policy` limits it to same-origin, and
+  a denied prompt just leaves you picking a city from a list.
+- **Demo credentials never leave the browser.** They are salted and SHA-256 hashed via
+  `crypto.subtle` — which is a demo affordance, not a security design. See below.
+
+---
+
+## Limitations
+
+These are real, and worth knowing before you show this to anyone:
+
+- **Client-side gating is only as strong as the Firestore rules.** Daily like limits, premium
+  features and rewinds are enforced in the browser because the free plan has no server to
+  enforce them on. A determined user with devtools can bypass any of it. The rules stop data
+  *corruption* and cross-user reads; they do not — and on Spark cannot — implement rate limits
+  or entitlement checks.
+- **Premium is simulated. No payment is processed.** The subscription page flips a `plan`
+  field on your own user document after an explicit confirmation that says so. It exists so
+  the gating logic can be exercised, not to sell anything. There is no payment provider, no
+  charge, and nothing to cancel.
+- **Demo auth is not real security.** In demo mode, accounts and salted password hashes live in
+  `localStorage` on the device. Anyone with access to the browser has access to the account.
+  It is a way to try the app without a backend, nothing more. Real security starts when you
+  connect Firebase Authentication.
+- **No photo uploads.** Cloud Storage requires the Blaze plan on new projects, so profiles use
+  deterministic generated SVG avatars, or `https://` URLs you paste yourself. Those URLs are
+  not proxied, scanned or moderated.
+- **Discovery loads a candidate page and ranks it in the browser.** That is fine for a deck of
+  tens or low hundreds of profiles and would need a server-side pre-filter well before it was
+  a real product. The engine is honest about this: `listCandidates` takes a `limit`.
+- **No moderation, reporting queue, or abuse tooling.** There is block and unmatch, and that
+  is the extent of it.
+- **The "AI" is classical ML, deliberately.** TF‑IDF, cosine similarity, weighted vector
+  distance and a per-tag affinity table. It is explainable and free precisely because it is not
+  a neural model, and it will not understand a bio the way a language model would.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE). The profiles in `seed/profiles.json` are fictional.

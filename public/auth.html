@@ -1,18 +1,132 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Authentication - Zero Cost AI Dating</title>
-    <link rel="stylesheet" href="css/style.css">
-    <link rel="stylesheet" href="css/components.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Sign in or create an account for Zero Cost AI Dating — explainable matching that runs entirely on your device.">
+  <title>Sign in · Zero Cost AI Dating</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/components.css">
 </head>
-<body>
-    <div id="auth-container">
-        <!-- Authentication forms will be loaded here -->
+<body class="app-shell">
+  <main class="container" id="main">
+    <!-- auth.js narrows this column via CSSOM; inline styles are CSP-blocked. -->
+    <div class="stack-lg" id="auth-page" data-auth-page>
+
+      <header class="page-head text-center">
+        <p class="center"><a class="nav-brand" href="index.html">Zero Cost AI Dating</a></p>
+        <h1 class="page-title" id="auth-title">Welcome back</h1>
+        <p class="page-sub" id="auth-sub">Sign in to pick up where you left off.</p>
+      </header>
+
+      <noscript>
+        <p class="notice notice-warn">This page needs JavaScript. The whole app — matching included — runs in your browser, so there is no server-rendered version to fall back to.</p>
+      </noscript>
+
+      <section class="card">
+        <div class="card-body stack">
+
+          <!-- Segmented control: sign in / create account -->
+          <div class="segmented" id="auth-tabs" role="tablist" aria-label="Sign in or create an account">
+            <button class="segmented-item is-active" type="button" role="tab" id="tab-signin" aria-selected="true" aria-controls="auth-panel" tabindex="0">Sign in</button>
+            <button class="segmented-item" type="button" role="tab" id="tab-signup" aria-selected="false" aria-controls="auth-panel" tabindex="-1">Create account</button>
+          </div>
+
+          <!-- Shown only in demo mode, where there is no Firebase project -->
+          <p class="notice notice-info hidden" id="demo-notice">Demo mode: no Firebase project is configured, so accounts, matches and messages live only in this browser. Sign up with any email address, or use the demo account below. You can connect a real project later from Settings.</p>
+
+          <!-- Every error and confirmation lands here, politely announced -->
+          <p class="notice notice-warn hidden" id="auth-alert" role="status" aria-live="polite"></p>
+
+          <div id="auth-panel" role="tabpanel" aria-labelledby="tab-signin">
+            <form class="stack" id="auth-form" novalidate>
+
+              <div class="field hidden" id="field-name">
+                <label class="field-label" for="input-name">Display name</label>
+                <input class="input" type="text" id="input-name" name="displayName" autocomplete="name" maxlength="40" aria-describedby="hint-name error-name" disabled>
+                <p class="field-hint" id="hint-name">2–40 characters. This is the name other people see.</p>
+                <p class="field-error" id="error-name"></p>
+              </div>
+
+              <div class="field" id="field-email">
+                <label class="field-label" for="input-email">Email</label>
+                <input class="input" type="email" id="input-email" name="email" autocomplete="email" inputmode="email" spellcheck="false" autocapitalize="none" aria-describedby="error-email">
+                <p class="field-error" id="error-email"></p>
+              </div>
+
+              <div class="field" id="field-password">
+                <label class="field-label" for="input-password">Password</label>
+                <input class="input" type="password" id="input-password" name="password" autocomplete="current-password" aria-describedby="hint-password error-password strength-label">
+                <div class="spread">
+                  <span class="field-hint" id="hint-password">At least 8 characters.</span>
+                  <button class="btn btn-ghost btn-sm" type="button" id="toggle-password" aria-pressed="false" aria-controls="input-password">Show password</button>
+                </div>
+                <div class="stack stack-sm hidden" id="strength-block">
+                  <div class="meter"><div class="meter-fill" id="strength-fill"></div></div>
+                  <p class="field-hint" id="strength-label" aria-live="polite">Password strength: enter at least 8 characters</p>
+                </div>
+                <p class="field-error" id="error-password"></p>
+              </div>
+
+              <div class="spread" id="forgot-row">
+                <span class="field-hint">Cannot get in?</span>
+                <button class="btn btn-ghost btn-sm" type="button" id="forgot-btn">Forgot password?</button>
+              </div>
+
+              <button class="btn btn-primary btn-lg btn-block" type="submit" id="submit-btn">Sign in</button>
+            </form>
+          </div>
+
+          <!-- Forgot-password view, swapped in place of the panel above -->
+          <form class="stack hidden" id="reset-form" novalidate>
+            <div class="field" id="field-reset-email">
+              <label class="field-label" for="input-reset-email">Email</label>
+              <input class="input" type="email" id="input-reset-email" name="resetEmail" autocomplete="email" inputmode="email" spellcheck="false" autocapitalize="none" aria-describedby="hint-reset error-reset-email">
+              <p class="field-hint" id="hint-reset">We send a reset link to the address on your account.</p>
+              <p class="field-error" id="error-reset-email"></p>
+            </div>
+            <button class="btn btn-primary btn-block" type="submit" id="reset-submit">Send reset link</button>
+            <button class="btn btn-ghost btn-block" type="button" id="reset-back">Back to sign in</button>
+          </form>
+
+          <!-- Firebase mode only -->
+          <div class="stack hidden" id="google-block">
+            <hr class="divider">
+            <button class="btn btn-secondary btn-block" type="button" id="google-btn">Continue with Google</button>
+          </div>
+
+          <!-- Demo mode only -->
+          <div class="stack stack-sm hidden" id="demo-block">
+            <hr class="divider">
+            <button class="btn btn-secondary btn-block" type="button" id="demo-btn">Continue with the demo account</button>
+            <p class="field-hint">Signs you in as “You”, the bundled profile, with the demo people ready to swipe through. Nothing leaves this browser.</p>
+          </div>
+
+        </div>
+
+        <div class="card-foot">
+          <p class="field-hint">No payments, no ads, no tracking. Premium is a local simulation.</p>
+        </div>
+      </section>
+
+      <p class="text-center text-muted"><a href="index.html">Back to the home page</a></p>
+
     </div>
-    
-    <script src="js/firebase-config.js"></script>
-    <script src="js/auth.js"></script>
+  </main>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js" crossorigin="anonymous"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js" crossorigin="anonymous"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js" crossorigin="anonymous"></script>
+  <script src="js/firebase-config.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/seed-data.js"></script>
+  <script src="js/data-store.js"></script>
+  <script src="js/matching-engine.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/app.js"></script>
+  <!-- auth.js is both the shared library and this page's controller; it guards
+       against running twice, so loading it again here is a no-op. -->
+  <script src="js/auth.js"></script>
 </body>
 </html>

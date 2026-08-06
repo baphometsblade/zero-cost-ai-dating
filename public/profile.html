@@ -1,19 +1,370 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Profile - Zero Cost AI Dating</title>
-    <link rel="stylesheet" href="css/style.css">
-    <link rel="stylesheet" href="css/components.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Your profile · Zero Cost AI Dating</title>
+  <meta name="description" content="Edit the profile the matching engine actually reads: bio, interests, personality, location and photos — with a live preview of your card and a completeness meter.">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/components.css">
 </head>
-<body>
-    <div id="profile-container">
-        <!-- User profile interface will be loaded here -->
+<body class="app-shell">
+  <main class="container" id="main">
+    <div class="stack-lg">
+
+      <!-- Heading. profile.js rewrites the copy when ?onboarding=1 is present. -->
+      <header class="page-head">
+        <p class="pill hidden" id="onboarding-pill">Step one of one</p>
+        <h1 class="page-title" id="page-title">Your profile</h1>
+        <p class="page-sub" id="page-sub">
+          This is the only thing the matching engine reads about you. It is scored in your
+          browser — nothing here is sent to a model, an ad network or anyone else.
+        </p>
+      </header>
+
+      <!-- First-run welcome, revealed only during onboarding. -->
+      <section class="panel stack stack-sm hidden" id="onboarding-head" aria-labelledby="onboarding-title">
+        <span class="badge badge-new">Welcome</span>
+        <h2 class="field-label" id="onboarding-title">Let's fill in the parts the matching runs on</h2>
+        <p class="text-muted">
+          Your bio, your interests and your personality sliders are what every compatibility
+          score is built from, so a few honest sentences beat a clever one-liner. You need a
+          name and a birthdate to continue; everything else can wait, and you can change all
+          of it later.
+        </p>
+      </section>
+
+      <noscript>
+        <p class="panel">
+          This page needs JavaScript. The profile editor, the preview and the matching engine
+          all run in your browser, so there is no server-rendered version to fall back to.
+        </p>
+      </noscript>
+
+      <!-- Loading placeholder, swapped out once the user document arrives. -->
+      <div class="stack" id="profile-loading" aria-live="polite" aria-busy="true">
+        <p class="sr-only">Loading your profile…</p>
+        <div class="skeleton skeleton-card" aria-hidden="true"></div>
+        <div class="skeleton skeleton-text" aria-hidden="true"></div>
+        <div class="skeleton skeleton-text" aria-hidden="true"></div>
+      </div>
+
+      <!-- Load failure: honest message plus a way out. -->
+      <div class="empty hidden" id="profile-error">
+        <span class="empty-icon" aria-hidden="true">📇</span>
+        <p id="profile-error-text">We could not load your profile.</p>
+        <button class="btn btn-primary" type="button" id="retry-btn">Try again</button>
+      </div>
+
+      <div class="stack-lg hidden" id="profile-main">
+
+        <!-- Hero: how you read at a glance, plus the completeness meter. -->
+        <section class="profile-hero">
+          <img class="profile-photo" id="hero-photo" alt="" width="92" height="92">
+          <div class="profile-body">
+            <p class="profile-name" id="hero-name">Your profile</p>
+            <p class="row">
+              <span id="hero-meta">Nothing filled in yet</span>
+              <span class="badge hidden" id="hero-badge">Free</span>
+            </p>
+            <div class="completeness">
+              <div class="spread">
+                <span id="completeness-label">0% complete</span>
+                <span class="text-muted" id="completeness-hint"></span>
+              </div>
+              <div class="completeness-bar" id="completeness-bar" role="progressbar" aria-labelledby="completeness-label" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                <div class="completeness-fill" id="completeness-fill"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Editor on the left, live card on the right (profile.js widens this
+             into two columns via CSSOM; inline style attributes are CSP-blocked). -->
+        <div class="stack-lg" id="profile-layout">
+
+          <form class="stack-lg" id="profile-form" novalidate>
+
+            <!-- 1. Basics -->
+            <section class="card">
+              <div class="card-head"><span>Basics</span></div>
+              <div class="card-body stack">
+
+                <div class="field" id="field-name">
+                  <label class="field-label" for="input-name">Display name</label>
+                  <input class="input" type="text" id="input-name" name="displayName" maxlength="40" autocomplete="nickname" aria-describedby="hint-name error-name">
+                  <p class="field-hint" id="hint-name">2–40 characters. This is the name on your card.</p>
+                  <p class="field-error" id="error-name"></p>
+                </div>
+
+                <div class="field" id="field-birthdate">
+                  <label class="field-label" for="input-birthdate">Birthdate</label>
+                  <input class="input" type="date" id="input-birthdate" name="birthdate" autocomplete="bday" aria-describedby="hint-birthdate error-birthdate">
+                  <p class="field-hint" id="hint-birthdate">You must be 18 or over. Only your age is ever shown, never the date itself.</p>
+                  <p class="field-error" id="error-birthdate"></p>
+                </div>
+
+                <div class="grid-2">
+                  <div class="field" id="field-gender">
+                    <label class="field-label" for="input-gender">Gender</label>
+                    <select class="select" id="input-gender" name="gender" aria-describedby="hint-gender error-gender">
+                      <option value="woman">Woman</option>
+                      <option value="man">Man</option>
+                      <option value="nonbinary">Non-binary</option>
+                      <option value="other">Something else</option>
+                    </select>
+                    <p class="field-hint" id="hint-gender">Used by the mutual "interested in" filter.</p>
+                    <p class="field-error" id="error-gender"></p>
+                  </div>
+
+                  <div class="field" id="field-pronouns">
+                    <label class="field-label" for="input-pronouns">Pronouns</label>
+                    <input class="input" type="text" id="input-pronouns" name="pronouns" maxlength="40" list="pronoun-options" autocomplete="off" aria-describedby="hint-pronouns error-pronouns">
+                    <datalist id="pronoun-options">
+                      <option value="she/her"></option>
+                      <option value="he/him"></option>
+                      <option value="they/them"></option>
+                      <option value="she/they"></option>
+                      <option value="he/they"></option>
+                      <option value="any pronouns"></option>
+                    </datalist>
+                    <p class="field-hint" id="hint-pronouns">Optional. Shown next to your name.</p>
+                    <p class="field-error" id="error-pronouns"></p>
+                  </div>
+                </div>
+
+              </div>
+            </section>
+
+            <!-- 2. Bio -->
+            <section class="card">
+              <div class="card-head"><span>About you</span></div>
+              <div class="card-body stack">
+                <div class="field" id="field-bio">
+                  <label class="field-label" for="input-bio">Bio</label>
+                  <textarea class="textarea" id="input-bio" name="bio" rows="5" maxlength="500" aria-describedby="hint-bio bio-count error-bio"></textarea>
+                  <p class="char-count" id="bio-count">0 / 500</p>
+                  <p class="field-hint" id="hint-bio">
+                    Two or three specific sentences work best: the engine compares the words in
+                    your bio with everyone else's, so "cold water swimming and bad sci-fi" tells
+                    it far more than "love to laugh".
+                  </p>
+                  <p class="field-error" id="error-bio"></p>
+                </div>
+              </div>
+            </section>
+
+            <!-- 3. Interests -->
+            <section class="card">
+              <div class="card-head">
+                <span>Interests</span>
+                <span class="badge" id="interest-badge">0 / 12</span>
+              </div>
+              <div class="card-body stack">
+                <div class="field" id="field-interests">
+                  <p class="field-hint" id="hint-interests">
+                    Pick up to 12. Shared tags are the single biggest ingredient in a
+                    compatibility score, and matching categories count for something too.
+                  </p>
+                  <div class="stack" id="interest-groups"></div>
+                  <p class="field-hint" id="interest-count" role="status" aria-live="polite">0 of 12 chosen.</p>
+                  <p class="field-error" id="error-interests"></p>
+                </div>
+              </div>
+            </section>
+
+            <!-- 4. Personality -->
+            <section class="card">
+              <div class="card-head"><span>Personality</span></div>
+              <div class="card-body stack">
+                <p class="field-hint">
+                  Five sliders, no quiz. Openness, reliability and warmth are scored on how
+                  close you are; social energy tolerates a gap; steadiness rewards a steady pair.
+                </p>
+                <div class="personality-grid">
+
+                  <div class="personality-axis">
+                    <label class="axis-label" for="range-openness">
+                      <span>Openness</span>
+                      <output id="value-openness" for="range-openness">50</output>
+                    </label>
+                    <input class="range" type="range" id="range-openness" name="openness" min="0" max="100" step="1" value="50" aria-describedby="ends-openness">
+                    <p class="axis-ends" id="ends-openness"><span>Happy with the familiar</span><span>Always chasing the new</span></p>
+                  </div>
+
+                  <div class="personality-axis">
+                    <label class="axis-label" for="range-conscientiousness">
+                      <span>Reliability</span>
+                      <output id="value-conscientiousness" for="range-conscientiousness">50</output>
+                    </label>
+                    <input class="range" type="range" id="range-conscientiousness" name="conscientiousness" min="0" max="100" step="1" value="50" aria-describedby="ends-conscientiousness">
+                    <p class="axis-ends" id="ends-conscientiousness"><span>Wing it, cheerfully</span><span>Planned and on time</span></p>
+                  </div>
+
+                  <div class="personality-axis">
+                    <label class="axis-label" for="range-extraversion">
+                      <span>Social energy</span>
+                      <output id="value-extraversion" for="range-extraversion">50</output>
+                    </label>
+                    <input class="range" type="range" id="range-extraversion" name="extraversion" min="0" max="100" step="1" value="50" aria-describedby="ends-extraversion">
+                    <p class="axis-ends" id="ends-extraversion"><span>Recharge on my own</span><span>Recharge in a crowd</span></p>
+                  </div>
+
+                  <div class="personality-axis">
+                    <label class="axis-label" for="range-agreeableness">
+                      <span>Warmth</span>
+                      <output id="value-agreeableness" for="range-agreeableness">50</output>
+                    </label>
+                    <input class="range" type="range" id="range-agreeableness" name="agreeableness" min="0" max="100" step="1" value="50" aria-describedby="ends-agreeableness">
+                    <p class="axis-ends" id="ends-agreeableness"><span>Blunt and direct</span><span>Warm and accommodating</span></p>
+                  </div>
+
+                  <div class="personality-axis">
+                    <label class="axis-label" for="range-stability">
+                      <span>Emotional steadiness</span>
+                      <output id="value-stability" for="range-stability">50</output>
+                    </label>
+                    <input class="range" type="range" id="range-stability" name="stability" min="0" max="100" step="1" value="50" aria-describedby="ends-stability">
+                    <p class="axis-ends" id="ends-stability"><span>Feel everything, loudly</span><span>Even keel under stress</span></p>
+                  </div>
+
+                </div>
+              </div>
+            </section>
+
+            <!-- 5. Location -->
+            <section class="card">
+              <div class="card-head"><span>Location</span></div>
+              <div class="card-body stack">
+
+                <div class="field" id="field-city">
+                  <label class="field-label" for="select-city">Pick a city</label>
+                  <select class="select" id="select-city" aria-describedby="hint-city"></select>
+                  <p class="field-hint" id="hint-city">
+                    Distance uses approximate city coordinates, never a precise position. If
+                    your city is not listed, use the button below or leave this blank.
+                  </p>
+                </div>
+
+                <div class="field" id="field-location">
+                  <label class="field-label" for="input-location">Location label</label>
+                  <input class="input" type="text" id="input-location" name="location" maxlength="60" autocomplete="address-level2" aria-describedby="location-status error-location">
+                  <p class="field-hint" id="location-status" role="status" aria-live="polite">No location set.</p>
+                  <p class="field-error" id="error-location"></p>
+                </div>
+
+                <div class="row">
+                  <button class="btn btn-secondary" type="button" id="btn-locate">Use my location</button>
+                  <button class="btn btn-ghost" type="button" id="btn-clear-location">Clear location</button>
+                </div>
+
+              </div>
+            </section>
+
+            <!-- 6. Photos -->
+            <section class="card">
+              <div class="card-head">
+                <span>Photos</span>
+                <span class="badge" id="photo-badge">0 / 6</span>
+              </div>
+              <div class="card-body stack">
+                <div class="photo-grid" id="photo-grid"></div>
+                <div class="field" id="field-photo">
+                  <label class="field-label" for="input-photo">Add a photo by link</label>
+                  <div class="row" id="photo-add-row">
+                    <input class="input" type="url" id="input-photo" inputmode="url" spellcheck="false" autocapitalize="none" placeholder="https://…" aria-describedby="hint-photo error-photo">
+                    <button class="btn btn-secondary" type="button" id="btn-add-photo">Add photo</button>
+                  </div>
+                  <p class="field-hint" id="hint-photo">
+                    There are no uploads here — Cloud Storage costs money, so photos are links to
+                    images you already host, and they must start with https://. Up to six; the
+                    first one is your card photo. With none at all we draw a gradient avatar from
+                    your name, which is a perfectly good look.
+                  </p>
+                  <p class="field-error" id="error-photo"></p>
+                </div>
+              </div>
+            </section>
+
+            <!-- 7. Visibility -->
+            <section class="card">
+              <div class="card-head"><span>Visibility</span></div>
+              <div class="card-body stack">
+                <label class="switch" for="toggle-show-age">
+                  <input type="checkbox" id="toggle-show-age" name="showAge">
+                  <span>Show my age on my card</span>
+                </label>
+                <label class="switch" for="toggle-show-distance">
+                  <input type="checkbox" id="toggle-show-distance" name="showDistance">
+                  <span>Show how far away I am</span>
+                </label>
+                <p class="field-hint">
+                  Both are display-only. Your age and your city still take part in matching, so
+                  turning them off changes what people read, not who you are shown to. Whether
+                  you appear in other people's decks at all lives in <a href="settings.html">Settings</a>.
+                </p>
+              </div>
+            </section>
+
+            <!-- Save bar -->
+            <div class="panel spread" id="save-row">
+              <p class="field-hint" id="save-status" role="status" aria-live="polite">Everything here is saved.</p>
+              <div class="row">
+                <button class="btn btn-ghost" type="button" id="discard-btn">Discard changes</button>
+                <button class="btn btn-primary" type="submit" id="save-btn">Save changes</button>
+                <button class="btn btn-primary btn-lg hidden" type="button" id="start-btn">Start matching</button>
+              </div>
+            </div>
+
+          </form>
+
+          <!-- Live preview of the card other people swipe on. -->
+          <aside class="stack" id="preview-pane" aria-labelledby="preview-title">
+            <section class="card">
+              <div class="card-head">
+                <span id="preview-title">Live preview</span>
+                <span class="badge badge-new">Updates as you type</span>
+              </div>
+              <div class="card-body stack">
+                <article class="swipe-card" id="preview-card">
+                  <img class="swipe-photo" id="preview-photo" alt="">
+                  <div class="swipe-gradient" aria-hidden="true"></div>
+                  <div class="swipe-info">
+                    <p class="swipe-name">
+                      <span id="preview-name">Your name</span>
+                      <span class="swipe-age" id="preview-age"></span>
+                    </p>
+                    <div class="swipe-meta" id="preview-meta"></div>
+                    <p class="swipe-bio" id="preview-bio"></p>
+                    <div class="swipe-tags" id="preview-tags"></div>
+                  </div>
+                </article>
+                <p class="field-hint">
+                  Cards in the deck also carry a compatibility ring and the reasons behind it.
+                  Those are worked out per viewer, so they cannot be previewed here.
+                </p>
+              </div>
+            </section>
+          </aside>
+
+        </div>
+      </div>
+
     </div>
-    
-    <script src="js/firebase-config.js"></script>
-    <script src="js/auth.js"></script>
-    <script src="js/profile.js"></script>
+  </main>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js" crossorigin="anonymous"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js" crossorigin="anonymous"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js" crossorigin="anonymous"></script>
+  <script src="js/firebase-config.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/seed-data.js"></script>
+  <script src="js/data-store.js"></script>
+  <script src="js/matching-engine.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/app.js"></script>
+  <script src="js/profile.js"></script>
 </body>
 </html>

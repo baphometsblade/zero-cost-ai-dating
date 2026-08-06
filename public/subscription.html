@@ -1,47 +1,155 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Subscription - Zero Cost AI Dating</title>
-    <link rel="stylesheet" href="css/style.css">
-    <link rel="stylesheet" href="css/components.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Compare the Free and Premium plans in Zero Cost AI Dating. Premium is a local simulation: no payment is processed, it exists so the daily limits and premium-only features can be tried out.">
+  <title>Plans · Zero Cost AI Dating</title>
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/components.css">
 </head>
-<body>
-    <div class="container">
-        <header>
-            <h1>Subscription Plans</h1>
-        </header>
-        
-        <main>
-            <div class="subscription-plans">
-                <div class="plan">
-                    <h2>Free Plan</h2>
-                    <p class="price">$0/month</p>
-                    <ul>
-                        <li>Basic matching</li>
-                        <li>10 likes per day</li>
-                        <li>Limited features</li>
-                    </ul>
-                    <button class="current-plan">Current Plan</button>
-                </div>
-                
-                <div class="plan premium">
-                    <h2>Premium Plan</h2>
-                    <p class="price">$9.99/month</p>
-                    <ul>
-                        <li>Unlimited likes</li>
-                        <li>Advanced AI matching</li>
-                        <li>Premium features</li>
-                    </ul>
-                    <button class="upgrade-btn">Upgrade</button>
-                </div>
+<body class="app-shell">
+  <main class="container" id="main">
+    <div class="stack-lg" id="subscription-page">
+
+      <header class="page-head">
+        <h1 class="page-title">Plans</h1>
+        <p class="page-sub">
+          What the Free plan allows, what the Premium plan would allow, and where you are against
+          today's limits.
+        </p>
+      </header>
+
+      <!-- The honest bit, first and unmissable. -->
+      <p class="notice notice-warn" id="simulation-notice">
+        <span>
+          <strong>Premium here is a local simulation.</strong> No payment is processed, no card
+          details are collected and no money changes hands — there is no payment system in this app
+          and no server to run one. Switching plans only flips a field on your own profile, so the
+          limits and the premium-only features can be exercised. There is nothing to cancel, nothing
+          to refund, and you can switch back at any time.
+        </span>
+      </p>
+
+      <noscript>
+        <p class="notice notice-warn">
+          This page needs JavaScript: your plan and today's usage are read from your profile in the
+          browser.
+        </p>
+      </noscript>
+
+      <!-- Current plan and today's usage --------------------------------- -->
+      <section class="card" aria-labelledby="current-heading">
+        <div class="card-head">
+          <h2 id="current-heading">Your plan</h2>
+          <span class="badge" id="plan-badge">Free</span>
+        </div>
+        <div class="card-body stack">
+          <p class="text-muted" id="plan-summary">Loading your plan…</p>
+
+          <h3 id="usage-heading">Today's usage</h3>
+          <div class="stack" id="usage-list" aria-labelledby="usage-heading" aria-busy="true"></div>
+          <p class="field-hint" id="usage-reset"></p>
+        </div>
+      </section>
+
+      <!-- Plan comparison ------------------------------------------------- -->
+      <section aria-labelledby="plans-heading">
+        <h2 class="sr-only" id="plans-heading">Free and Premium</h2>
+        <div class="plans" id="plans">
+
+          <article class="plan" id="plan-free" aria-labelledby="free-name">
+            <h3 class="plan-name" id="free-name">Free</h3>
+            <p class="plan-price">$0<span class="plan-period">forever, genuinely</span></p>
+            <ul class="plan-features" id="free-features"></ul>
+            <div class="plan-cta">
+              <button class="btn btn-secondary" type="button" id="free-cta">Switch to Free</button>
             </div>
-        </main>
+          </article>
+
+          <article class="plan is-featured" id="plan-premium" aria-labelledby="premium-name">
+            <span class="plan-ribbon" id="premium-ribbon">Simulated</span>
+            <h3 class="plan-name" id="premium-name">Premium</h3>
+            <p class="plan-price">$0<span class="plan-period">nothing is charged, ever</span></p>
+            <ul class="plan-features" id="premium-features"></ul>
+            <div class="plan-cta">
+              <button class="btn btn-primary" type="button" id="premium-cta">Switch to Premium (no payment)</button>
+            </div>
+          </article>
+
+        </div>
+      </section>
+
+      <!-- Feature table ---------------------------------------------------- -->
+      <section class="card" aria-labelledby="compare-heading">
+        <div class="card-head">
+          <h2 id="compare-heading">Feature by feature</h2>
+        </div>
+        <div class="card-body">
+          <table>
+            <caption class="sr-only">The Free and Premium plans compared, feature by feature</caption>
+            <thead>
+              <tr>
+                <th scope="col">Feature</th>
+                <th scope="col">Free</th>
+                <th scope="col">Premium</th>
+              </tr>
+            </thead>
+            <tbody id="feature-rows"></tbody>
+          </table>
+        </div>
+        <div class="card-foot">
+          <p class="field-hint">
+            These numbers are read from the app's own limits table, so what you see here is exactly
+            what the swipe deck enforces.
+          </p>
+        </div>
+      </section>
+
+      <!-- How the simulation works ----------------------------------------- -->
+      <section class="card" aria-labelledby="how-heading">
+        <div class="card-head">
+          <h2 id="how-heading">How the simulation works</h2>
+        </div>
+        <div class="card-body stack">
+          <p>
+            Switching plans sets <code>plan</code> to <code>premium</code> or <code>free</code> on
+            your own user document. Before every like, super like or rewind, the app asks its own
+            store whether that plan has budget left today; that is the whole of the gating logic,
+            and it is all running in this tab.
+          </p>
+          <p>
+            Because the check happens in your browser, it is a demonstration of the mechanism rather
+            than an enforcement of it — anyone who can open the developer tools can flip the same
+            field. That is honest and deliberate: this app has no server, and a paywall you cannot
+            enforce is not one worth pretending about.
+          </p>
+          <p class="field-hint">
+            The app costs $0 a month to run: static hosting, the free Firestore tier, and a matching
+            engine that never leaves your device. There is nothing to fund.
+          </p>
+        </div>
+      </section>
+
+      <p class="text-center text-muted">
+        <a href="settings.html">Back to settings</a>
+      </p>
+
     </div>
-    
-    <script src="js/firebase-config.js"></script>
-    <script src="js/auth.js"></script>
-    <script src="js/subscription.js"></script>
+  </main>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js" crossorigin="anonymous"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js" crossorigin="anonymous"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js" crossorigin="anonymous"></script>
+  <script src="js/firebase-config.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/seed-data.js"></script>
+  <script src="js/data-store.js"></script>
+  <script src="js/matching-engine.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/app.js"></script>
+  <script src="js/subscription.js"></script>
 </body>
 </html>

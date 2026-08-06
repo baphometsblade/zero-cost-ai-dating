@@ -1,66 +1,97 @@
-{
-  "version": 1,
-  "ageAsOf": "2026-08-06",
-  "interests": [
+/* ==========================================================================
+   Zero Cost AI Dating — bundled seed data
+   GENERATED FILE — DO NOT EDIT BY HAND.
+   Source: seed/profiles.json (version 1, 48 interest tags, 32 profiles,
+   9 inbound likes, 2 conversations).
+   Regenerate with `npm run build:seed`; `npm run check:seed` fails when this
+   file has drifted from the JSON.
+
+   Every person in here is fictional. Nothing carries a timestamp: profiles
+   carry `lastActiveOffsetHours` and the relationships carry `offsetHours`,
+   both counted back from seed time, so the demo never looks abandoned.
+   ZC.store turns the offsets into real ISO dates when it seeds.
+   Exposes: ZC.SEED_VERSION, ZC.INTEREST_TAGS, ZC.INTEREST_BY_SLUG,
+   ZC.SEED_PROFILES, ZC.SEED_INBOUND_LIKES, ZC.SEED_CONVERSATIONS (and the
+   same object via module.exports under Node).
+   ========================================================================== */
+(function (root, factory) {
+  'use strict';
+
+  const api = factory();
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  root.ZC = root.ZC || {};
+  root.ZC.SEED_VERSION = api.SEED_VERSION;
+  root.ZC.INTEREST_TAGS = api.INTEREST_TAGS;
+  root.ZC.INTEREST_BY_SLUG = api.INTEREST_BY_SLUG;
+  root.ZC.SEED_PROFILES = api.SEED_PROFILES;
+  root.ZC.SEED_INBOUND_LIKES = api.SEED_INBOUND_LIKES;
+  root.ZC.SEED_CONVERSATIONS = api.SEED_CONVERSATIONS;
+})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+  'use strict';
+
+  // The canonical interest table: 48 tags across 10 categories.
+  // The slug is the stable identifier everything else keys off; label and
+  // emoji are display-only.
+  const INTEREST_TAGS = [
     { "slug": "hiking", "label": "Hiking", "emoji": "🥾", "category": "outdoors" },
     { "slug": "camping", "label": "Camping", "emoji": "⛺", "category": "outdoors" },
     { "slug": "climbing", "label": "Climbing", "emoji": "🧗", "category": "outdoors" },
     { "slug": "kayaking", "label": "Kayaking", "emoji": "🛶", "category": "outdoors" },
     { "slug": "birding", "label": "Birdwatching", "emoji": "🐦", "category": "outdoors" },
-
     { "slug": "painting", "label": "Painting", "emoji": "🎨", "category": "arts" },
     { "slug": "photography", "label": "Photography", "emoji": "📷", "category": "arts" },
     { "slug": "film", "label": "Film", "emoji": "🎬", "category": "arts" },
     { "slug": "poetry", "label": "Poetry", "emoji": "✍️", "category": "arts" },
     { "slug": "theatre", "label": "Theatre", "emoji": "🎭", "category": "arts" },
-
     { "slug": "cooking", "label": "Cooking", "emoji": "🍳", "category": "food" },
     { "slug": "baking", "label": "Baking", "emoji": "🥐", "category": "food" },
     { "slug": "coffee", "label": "Coffee", "emoji": "☕", "category": "food" },
     { "slug": "wine", "label": "Wine", "emoji": "🍷", "category": "food" },
     { "slug": "street-food", "label": "Street food", "emoji": "🌮", "category": "food" },
-
     { "slug": "live-music", "label": "Live music", "emoji": "🎤", "category": "music" },
     { "slug": "vinyl", "label": "Vinyl", "emoji": "💿", "category": "music" },
     { "slug": "guitar", "label": "Guitar", "emoji": "🎸", "category": "music" },
     { "slug": "jazz", "label": "Jazz", "emoji": "🎷", "category": "music" },
     { "slug": "electronic", "label": "Electronic", "emoji": "🎧", "category": "music" },
-
     { "slug": "running", "label": "Running", "emoji": "👟", "category": "fitness" },
     { "slug": "yoga", "label": "Yoga", "emoji": "🧘", "category": "fitness" },
     { "slug": "cycling", "label": "Cycling", "emoji": "🚴", "category": "fitness" },
     { "slug": "lifting", "label": "Lifting", "emoji": "🏋️", "category": "fitness" },
     { "slug": "swimming", "label": "Swimming", "emoji": "🏊", "category": "fitness" },
-
     { "slug": "coding", "label": "Coding", "emoji": "💻", "category": "tech" },
     { "slug": "gaming", "label": "Gaming", "emoji": "🎮", "category": "tech" },
     { "slug": "robotics", "label": "Robotics", "emoji": "🤖", "category": "tech" },
     { "slug": "astronomy", "label": "Astronomy", "emoji": "🔭", "category": "tech" },
     { "slug": "tinkering", "label": "Tinkering", "emoji": "🔧", "category": "tech" },
-
     { "slug": "road-trips", "label": "Road trips", "emoji": "🚐", "category": "travel" },
     { "slug": "backpacking", "label": "Backpacking", "emoji": "🎒", "category": "travel" },
     { "slug": "languages", "label": "Languages", "emoji": "🗣️", "category": "travel" },
     { "slug": "city-breaks", "label": "City breaks", "emoji": "🏙️", "category": "travel" },
     { "slug": "train-travel", "label": "Train travel", "emoji": "🚆", "category": "travel" },
-
     { "slug": "reading", "label": "Reading", "emoji": "📚", "category": "homebody" },
     { "slug": "gardening", "label": "Gardening", "emoji": "🌱", "category": "homebody" },
     { "slug": "board-games", "label": "Board games", "emoji": "🎲", "category": "homebody" },
     { "slug": "knitting", "label": "Knitting", "emoji": "🧶", "category": "homebody" },
     { "slug": "puzzles", "label": "Puzzles", "emoji": "🧩", "category": "homebody" },
-
     { "slug": "dancing", "label": "Dancing", "emoji": "💃", "category": "social" },
     { "slug": "karaoke", "label": "Karaoke", "emoji": "🎙️", "category": "social" },
     { "slug": "volunteering", "label": "Volunteering", "emoji": "🤝", "category": "social" },
     { "slug": "trivia", "label": "Trivia nights", "emoji": "🧠", "category": "social" },
-
     { "slug": "meditation", "label": "Meditation", "emoji": "🪷", "category": "mindful" },
     { "slug": "journaling", "label": "Journaling", "emoji": "📓", "category": "mindful" },
     { "slug": "philosophy", "label": "Philosophy", "emoji": "💭", "category": "mindful" },
     { "slug": "tea", "label": "Tea", "emoji": "🍵", "category": "mindful" }
-  ],
-  "profiles": [
+  ];
+
+  // Slug -> tag lookup, built once so callers never scan the array.
+  const INTEREST_BY_SLUG = INTEREST_TAGS.reduce(function (map, tag) {
+    map[tag.slug] = tag;
+    return map;
+  }, {});
+
+  // The bundled demo cast. `demo-you` is first: it is the account
+  // ZC.auth.signInAsDemoUser() signs into.
+  const SEED_PROFILES = [
     {
       "uid": "demo-you",
       "email": "you@example.com",
@@ -78,14 +109,38 @@
         "pronouns": "she/they",
         "bio": "Six years in Portland and still finding trails I have never walked. I make a serious pour-over, buy more records than I have shelf space for, and I will cook for you by the second date.",
         "photos": [],
-        "interests": ["hiking", "coffee", "vinyl", "cooking", "reading", "live-music", "photography", "cycling"],
-        "personality": { "openness": 78, "conscientiousness": 62, "extraversion": 55, "agreeableness": 72, "stability": 66 },
-        "location": { "label": "Portland, OR", "lat": 45.5152, "lng": -122.6784 },
+        "interests": [
+          "hiking",
+          "coffee",
+          "vinyl",
+          "cooking",
+          "reading",
+          "live-music",
+          "photography",
+          "cycling"
+        ],
+        "personality": {
+          "openness": 78,
+          "conscientiousness": 62,
+          "extraversion": 55,
+          "agreeableness": 72,
+          "stability": 66
+        },
+        "location": {
+          "label": "Portland, OR",
+          "lat": 45.5152,
+          "lng": -122.6784
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman", "man", "nonbinary", "other"],
+        "interestedIn": [
+          "woman",
+          "man",
+          "nonbinary",
+          "other"
+        ],
         "ageMin": 25,
         "ageMax": 44,
         "maxDistanceKm": 500,
@@ -93,8 +148,17 @@
         "theme": "system",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -114,14 +178,34 @@
         "pronouns": "she/her",
         "bio": "Structural engineer, so I look at bridges the way other people look at dogs. Most weekends start with a trail run and end with a burrito bigger than my forearm.",
         "photos": [],
-        "interests": ["running", "hiking", "street-food", "coffee", "board-games", "cycling"],
-        "personality": { "openness": 66, "conscientiousness": 88, "extraversion": 48, "agreeableness": 70, "stability": 76 },
-        "location": { "label": "Portland, OR", "lat": 45.5426, "lng": -122.6544 },
+        "interests": [
+          "running",
+          "hiking",
+          "street-food",
+          "coffee",
+          "board-games",
+          "cycling"
+        ],
+        "personality": {
+          "openness": 66,
+          "conscientiousness": 88,
+          "extraversion": 48,
+          "agreeableness": 70,
+          "stability": 76
+        },
+        "location": {
+          "label": "Portland, OR",
+          "lat": 45.5426,
+          "lng": -122.6544
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman", "nonbinary"],
+        "interestedIn": [
+          "woman",
+          "nonbinary"
+        ],
         "ageMin": 25,
         "ageMax": 38,
         "maxDistanceKm": 60,
@@ -129,8 +213,17 @@
         "theme": "dark",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -150,14 +243,33 @@
         "pronouns": "he/him",
         "bio": "I bake sourdough on a schedule my last partner described as concerning, and I stand by it. The starter is four years old and her name is Brenda.",
         "photos": [],
-        "interests": ["baking", "cooking", "gardening", "board-games", "coffee", "reading"],
-        "personality": { "openness": 61, "conscientiousness": 79, "extraversion": 44, "agreeableness": 81, "stability": 68 },
-        "location": { "label": "Portland, OR", "lat": 45.4993, "lng": -122.636 },
+        "interests": [
+          "baking",
+          "cooking",
+          "gardening",
+          "board-games",
+          "coffee",
+          "reading"
+        ],
+        "personality": {
+          "openness": 61,
+          "conscientiousness": 79,
+          "extraversion": 44,
+          "agreeableness": 81,
+          "stability": 68
+        },
+        "location": {
+          "label": "Portland, OR",
+          "lat": 45.4993,
+          "lng": -122.636
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman"],
+        "interestedIn": [
+          "woman"
+        ],
         "ageMin": 26,
         "ageMax": 40,
         "maxDistanceKm": 80,
@@ -165,8 +277,17 @@
         "theme": "system",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -186,14 +307,34 @@
         "pronouns": "she/her",
         "bio": "ICU nurse working three-day stretches, so my Thursdays are your Saturdays. I garden aggressively and lose every argument I have with my tomatoes.",
         "photos": [],
-        "interests": ["gardening", "cooking", "reading", "yoga", "wine", "birding"],
-        "personality": { "openness": 58, "conscientiousness": 91, "extraversion": 63, "agreeableness": 85, "stability": 72 },
-        "location": { "label": "Vancouver, WA", "lat": 45.6387, "lng": -122.6615 },
+        "interests": [
+          "gardening",
+          "cooking",
+          "reading",
+          "yoga",
+          "wine",
+          "birding"
+        ],
+        "personality": {
+          "openness": 58,
+          "conscientiousness": 91,
+          "extraversion": 63,
+          "agreeableness": 85,
+          "stability": 72
+        },
+        "location": {
+          "label": "Vancouver, WA",
+          "lat": 45.6387,
+          "lng": -122.6615
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["man", "woman"],
+        "interestedIn": [
+          "man",
+          "woman"
+        ],
         "ageMin": 30,
         "ageMax": 46,
         "maxDistanceKm": 80,
@@ -202,11 +343,21 @@
         "discoverable": true
       },
       "learning": {
-        "interestAffinity": { "gardening": 0.51, "cooking": 0.36, "wine": 0.22, "gaming": -0.18 },
+        "interestAffinity": {
+          "gardening": 0.51,
+          "cooking": 0.36,
+          "wine": 0.22,
+          "gaming": -0.18
+        },
         "likeCount": 18,
         "passCount": 11
       },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -226,14 +377,35 @@
         "pronouns": "he/they",
         "bio": "Bike messenger turned bike mechanic. I know every pothole downtown by name, and I will fix your brakes for free if you buy the tacos.",
         "photos": [],
-        "interests": ["cycling", "tinkering", "street-food", "electronic", "gaming", "coffee"],
-        "personality": { "openness": 72, "conscientiousness": 46, "extraversion": 81, "agreeableness": 67, "stability": 58 },
-        "location": { "label": "Portland, OR", "lat": 45.5231, "lng": -122.6912 },
+        "interests": [
+          "cycling",
+          "tinkering",
+          "street-food",
+          "electronic",
+          "gaming",
+          "coffee"
+        ],
+        "personality": {
+          "openness": 72,
+          "conscientiousness": 46,
+          "extraversion": 81,
+          "agreeableness": 67,
+          "stability": 58
+        },
+        "location": {
+          "label": "Portland, OR",
+          "lat": 45.5231,
+          "lng": -122.6912
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman", "nonbinary", "other"],
+        "interestedIn": [
+          "woman",
+          "nonbinary",
+          "other"
+        ],
         "ageMin": 21,
         "ageMax": 33,
         "maxDistanceKm": 40,
@@ -241,8 +413,17 @@
         "theme": "dark",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -262,14 +443,33 @@
         "pronouns": "she/her",
         "bio": "I translate contracts by day and bad poetry by night; only one of those pays. A rainy Sunday, a used bookstore and no particular plan is the entire pitch.",
         "photos": [],
-        "interests": ["reading", "poetry", "coffee", "philosophy", "languages", "tea"],
-        "personality": { "openness": 84, "conscientiousness": 65, "extraversion": 31, "agreeableness": 74, "stability": 52 },
-        "location": { "label": "Seattle, WA", "lat": 47.6205, "lng": -122.3493 },
+        "interests": [
+          "reading",
+          "poetry",
+          "coffee",
+          "philosophy",
+          "languages",
+          "tea"
+        ],
+        "personality": {
+          "openness": 84,
+          "conscientiousness": 65,
+          "extraversion": 31,
+          "agreeableness": 74,
+          "stability": 52
+        },
+        "location": {
+          "label": "Seattle, WA",
+          "lat": 47.6205,
+          "lng": -122.3493
+        },
         "showAge": true,
         "showDistance": false
       },
       "preferences": {
-        "interestedIn": ["man"],
+        "interestedIn": [
+          "man"
+        ],
         "ageMin": 33,
         "ageMax": 50,
         "maxDistanceKm": 120,
@@ -277,8 +477,17 @@
         "theme": "light",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -298,14 +507,34 @@
         "pronouns": "they/them",
         "bio": "Sound engineer for small rooms, which means I have already heard your favourite band's soundcheck. I keep a serious list of the best places in town to eat alone.",
         "photos": [],
-        "interests": ["live-music", "vinyl", "electronic", "street-food", "film", "tinkering"],
-        "personality": { "openness": 80, "conscientiousness": 58, "extraversion": 42, "agreeableness": 69, "stability": 63 },
-        "location": { "label": "Portland, OR", "lat": 45.5581, "lng": -122.6501 },
+        "interests": [
+          "live-music",
+          "vinyl",
+          "electronic",
+          "street-food",
+          "film",
+          "tinkering"
+        ],
+        "personality": {
+          "openness": 80,
+          "conscientiousness": 58,
+          "extraversion": 42,
+          "agreeableness": 69,
+          "stability": 63
+        },
+        "location": {
+          "label": "Portland, OR",
+          "lat": 45.5581,
+          "lng": -122.6501
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman", "nonbinary"],
+        "interestedIn": [
+          "woman",
+          "nonbinary"
+        ],
         "ageMin": 26,
         "ageMax": 42,
         "maxDistanceKm": 75,
@@ -313,8 +542,17 @@
         "theme": "dark",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -334,14 +572,34 @@
         "pronouns": "she/her",
         "bio": "Illustrator with a permanent ink stain on my left hand. I am looking for someone who will go to the aquarium on a Tuesday and take it completely seriously.",
         "photos": [],
-        "interests": ["painting", "photography", "film", "reading", "swimming", "knitting"],
-        "personality": { "openness": 88, "conscientiousness": 54, "extraversion": 37, "agreeableness": 78, "stability": 49 },
-        "location": { "label": "Seattle, WA", "lat": 47.6615, "lng": -122.3131 },
+        "interests": [
+          "painting",
+          "photography",
+          "film",
+          "reading",
+          "swimming",
+          "knitting"
+        ],
+        "personality": {
+          "openness": 88,
+          "conscientiousness": 54,
+          "extraversion": 37,
+          "agreeableness": 78,
+          "stability": 49
+        },
+        "location": {
+          "label": "Seattle, WA",
+          "lat": 47.6615,
+          "lng": -122.3131
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["man", "nonbinary"],
+        "interestedIn": [
+          "man",
+          "nonbinary"
+        ],
         "ageMin": 23,
         "ageMax": 35,
         "maxDistanceKm": 50,
@@ -349,8 +607,17 @@
         "theme": "system",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -370,14 +637,32 @@
         "pronouns": "he/him",
         "bio": "Middle school science teacher — twenty-eight kids think I am hilarious, which is either a great sign or a terrible one. I run slow and cook fast.",
         "photos": [],
-        "interests": ["running", "cooking", "astronomy", "board-games", "camping"],
-        "personality": { "openness": 63, "conscientiousness": 76, "extraversion": 74, "agreeableness": 83, "stability": 79 },
-        "location": { "label": "Oakland, CA", "lat": 37.8044, "lng": -122.2712 },
+        "interests": [
+          "running",
+          "cooking",
+          "astronomy",
+          "board-games",
+          "camping"
+        ],
+        "personality": {
+          "openness": 63,
+          "conscientiousness": 76,
+          "extraversion": 74,
+          "agreeableness": 83,
+          "stability": 79
+        },
+        "location": {
+          "label": "Oakland, CA",
+          "lat": 37.8044,
+          "lng": -122.2712
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman"],
+        "interestedIn": [
+          "woman"
+        ],
         "ageMin": 32,
         "ageMax": 48,
         "maxDistanceKm": 60,
@@ -386,11 +671,21 @@
         "discoverable": true
       },
       "learning": {
-        "interestAffinity": { "running": 0.42, "cooking": 0.31, "camping": 0.18, "karaoke": -0.24 },
+        "interestAffinity": {
+          "running": 0.42,
+          "cooking": 0.31,
+          "camping": 0.18,
+          "karaoke": -0.24
+        },
         "likeCount": 14,
         "passCount": 9
       },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -410,14 +705,37 @@
         "pronouns": "they/them",
         "bio": "I write firmware for telescopes, the nerdiest sentence I own, and I am not sorry about it. I would like someone to drive out past the light pollution with.",
         "photos": [],
-        "interests": ["astronomy", "coding", "robotics", "camping", "road-trips", "gaming", "tea"],
-        "personality": { "openness": 91, "conscientiousness": 70, "extraversion": 35, "agreeableness": 66, "stability": 61 },
-        "location": { "label": "San Francisco, CA", "lat": 37.7599, "lng": -122.4148 },
+        "interests": [
+          "astronomy",
+          "coding",
+          "robotics",
+          "camping",
+          "road-trips",
+          "gaming",
+          "tea"
+        ],
+        "personality": {
+          "openness": 91,
+          "conscientiousness": 70,
+          "extraversion": 35,
+          "agreeableness": 66,
+          "stability": 61
+        },
+        "location": {
+          "label": "San Francisco, CA",
+          "lat": 37.7599,
+          "lng": -122.4148
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman", "man", "nonbinary", "other"],
+        "interestedIn": [
+          "woman",
+          "man",
+          "nonbinary",
+          "other"
+        ],
         "ageMin": 25,
         "ageMax": 40,
         "maxDistanceKm": 500,
@@ -425,8 +743,17 @@
         "theme": "dark",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -446,14 +773,33 @@
         "pronouns": "she/her",
         "bio": "Born on Valentine's Day, which set expectations I have failed to meet ever since. I climb badly, dance well, and make an unreasonable quantity of pasta.",
         "photos": [],
-        "interests": ["climbing", "dancing", "cooking", "wine", "languages", "film"],
-        "personality": { "openness": 77, "conscientiousness": 48, "extraversion": 86, "agreeableness": 72, "stability": 55 },
-        "location": { "label": "San Francisco, CA", "lat": 37.7849, "lng": -122.4094 },
+        "interests": [
+          "climbing",
+          "dancing",
+          "cooking",
+          "wine",
+          "languages",
+          "film"
+        ],
+        "personality": {
+          "openness": 77,
+          "conscientiousness": 48,
+          "extraversion": 86,
+          "agreeableness": 72,
+          "stability": 55
+        },
+        "location": {
+          "label": "San Francisco, CA",
+          "lat": 37.7849,
+          "lng": -122.4094
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman"],
+        "interestedIn": [
+          "woman"
+        ],
         "ageMin": 28,
         "ageMax": 45,
         "maxDistanceKm": 500,
@@ -461,8 +807,17 @@
         "theme": "system",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -482,14 +837,34 @@
         "pronouns": "he/him",
         "bio": "Nine seasons on a wildland fire crew; now I teach other people how to do it without getting hurt. Two dogs, one banjo, no interest in pretending I like cities.",
         "photos": [],
-        "interests": ["camping", "hiking", "guitar", "birding", "road-trips", "kayaking"],
-        "personality": { "openness": 55, "conscientiousness": 82, "extraversion": 51, "agreeableness": 64, "stability": 84 },
-        "location": { "label": "Denver, CO", "lat": 39.7392, "lng": -104.9903 },
+        "interests": [
+          "camping",
+          "hiking",
+          "guitar",
+          "birding",
+          "road-trips",
+          "kayaking"
+        ],
+        "personality": {
+          "openness": 55,
+          "conscientiousness": 82,
+          "extraversion": 51,
+          "agreeableness": 64,
+          "stability": 84
+        },
+        "location": {
+          "label": "Denver, CO",
+          "lat": 39.7392,
+          "lng": -104.9903
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman", "nonbinary"],
+        "interestedIn": [
+          "woman",
+          "nonbinary"
+        ],
         "ageMin": 35,
         "ageMax": 55,
         "maxDistanceKm": 200,
@@ -497,8 +872,17 @@
         "theme": "system",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -518,14 +902,33 @@
         "pronouns": "she/her",
         "bio": "Pastry cook, so I am asleep while you are at happy hour and awake when the city is finally quiet. Meet me for breakfast and I will bring the good croissants.",
         "photos": [],
-        "interests": ["baking", "coffee", "cooking", "running", "journaling"],
-        "personality": { "openness": 69, "conscientiousness": 85, "extraversion": 46, "agreeableness": 76, "stability": 67 },
-        "location": { "label": "Chicago, IL", "lat": 41.8919, "lng": -87.6278 },
+        "interests": [
+          "baking",
+          "coffee",
+          "cooking",
+          "running",
+          "journaling"
+        ],
+        "personality": {
+          "openness": 69,
+          "conscientiousness": 85,
+          "extraversion": 46,
+          "agreeableness": 76,
+          "stability": 67
+        },
+        "location": {
+          "label": "Chicago, IL",
+          "lat": 41.8919,
+          "lng": -87.6278
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["man", "woman"],
+        "interestedIn": [
+          "man",
+          "woman"
+        ],
         "ageMin": 24,
         "ageMax": 36,
         "maxDistanceKm": 500,
@@ -533,8 +936,17 @@
         "theme": "light",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -554,14 +966,33 @@
         "pronouns": "he/him",
         "bio": "I restore old radios nobody asked me to restore, and my apartment hums. Take me to a museum and I will read every placard out loud, unprompted.",
         "photos": [],
-        "interests": ["tinkering", "vinyl", "jazz", "reading", "puzzles", "photography"],
-        "personality": { "openness": 74, "conscientiousness": 67, "extraversion": 28, "agreeableness": 71, "stability": 60 },
-        "location": { "label": "Chicago, IL", "lat": 41.85, "lng": -87.65 },
+        "interests": [
+          "tinkering",
+          "vinyl",
+          "jazz",
+          "reading",
+          "puzzles",
+          "photography"
+        ],
+        "personality": {
+          "openness": 74,
+          "conscientiousness": 67,
+          "extraversion": 28,
+          "agreeableness": 71,
+          "stability": 60
+        },
+        "location": {
+          "label": "Chicago, IL",
+          "lat": 41.85,
+          "lng": -87.65
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman"],
+        "interestedIn": [
+          "woman"
+        ],
         "ageMin": 29,
         "ageMax": 42,
         "maxDistanceKm": 250,
@@ -569,8 +1000,17 @@
         "theme": "dark",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -590,14 +1030,35 @@
         "pronouns": "she/her",
         "bio": "Retired from the stage, not from the drama. I direct community theatre now and I am happier than I have any right to be. Feed me, then argue with me.",
         "photos": [],
-        "interests": ["theatre", "wine", "film", "poetry", "dancing", "cooking", "reading"],
-        "personality": { "openness": 89, "conscientiousness": 60, "extraversion": 92, "agreeableness": 68, "stability": 71 },
-        "location": { "label": "Brooklyn, NY", "lat": 40.6782, "lng": -73.9442 },
+        "interests": [
+          "theatre",
+          "wine",
+          "film",
+          "poetry",
+          "dancing",
+          "cooking",
+          "reading"
+        ],
+        "personality": {
+          "openness": 89,
+          "conscientiousness": 60,
+          "extraversion": 92,
+          "agreeableness": 68,
+          "stability": 71
+        },
+        "location": {
+          "label": "Brooklyn, NY",
+          "lat": 40.6782,
+          "lng": -73.9442
+        },
         "showAge": false,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["man", "woman"],
+        "interestedIn": [
+          "man",
+          "woman"
+        ],
         "ageMin": 45,
         "ageMax": 62,
         "maxDistanceKm": 45,
@@ -606,11 +1067,22 @@
         "discoverable": true
       },
       "learning": {
-        "interestAffinity": { "theatre": 0.63, "wine": 0.29, "poetry": 0.21, "gaming": -0.31, "lifting": -0.15 },
+        "interestAffinity": {
+          "theatre": 0.63,
+          "wine": 0.29,
+          "poetry": 0.21,
+          "gaming": -0.31,
+          "lifting": -0.15
+        },
         "likeCount": 26,
         "passCount": 22
       },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -630,14 +1102,32 @@
         "pronouns": "he/him",
         "bio": "Jazz drummer six nights a month, logistics manager the rest of the time. I am in bed by ten on weeknights and I have stopped apologising for it.",
         "photos": [],
-        "interests": ["jazz", "live-music", "vinyl", "cooking", "swimming"],
-        "personality": { "openness": 71, "conscientiousness": 74, "extraversion": 57, "agreeableness": 62, "stability": 73 },
-        "location": { "label": "Brooklyn, NY", "lat": 40.6892, "lng": -73.98 },
+        "interests": [
+          "jazz",
+          "live-music",
+          "vinyl",
+          "cooking",
+          "swimming"
+        ],
+        "personality": {
+          "openness": 71,
+          "conscientiousness": 74,
+          "extraversion": 57,
+          "agreeableness": 62,
+          "stability": 73
+        },
+        "location": {
+          "label": "Brooklyn, NY",
+          "lat": 40.6892,
+          "lng": -73.98
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman"],
+        "interestedIn": [
+          "woman"
+        ],
         "ageMin": 30,
         "ageMax": 45,
         "maxDistanceKm": 500,
@@ -645,8 +1135,17 @@
         "theme": "system",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -666,14 +1165,34 @@
         "pronouns": "they/them",
         "bio": "Second-year vet tech, permanently covered in someone else's fur. I know where the good swimming holes are and I am stingy about which ones I will tell you.",
         "photos": [],
-        "interests": ["swimming", "camping", "kayaking", "backpacking", "board-games", "gaming"],
-        "personality": { "openness": 67, "conscientiousness": 59, "extraversion": 64, "agreeableness": 88, "stability": 54 },
-        "location": { "label": "Austin, TX", "lat": 30.25, "lng": -97.75 },
+        "interests": [
+          "swimming",
+          "camping",
+          "kayaking",
+          "backpacking",
+          "board-games",
+          "gaming"
+        ],
+        "personality": {
+          "openness": 67,
+          "conscientiousness": 59,
+          "extraversion": 64,
+          "agreeableness": 88,
+          "stability": 54
+        },
+        "location": {
+          "label": "Austin, TX",
+          "lat": 30.25,
+          "lng": -97.75
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman", "nonbinary"],
+        "interestedIn": [
+          "woman",
+          "nonbinary"
+        ],
         "ageMin": 21,
         "ageMax": 30,
         "maxDistanceKm": 90,
@@ -681,8 +1200,17 @@
         "theme": "dark",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -702,14 +1230,33 @@
         "pronouns": "he/him",
         "bio": "I make hot sauce in small batches and give most of it away, which my accountant calls a hobby. Line dancing on Tuesdays, and that part is not negotiable.",
         "photos": [],
-        "interests": ["cooking", "street-food", "dancing", "gardening", "guitar"],
-        "personality": { "openness": 76, "conscientiousness": 63, "extraversion": 83, "agreeableness": 79, "stability": 69 },
-        "location": { "label": "Austin, TX", "lat": 30.2711, "lng": -97.7437 },
+        "interests": [
+          "cooking",
+          "street-food",
+          "dancing",
+          "gardening",
+          "guitar"
+        ],
+        "personality": {
+          "openness": 76,
+          "conscientiousness": 63,
+          "extraversion": 83,
+          "agreeableness": 79,
+          "stability": 69
+        },
+        "location": {
+          "label": "Austin, TX",
+          "lat": 30.2711,
+          "lng": -97.7437
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman", "nonbinary"],
+        "interestedIn": [
+          "woman",
+          "nonbinary"
+        ],
         "ageMin": 25,
         "ageMax": 38,
         "maxDistanceKm": 500,
@@ -717,8 +1264,17 @@
         "theme": "system",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -738,14 +1294,34 @@
         "pronouns": "she/her",
         "bio": "Swedish mother, Minnesota winters — I was built for this climate and I complain about it anyway. I will drag you to the lake at six in the morning and you will thank me.",
         "photos": [],
-        "interests": ["swimming", "running", "camping", "baking", "knitting", "journaling"],
-        "personality": { "openness": 59, "conscientiousness": 81, "extraversion": 69, "agreeableness": 73, "stability": 78 },
-        "location": { "label": "Minneapolis, MN", "lat": 44.9778, "lng": -93.265 },
+        "interests": [
+          "swimming",
+          "running",
+          "camping",
+          "baking",
+          "knitting",
+          "journaling"
+        ],
+        "personality": {
+          "openness": 59,
+          "conscientiousness": 81,
+          "extraversion": 69,
+          "agreeableness": 73,
+          "stability": 78
+        },
+        "location": {
+          "label": "Minneapolis, MN",
+          "lat": 44.9778,
+          "lng": -93.265
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["man", "nonbinary"],
+        "interestedIn": [
+          "man",
+          "nonbinary"
+        ],
         "ageMin": 26,
         "ageMax": 38,
         "maxDistanceKm": 150,
@@ -753,8 +1329,17 @@
         "theme": "light",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -774,14 +1359,32 @@
         "pronouns": "he/him",
         "bio": "Divorced, two teenagers, one extremely old cat, and finally enough evenings free to play bass again. Not looking to rush anything, but I am looking.",
         "photos": [],
-        "interests": ["guitar", "jazz", "board-games", "gardening", "puzzles"],
-        "personality": { "openness": 52, "conscientiousness": 72, "extraversion": 41, "agreeableness": 80, "stability": 66 },
-        "location": { "label": "Minneapolis, MN", "lat": 44.9537, "lng": -93.29 },
+        "interests": [
+          "guitar",
+          "jazz",
+          "board-games",
+          "gardening",
+          "puzzles"
+        ],
+        "personality": {
+          "openness": 52,
+          "conscientiousness": 72,
+          "extraversion": 41,
+          "agreeableness": 80,
+          "stability": 66
+        },
+        "location": {
+          "label": "Minneapolis, MN",
+          "lat": 44.9537,
+          "lng": -93.29
+        },
         "showAge": false,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman"],
+        "interestedIn": [
+          "woman"
+        ],
         "ageMin": 34,
         "ageMax": 50,
         "maxDistanceKm": 100,
@@ -789,8 +1392,17 @@
         "theme": "system",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -810,14 +1422,34 @@
         "pronouns": "she/her",
         "bio": "Ran a bakery for eighteen years, sold it last spring, and I am now learning what a weekend is. Currently obsessed with birds, which surprised nobody more than me.",
         "photos": [],
-        "interests": ["baking", "birding", "gardening", "wine", "reading", "volunteering"],
-        "personality": { "openness": 70, "conscientiousness": 86, "extraversion": 66, "agreeableness": 84, "stability": 81 },
-        "location": { "label": "Atlanta, GA", "lat": 33.749, "lng": -84.388 },
+        "interests": [
+          "baking",
+          "birding",
+          "gardening",
+          "wine",
+          "reading",
+          "volunteering"
+        ],
+        "personality": {
+          "openness": 70,
+          "conscientiousness": 86,
+          "extraversion": 66,
+          "agreeableness": 84,
+          "stability": 81
+        },
+        "location": {
+          "label": "Atlanta, GA",
+          "lat": 33.749,
+          "lng": -84.388
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["man", "woman"],
+        "interestedIn": [
+          "man",
+          "woman"
+        ],
         "ageMin": 42,
         "ageMax": 60,
         "maxDistanceKm": 500,
@@ -825,8 +1457,17 @@
         "theme": "light",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -846,14 +1487,32 @@
         "pronouns": "he/him",
         "bio": "Barber. Yes I will cut your hair, no not on a first date. Trivia every Wednesday with the same four people, and we have never once come close to winning.",
         "photos": [],
-        "interests": ["trivia", "gaming", "lifting", "street-food", "karaoke"],
-        "personality": { "openness": 64, "conscientiousness": 57, "extraversion": 88, "agreeableness": 75, "stability": 70 },
-        "location": { "label": "Atlanta, GA", "lat": 33.7701, "lng": -84.362 },
+        "interests": [
+          "trivia",
+          "gaming",
+          "lifting",
+          "street-food",
+          "karaoke"
+        ],
+        "personality": {
+          "openness": 64,
+          "conscientiousness": 57,
+          "extraversion": 88,
+          "agreeableness": 75,
+          "stability": 70
+        },
+        "location": {
+          "label": "Atlanta, GA",
+          "lat": 33.7701,
+          "lng": -84.362
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman"],
+        "interestedIn": [
+          "woman"
+        ],
         "ageMin": 22,
         "ageMax": 32,
         "maxDistanceKm": 500,
@@ -861,8 +1520,17 @@
         "theme": "dark",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -882,14 +1550,35 @@
         "pronouns": "she/her",
         "bio": "Ski patrol in winter, wildflower guide in summer, insufferable for the six weeks in between. I want someone who packs their own snacks.",
         "photos": [],
-        "interests": ["hiking", "climbing", "camping", "photography", "tea", "birding"],
-        "personality": { "openness": 83, "conscientiousness": 78, "extraversion": 59, "agreeableness": 61, "stability": 75 },
-        "location": { "label": "Denver, CO", "lat": 39.7508, "lng": -105.0011 },
+        "interests": [
+          "hiking",
+          "climbing",
+          "camping",
+          "photography",
+          "tea",
+          "birding"
+        ],
+        "personality": {
+          "openness": 83,
+          "conscientiousness": 78,
+          "extraversion": 59,
+          "agreeableness": 61,
+          "stability": 75
+        },
+        "location": {
+          "label": "Denver, CO",
+          "lat": 39.7508,
+          "lng": -105.0011
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["man", "woman", "nonbinary"],
+        "interestedIn": [
+          "man",
+          "woman",
+          "nonbinary"
+        ],
         "ageMin": 28,
         "ageMax": 44,
         "maxDistanceKm": 500,
@@ -898,11 +1587,21 @@
         "discoverable": true
       },
       "learning": {
-        "interestAffinity": { "hiking": 0.58, "climbing": 0.44, "photography": 0.16, "gaming": -0.27 },
+        "interestAffinity": {
+          "hiking": 0.58,
+          "climbing": 0.44,
+          "photography": 0.16,
+          "gaming": -0.27
+        },
         "likeCount": 21,
         "passCount": 17
       },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -922,14 +1621,34 @@
         "pronouns": "he/him",
         "bio": "Game designer. I have playtested my own board game four hundred times and my friends have quietly stopped answering the group chat. Please help.",
         "photos": [],
-        "interests": ["board-games", "gaming", "coding", "coffee", "puzzles", "film"],
-        "personality": { "openness": 79, "conscientiousness": 69, "extraversion": 39, "agreeableness": 70, "stability": 57 },
-        "location": { "label": "Seattle, WA", "lat": 47.5952, "lng": -122.3316 },
+        "interests": [
+          "board-games",
+          "gaming",
+          "coding",
+          "coffee",
+          "puzzles",
+          "film"
+        ],
+        "personality": {
+          "openness": 79,
+          "conscientiousness": 69,
+          "extraversion": 39,
+          "agreeableness": 70,
+          "stability": 57
+        },
+        "location": {
+          "label": "Seattle, WA",
+          "lat": 47.5952,
+          "lng": -122.3316
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman", "nonbinary"],
+        "interestedIn": [
+          "woman",
+          "nonbinary"
+        ],
         "ageMin": 30,
         "ageMax": 44,
         "maxDistanceKm": 300,
@@ -937,8 +1656,17 @@
         "theme": "dark",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -958,14 +1686,35 @@
         "pronouns": "she/they",
         "bio": "Last year of art school and I am told the panic is standard. I photograph strangers' laundry lines — three albums so far, and nobody has asked me to stop.",
         "photos": [],
-        "interests": ["photography", "painting", "film", "city-breaks", "karaoke"],
-        "personality": { "openness": 93, "conscientiousness": 43, "extraversion": 72, "agreeableness": 69, "stability": 45 },
-        "location": { "label": "Chicago, IL", "lat": 41.9075, "lng": -87.677 },
+        "interests": [
+          "photography",
+          "painting",
+          "film",
+          "city-breaks",
+          "karaoke"
+        ],
+        "personality": {
+          "openness": 93,
+          "conscientiousness": 43,
+          "extraversion": 72,
+          "agreeableness": 69,
+          "stability": 45
+        },
+        "location": {
+          "label": "Chicago, IL",
+          "lat": 41.9075,
+          "lng": -87.677
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman", "man", "nonbinary", "other"],
+        "interestedIn": [
+          "woman",
+          "man",
+          "nonbinary",
+          "other"
+        ],
         "ageMin": 21,
         "ageMax": 30,
         "maxDistanceKm": 30,
@@ -973,8 +1722,17 @@
         "theme": "system",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -994,14 +1752,35 @@
         "pronouns": "she/her",
         "bio": "Immigration attorney: mostly waiting, then twelve minutes of shouting. On Sundays I do not speak to anyone until I have had two coffees and a long swim.",
         "photos": [],
-        "interests": ["swimming", "coffee", "volunteering", "reading", "yoga", "meditation", "jazz"],
-        "personality": { "openness": 75, "conscientiousness": 87, "extraversion": 33, "agreeableness": 66, "stability": 64 },
-        "location": { "label": "Oakland, CA", "lat": 37.8272, "lng": -122.2568 },
+        "interests": [
+          "swimming",
+          "coffee",
+          "volunteering",
+          "reading",
+          "yoga",
+          "meditation",
+          "jazz"
+        ],
+        "personality": {
+          "openness": 75,
+          "conscientiousness": 87,
+          "extraversion": 33,
+          "agreeableness": 66,
+          "stability": 64
+        },
+        "location": {
+          "label": "Oakland, CA",
+          "lat": 37.8272,
+          "lng": -122.2568
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman", "nonbinary"],
+        "interestedIn": [
+          "woman",
+          "nonbinary"
+        ],
         "ageMin": 30,
         "ageMax": 48,
         "maxDistanceKm": 500,
@@ -1009,8 +1788,17 @@
         "theme": "light",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -1030,14 +1818,32 @@
         "pronouns": "he/him",
         "bio": "Furniture maker. I have built the same chair thirty times and it is finally close to right. I would like company on the long drive out to the coast.",
         "photos": [],
-        "interests": ["tinkering", "road-trips", "kayaking", "jazz", "reading"],
-        "personality": { "openness": 56, "conscientiousness": 90, "extraversion": 26, "agreeableness": 72, "stability": 83 },
-        "location": { "label": "Portland, OR", "lat": 45.4805, "lng": -122.6207 },
+        "interests": [
+          "tinkering",
+          "road-trips",
+          "kayaking",
+          "jazz",
+          "reading"
+        ],
+        "personality": {
+          "openness": 56,
+          "conscientiousness": 90,
+          "extraversion": 26,
+          "agreeableness": 72,
+          "stability": 83
+        },
+        "location": {
+          "label": "Portland, OR",
+          "lat": 45.4805,
+          "lng": -122.6207
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman"],
+        "interestedIn": [
+          "woman"
+        ],
         "ageMin": 45,
         "ageMax": 58,
         "maxDistanceKm": 250,
@@ -1045,8 +1851,17 @@
         "theme": "light",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -1066,14 +1881,35 @@
         "pronouns": "they/them",
         "bio": "I keep bees on a rooftop and a spreadsheet about the bees that nobody has asked to see. I will bring you honey, and then I will talk about honey.",
         "photos": [],
-        "interests": ["gardening", "tea", "journaling", "cycling", "baking", "birding"],
-        "personality": { "openness": 81, "conscientiousness": 75, "extraversion": 47, "agreeableness": 86, "stability": 70 },
-        "location": { "label": "Vancouver, WA", "lat": 45.628, "lng": -122.6742 },
+        "interests": [
+          "gardening",
+          "tea",
+          "journaling",
+          "cycling",
+          "baking",
+          "birding"
+        ],
+        "personality": {
+          "openness": 81,
+          "conscientiousness": 75,
+          "extraversion": 47,
+          "agreeableness": 86,
+          "stability": 70
+        },
+        "location": {
+          "label": "Vancouver, WA",
+          "lat": 45.628,
+          "lng": -122.6742
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman", "nonbinary", "man"],
+        "interestedIn": [
+          "woman",
+          "nonbinary",
+          "man"
+        ],
         "ageMin": 27,
         "ageMax": 40,
         "maxDistanceKm": 150,
@@ -1081,8 +1917,17 @@
         "theme": "system",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -1102,14 +1947,33 @@
         "pronouns": "she/her",
         "bio": "Sommelier turned importer, which in practice means airports. I am blunt, I laugh too loudly, and I have never in my life been on time.",
         "photos": [],
-        "interests": ["wine", "city-breaks", "train-travel", "cooking", "dancing", "languages"],
-        "personality": { "openness": 86, "conscientiousness": 52, "extraversion": 90, "agreeableness": 58, "stability": 62 },
-        "location": { "label": "San Francisco, CA", "lat": 37.7955, "lng": -122.3937 },
+        "interests": [
+          "wine",
+          "city-breaks",
+          "train-travel",
+          "cooking",
+          "dancing",
+          "languages"
+        ],
+        "personality": {
+          "openness": 86,
+          "conscientiousness": 52,
+          "extraversion": 90,
+          "agreeableness": 58,
+          "stability": 62
+        },
+        "location": {
+          "label": "San Francisco, CA",
+          "lat": 37.7955,
+          "lng": -122.3937
+        },
         "showAge": true,
         "showDistance": false
       },
       "preferences": {
-        "interestedIn": ["man"],
+        "interestedIn": [
+          "man"
+        ],
         "ageMin": 38,
         "ageMax": 55,
         "maxDistanceKm": 500,
@@ -1117,9 +1981,20 @@
         "theme": "system",
         "discoverable": false
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
-      "blocked": ["elliot-vance"]
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
+      "blocked": [
+        "elliot-vance"
+      ]
     },
     {
       "uid": "noor-rahimi",
@@ -1138,14 +2013,34 @@
         "pronouns": "she/her",
         "bio": "I make data visualisations for a climate nonprofit: forty charts about heatwaves, and one, privately, about how often my cat walks across my keyboard.",
         "photos": [],
-        "interests": ["coding", "baking", "cycling", "journaling", "philosophy", "volunteering"],
-        "personality": { "openness": 73, "conscientiousness": 83, "extraversion": 53, "agreeableness": 77, "stability": 68 },
-        "location": { "label": "Austin, TX", "lat": 30.2849, "lng": -97.7341 },
+        "interests": [
+          "coding",
+          "baking",
+          "cycling",
+          "journaling",
+          "philosophy",
+          "volunteering"
+        ],
+        "personality": {
+          "openness": 73,
+          "conscientiousness": 83,
+          "extraversion": 53,
+          "agreeableness": 77,
+          "stability": 68
+        },
+        "location": {
+          "label": "Austin, TX",
+          "lat": 30.2849,
+          "lng": -97.7341
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman", "nonbinary"],
+        "interestedIn": [
+          "woman",
+          "nonbinary"
+        ],
         "ageMin": 27,
         "ageMax": 40,
         "maxDistanceKm": 500,
@@ -1153,8 +2048,17 @@
         "theme": "dark",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -1174,14 +2078,32 @@
         "pronouns": "he/him",
         "bio": "Rock guide six months a year, gloriously unemployed the other six. I read paperbacks until they fall apart and then I tape them back together.",
         "photos": [],
-        "interests": ["climbing", "camping", "reading", "hiking", "guitar"],
-        "personality": { "openness": 68, "conscientiousness": 49, "extraversion": 36, "agreeableness": 63, "stability": 59 },
-        "location": { "label": "Denver, CO", "lat": 39.7256, "lng": -104.977 },
+        "interests": [
+          "climbing",
+          "camping",
+          "reading",
+          "hiking",
+          "guitar"
+        ],
+        "personality": {
+          "openness": 68,
+          "conscientiousness": 49,
+          "extraversion": 36,
+          "agreeableness": 63,
+          "stability": 59
+        },
+        "location": {
+          "label": "Denver, CO",
+          "lat": 39.7256,
+          "lng": -104.977
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman"],
+        "interestedIn": [
+          "woman"
+        ],
         "ageMin": 30,
         "ageMax": 44,
         "maxDistanceKm": 40,
@@ -1189,8 +2111,17 @@
         "theme": "system",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     },
     {
@@ -1210,14 +2141,35 @@
         "pronouns": "she/they",
         "bio": "Court stenographer, so I have typed out the worst day of a lot of people's lives. I decompress by making noise music nobody wants to hear. Come anyway.",
         "photos": [],
-        "interests": ["electronic", "live-music", "film", "philosophy", "coffee", "knitting"],
-        "personality": { "openness": 90, "conscientiousness": 64, "extraversion": 44, "agreeableness": 67, "stability": 51 },
-        "location": { "label": "Brooklyn, NY", "lat": 40.7053, "lng": -73.9345 },
+        "interests": [
+          "electronic",
+          "live-music",
+          "film",
+          "philosophy",
+          "coffee",
+          "knitting"
+        ],
+        "personality": {
+          "openness": 90,
+          "conscientiousness": 64,
+          "extraversion": 44,
+          "agreeableness": 67,
+          "stability": 51
+        },
+        "location": {
+          "label": "Brooklyn, NY",
+          "lat": 40.7053,
+          "lng": -73.9345
+        },
         "showAge": true,
         "showDistance": true
       },
       "preferences": {
-        "interestedIn": ["woman", "nonbinary", "man"],
+        "interestedIn": [
+          "woman",
+          "nonbinary",
+          "man"
+        ],
         "ageMin": 24,
         "ageMax": 36,
         "maxDistanceKm": 500,
@@ -1225,12 +2177,24 @@
         "theme": "dark",
         "discoverable": true
       },
-      "learning": { "interestAffinity": {}, "likeCount": 0, "passCount": 0 },
-      "usage": { "date": null, "likes": 0, "superLikes": 0, "rewinds": 0 },
+      "learning": {
+        "interestAffinity": {},
+        "likeCount": 0,
+        "passCount": 0
+      },
+      "usage": {
+        "date": null,
+        "likes": 0,
+        "superLikes": 0,
+        "rewinds": 0
+      },
       "blocked": []
     }
-  ],
-  "inboundLikes": [
+  ];
+
+  // People who already swiped right on demo-you. Seeding these is what makes
+  // the premium "Who liked you" list real and puts a match one swipe away.
+  const SEED_INBOUND_LIKES = [
     { "from": "fatima-bennani", "action": "super", "offsetHours": 3 },
     { "from": "maya-okonkwo", "action": "like", "offsetHours": 8 },
     { "from": "priya-raghunathan", "action": "super", "offsetHours": 19 },
@@ -1240,8 +2204,11 @@
     { "from": "solveig-ramirez", "action": "like", "offsetHours": 77 },
     { "from": "noor-rahimi", "action": "like", "offsetHours": 104 },
     { "from": "bea-ferreira", "action": "like", "offsetHours": 133 }
-  ],
-  "conversations": [
+  ];
+
+  // Matches demo-you already has: one with history, one still empty so the
+  // "no messages yet" state and its icebreakers are reachable on first run.
+  const SEED_CONVERSATIONS = [
     {
       "with": "devin-alvarez",
       "matchedOffsetHours": 52,
@@ -1283,5 +2250,14 @@
       "matchedOffsetHours": 6,
       "messages": []
     }
-  ]
-}
+  ];
+
+  return {
+    SEED_VERSION: 1,
+    INTEREST_TAGS: INTEREST_TAGS,
+    INTEREST_BY_SLUG: INTEREST_BY_SLUG,
+    SEED_PROFILES: SEED_PROFILES,
+    SEED_INBOUND_LIKES: SEED_INBOUND_LIKES,
+    SEED_CONVERSATIONS: SEED_CONVERSATIONS
+  };
+});

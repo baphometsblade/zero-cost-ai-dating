@@ -1,19 +1,81 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dashboard - Zero Cost AI Dating</title>
-    <link rel="stylesheet" href="css/style.css">
-    <link rel="stylesheet" href="css/components.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Your Discover deck: profiles ranked on your device, each one carrying the reasons behind its compatibility score. Swipe, tap or use the keyboard.">
+  <title>Discover · Zero Cost AI Dating</title>
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/components.css">
 </head>
-<body>
-    <div id="dashboard">
-        <!-- Main dashboard interface will be loaded here -->
+<body class="app-shell">
+  <main class="container" id="main">
+
+    <header class="page-head">
+      <h1 class="page-title">Discover</h1>
+      <p class="page-sub">
+        Everyone here was scored in this tab, against your interests, your bio, your personality
+        sliders and how far you are willing to travel. The reasons on each card are the actual
+        inputs to the score — nothing is hidden behind a black box.
+      </p>
+    </header>
+
+    <noscript>
+      <p class="notice notice-warn">This page needs JavaScript: the matching engine runs in your browser, so there is nothing to show without it.</p>
+    </noscript>
+
+    <!-- Daily-limit notice. dashboard.js fills the sentence, runs the countdown
+         to local midnight and removes .hidden when you run out. -->
+    <div class="limit-banner hidden" id="limit-banner" role="status" aria-live="polite">
+      <span id="limit-text"></span>
+      <a class="btn btn-primary btn-sm" href="subscription.html" id="limit-cta">See Premium</a>
     </div>
-    
-    <script src="js/firebase-config.js"></script>
-    <script src="js/auth.js"></script>
-    <script src="js/dashboard.js"></script>
+
+    <section class="deck" aria-labelledby="deck-heading">
+      <h2 class="sr-only" id="deck-heading">Your deck</h2>
+
+      <!-- Skeletons, the card stack, the empty state and the error state all
+           render into here, one at a time. -->
+      <div class="deck-stack" id="deck-stack"></div>
+
+      <!-- Every swipe, rewind and deck change is announced here. -->
+      <p class="sr-only" id="deck-status" role="status" aria-live="polite"></p>
+
+      <div class="deck-actions" role="group" aria-label="Swipe actions">
+        <button class="action-btn action-rewind" type="button" id="btn-rewind" data-action="rewind" title="Rewind — Z" aria-label="Rewind the last swipe. Keyboard shortcut Z" disabled>↺</button>
+        <button class="action-btn action-pass" type="button" id="btn-pass" data-action="pass" title="Pass — Left arrow" aria-label="Pass. Keyboard shortcut left arrow" disabled>✕</button>
+        <button class="action-btn action-super" type="button" id="btn-super" data-action="super" title="Super like — Up arrow" aria-label="Super like. Keyboard shortcut up arrow" disabled>★</button>
+        <button class="action-btn action-like" type="button" id="btn-like" data-action="like" title="Like — Right arrow" aria-label="Like. Keyboard shortcut right arrow" disabled>♥</button>
+        <button class="action-btn action-info" type="button" id="btn-info" data-action="info" title="Full explanation — I" aria-label="Show the full explanation for this profile. Keyboard shortcut I" aria-expanded="false" aria-controls="deck-details" disabled>i</button>
+      </div>
+
+      <p class="deck-hint">
+        <span id="usage-hint">Loading your deck…</span>
+        <button class="btn btn-ghost btn-sm" type="button" id="btn-shortcuts" aria-haspopup="dialog">Keyboard shortcuts (?)</button>
+      </p>
+    </section>
+
+    <!-- The full explanation for the top card: every reason, the score
+         breakdown, the interests and the bio in full. -->
+    <section class="panel stack stack-sm hidden" id="deck-details" tabindex="-1" aria-labelledby="details-heading">
+      <h2 id="details-heading">Why this card, in full</h2>
+      <div class="stack stack-sm" id="details-body"></div>
+    </section>
+
+  </main>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js" crossorigin="anonymous"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js" crossorigin="anonymous"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js" crossorigin="anonymous"></script>
+  <script src="js/firebase-config.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/seed-data.js"></script>
+  <script src="js/data-store.js"></script>
+  <script src="js/matching-engine.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/app.js"></script>
+  <script src="js/dashboard.js"></script>
 </body>
 </html>

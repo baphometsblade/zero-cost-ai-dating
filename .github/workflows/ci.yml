@@ -1,0 +1,51 @@
+# Continuous integration for zero-cost-ai-dating.
+#
+# The project has zero runtime and zero dev dependencies, so there is nothing to install:
+# CI just checks out the repo, verifies the generated seed bundle is still in sync with
+# seed/profiles.json, and runs the Node built-in test runner. No secrets, no deploy step —
+# deploys stay a deliberate local `npm run deploy`.
+name: CI
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+
+# Read-only token: nothing in this workflow writes back to the repository.
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify seed and run tests (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # package.json advertises engines >= 18, so the suite is run on more than one major.
+    # Pinning a single version once hid a real breakage: the test runner's handling of a
+    # positional directory argument changed after Node 20, so `npm test` silently ran no
+    # tests at all on newer runtimes while CI stayed green.
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22']
+
+    steps:
+      # Fetch the sources under test.
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # Node 20 LTS and the next LTS line; package.json requires >= 18.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # public/js/seed-data.js is generated from seed/profiles.json — fail if it drifted.
+      - name: Check generated seed bundle is up to date
+        run: npm run check:seed
+
+      # node --test discovers tests/*.test.js — matching engine, seed schema, static HTML.
+      - name: Run tests
+        run: npm test

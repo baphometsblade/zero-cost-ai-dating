@@ -1,0 +1,26 @@
+{
+  "name": "zero-cost-ai-dating",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A Tinder-style dating app whose matching runs entirely on-device, hosted on Firebase for $0/month forever.",
+  "license": "MIT",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test",
+    "serve": "python3 -m http.server 5000 --directory public",
+    "build:seed": "node scripts/build-seed.js",
+    "check:seed": "node scripts/build-seed.js --check",
+    "deploy": "firebase deploy --only hosting,firestore"
+  },
+  "keywords": [
+    "dating",
+    "firebase",
+    "tf-idf",
+    "on-device",
+    "explainable-matching",
+    "zero-cost"
+  ]
+}
