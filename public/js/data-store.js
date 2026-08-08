@@ -32,12 +32,30 @@
     swipes: 'zc.demo.swipes',
     matches: 'zc.demo.matches',
     messages: 'zc.demo.messages',
+    reports: 'zc.demo.reports',
     session: 'zc.demo.session',
     seeded: 'zc.demo.seeded'
   };
 
   const SEED_VERSION = 1;
   const MESSAGE_MAX = 1000;
+  const REPORT_DETAILS_MAX = 500;
+
+  /**
+   * The closed list of report reasons with their UI labels — the single place
+   * both the validation and the report dialog draw from. firestore.rules
+   * repeats the slug list literally (rules cannot import), so a change here
+   * must land there in the same commit.
+   */
+  const REPORT_REASONS = [
+    { slug: 'fake-profile', label: 'Fake or impersonating profile' },
+    { slug: 'inappropriate-content', label: 'Inappropriate photos or bio' },
+    { slug: 'harassment', label: 'Harassment or threats' },
+    { slug: 'underage', label: 'Appears to be under 18' },
+    { slug: 'scam-or-spam', label: 'Scam, spam or solicitation' },
+    { slug: 'other', label: 'Something else' }
+  ];
+  const REPORT_REASON_SLUGS = REPORT_REASONS.map(function (r) { return r.slug; });
   const DEFAULT_CANDIDATE_LIMIT = 60;
   const DEFAULT_MESSAGE_LIMIT = 200;
   const TOUCH_THROTTLE_MS = 5 * 60 * 1000;
@@ -374,6 +392,8 @@
   function writeMatches(map) { return writeJson(KEYS.matches, map); }
   function readMessages() { return readJson(KEYS.messages, {}); }
   function writeMessages(map) { return writeJson(KEYS.messages, map); }
+  function readReports() { return readJson(KEYS.reports, {}); }
+  function writeReports(map) { return writeJson(KEYS.reports, map); }
 
   /* ------------------------------------------------------------------------
      4. Demo message listeners (storage event + poll)
@@ -878,6 +898,18 @@
       return true;
     },
 
+    async reportUser(fromUid, aboutUid, reason, details) {
+      const report = shapeReport(fromUid, aboutUid, reason, details);
+      // Same deterministic id convention as the Firestore adapter: one report
+      // per (reporter, subject) pair, first filing wins.
+      report.id = swipeId(fromUid, aboutUid);
+      const reports = readReports();
+      if (reports[report.id]) return { ok: true, id: report.id, duplicate: true };
+      reports[report.id] = report;
+      writeReports(reports);
+      return { ok: true, id: report.id, duplicate: false };
+    },
+
     async deleteAccountData(uid) {
       // Swipes in both directions, matches (and their messages) either way,
       // then the account document itself — mirroring the Firestore adapter.
@@ -900,6 +932,14 @@
       writeMatches(matches);
       writeMessages(messages);
 
+      // Reports the account filed carry its uid; reports about it stay, the
+      // same way the Firestore queue retains them for review.
+      const reports = readReports();
+      Object.keys(reports).forEach(function (id) {
+        if (reports[id] && reports[id].from === uid) delete reports[id];
+      });
+      writeReports(reports);
+
       const users = readUsers();
       delete users[uid];
       writeUsers(users);
@@ -912,7 +952,7 @@
     },
 
     async resetDemo() {
-      [KEYS.users, KEYS.swipes, KEYS.matches, KEYS.messages, KEYS.seeded].forEach(removeKey);
+      [KEYS.users, KEYS.swipes, KEYS.matches, KEYS.messages, KEYS.reports, KEYS.seeded].forEach(removeKey);
       await demoSeed(true);
       pollAll();
       return true;
@@ -926,7 +966,8 @@
         users: readUsers(),
         swipes: readSwipes(),
         matches: readMatches(),
-        messages: readMessages()
+        messages: readMessages(),
+        reports: readReports()
       };
     },
 
@@ -946,6 +987,7 @@
       writeSwipes(isPlainObject(data.swipes) ? data.swipes : {});
       writeMatches(isPlainObject(data.matches) ? data.matches : {});
       writeMessages(isPlainObject(data.messages) ? data.messages : {});
+      writeReports(isPlainObject(data.reports) ? data.reports : {});
       writeJson(KEYS.seeded, { version: SEED_VERSION, at: nowIso(), count: Object.keys(data.users).length });
       pollAll();
       return true;
@@ -999,6 +1041,29 @@
       return true;
     }
     return open(a, b) && open(b, a);
+  }
+
+  /**
+   * Validate and shape a user report. Throws on anything malformed so a bad
+   * report never reaches storage in either adapter.
+   * @param {string} fromUid the reporter
+   * @param {string} aboutUid the account being reported
+   * @param {string} reason one of REPORT_REASONS
+   * @param {string} [details] optional free text, capped at 500 chars
+   * @returns {Object} the report document (without an id)
+   */
+  function shapeReport(fromUid, aboutUid, reason, details) {
+    if (!fromUid || !aboutUid) throw new Error('A report needs both accounts.');
+    if (fromUid === aboutUid) throw new Error('You cannot report yourself.');
+    if (REPORT_REASON_SLUGS.indexOf(reason) === -1) throw new Error('Pick a reason for the report.');
+    const text = String(details || '').trim().slice(0, REPORT_DETAILS_MAX);
+    return {
+      from: String(fromUid),
+      about: String(aboutUid),
+      reason: reason,
+      details: text,
+      createdAt: nowIso()
+    };
   }
 
   /**
@@ -1520,6 +1585,26 @@
       }
     },
 
+    async reportUser(fromUid, aboutUid, reason, details) {
+      const report = shapeReport(fromUid, aboutUid, reason, details);
+      // Deterministic id: one report per (reporter, subject) pair, which is
+      // what bounds the queue — the rules enforce the same convention and deny
+      // updates, so re-reporting the same person cannot rewrite the original.
+      report.id = swipeId(fromUid, aboutUid);
+      const ref = db().collection('reports').doc(report.id);
+      try {
+        await ref.set(report);
+        return { ok: true, id: report.id, duplicate: false };
+      } catch (err) {
+        // A denied write is either "already reported" (set over an existing
+        // doc counts as an update) or a genuinely invalid report. Our own
+        // existing report is readable, so one get tells the two apart.
+        const mine = await ref.get().catch(function () { return null; });
+        if (mine && mine.exists) return { ok: true, id: report.id, duplicate: true };
+        throw err;
+      }
+    },
+
     async deleteAccountData(uid) {
       // Swipes in both directions: the ones this account made, and the ones
       // aimed at it — an inbound like is data about this account and must not
@@ -1536,6 +1621,16 @@
       for (let i = 0; i < matches.docs.length; i += 1) {
         await deleteMatchMessages(matches.docs[i].ref);
         await matches.docs[i].ref.delete();
+      }
+
+      // Reports this account filed — readable and deletable only by their
+      // author, which is exactly what makes this purge possible. Reports about
+      // the account are someone else's documents and stay in the queue.
+      try {
+        const reports = await db().collection('reports').where('from', '==', uid).get();
+        await batchDelete(reports.docs.map(function (doc) { return doc.ref; }));
+      } catch (err) {
+        console.warn('[zc.store] Could not purge filed reports.', err);
       }
 
       // The public projection, then the private document.
@@ -1862,6 +1957,24 @@
       const used = Number(usage[field]) || 0;
       const remaining = limit === Infinity ? Infinity : Math.max(0, limit - used);
       return { allowed: remaining > 0, remaining: remaining, limit: limit, plan: plan };
+    },
+
+    /** The closed list of report reasons ({slug, label}), for the report UI. */
+    REPORT_REASONS: REPORT_REASONS.map(function (r) { return { slug: r.slug, label: r.label }; }),
+
+    /**
+     * File a report about another user. Reports are write-only: they can be
+     * filed but never listed, edited or retracted from a client — in Firebase
+     * mode the project owner reviews the queue in the console.
+     * @param {string} fromUid the reporter
+     * @param {string} aboutUid the account being reported
+     * @param {string} reason one of REPORT_REASONS
+     * @param {string} [details] optional free text, capped at 500 chars
+     * @returns {Promise<{ok: boolean, id: string}>}
+     */
+    async reportUser(fromUid, aboutUid, reason, details) {
+      await ready;
+      return adapter.reportUser(fromUid, aboutUid, reason, details);
     },
 
     /**

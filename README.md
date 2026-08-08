@@ -63,12 +63,14 @@ all work. Nothing is sent anywhere.
 | **Auth** (`auth.html`) | Email/password sign-in and sign-up with inline validation and a password strength meter, Google sign-in when Firebase is live, password reset, demo account entry. |
 | **Discover** (`dashboard.html`) | The deck. Pointer-driven swiping with rotation, stamps and velocity commit — plus a complete keyboard equivalent (`←` pass, `→` like, `↑` super like, `z` rewind, `i` details, `?` shortcuts). Compatibility ring, up to three reasons per card, daily limits with a countdown, match celebration with generated icebreakers. |
 | **Profile** (`profile.html`) | Bio with counter, 48 interest chips grouped by category, five personality sliders, 18+ birthdate guard, city picker or `navigator.geolocation`, up to six photo URLs, a live preview of your own card, and a completeness meter. |
-| **Matches** (`matches.html`) | New-matches strip, conversation list with unread dots, live chat with day separators, icebreaker suggestions on empty threads, unmatch/block, and the premium "who liked you" list. |
+| **Matches** (`matches.html`) | New-matches strip, conversation list with unread dots, live chat with day separators, icebreaker suggestions on empty threads, report/unmatch/block, and the premium "who liked you" list. |
 | **Settings** (`settings.html`) | Discovery preferences, theme, notifications, **connect your own Firebase project** (paste a config, no code edits), data export, demo reset, account deletion. |
 | **Plans** (`subscription.html`) | An honest, non-deceptive plan comparison. Premium is a **local simulation** — see [Limitations](#limitations). |
 
 Everything is mobile-first, works in light and dark, respects `prefers-reduced-motion`, and
-is fully operable from the keyboard.
+is fully operable from the keyboard. The app is also an installable PWA: a manifest plus a
+network-first service worker make it launchable from the home screen, and demo mode keeps
+working with no connection at all — fitting, for an app whose matching never leaves the device.
 
 ---
 
@@ -310,8 +312,11 @@ These are real, and worth knowing before you show this to anyone:
   gender/age pre-filters) until the deck is full or a scan cap is hit. That is fine for tens
   or low hundreds of profiles and would need a server-side pre-filter well before it was a
   real product.
-- **No moderation, reporting queue, or abuse tooling.** There is block and unmatch, and that
-  is the extent of it.
+- **Moderation is a queue, not a team.** Report (with a reason and optional detail), block and
+  unmatch are built in. Reports land in a `reports` collection capped at one per
+  (reporter, subject) pair, visible only to their own author and to the project owner — who
+  reviews the queue in the Firebase console or with admin credentials. Nothing triages that
+  queue automatically, and there is no in-app tooling to act on it.
 - **The "AI" is classical ML, deliberately.** TF‑IDF, cosine similarity, weighted vector
   distance and a per-tag affinity table. It is explainable and free precisely because it is not
   a neural model, and it will not understand a bio the way a language model would.

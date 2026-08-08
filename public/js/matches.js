@@ -1080,6 +1080,72 @@
   }
 
   /**
+   * Report the other person: a reason picker, optional detail, and a clear
+   * note that the report is kept for review. Offers block-and-unmatch after.
+   * @param {Object} match the active MatchView
+   * @returns {Promise<void>}
+   */
+  async function reportUser(match) {
+    if (!ZC.ui || typeof ZC.ui.modal !== 'function') return;
+    const name = nameOf(match.other);
+    const el = ZC.util.el;
+
+    // Reasons and labels come from the store's single closed list, so the
+    // dialog can never drift from what the validation (and the rules) accept.
+    const reasons = Array.isArray(ZC.store.REPORT_REASONS) ? ZC.store.REPORT_REASONS : [];
+
+    let details = '';
+    const select = el('select', {
+      class: 'select',
+      attrs: { 'aria-label': 'Reason for the report' }
+    }, reasons.map(function (reason) {
+      return el('option', { text: reason.label || reason.slug, attrs: { value: reason.slug } });
+    }));
+    const textarea = el('textarea', {
+      class: 'textarea',
+      attrs: { rows: '3', maxlength: '500', placeholder: 'Anything that helps review this (optional)' },
+      on: { input: function (event) { details = event.target.value; } }
+    });
+    const body = el('div', { class: 'stack stack-sm' }, [
+      el('p', { text: 'Tell us what is wrong with this profile or conversation. Reports are kept for review and cannot be seen by ' + name + '.' }),
+      select,
+      textarea
+    ]);
+
+    const choice = await ZC.ui.modal({
+      title: 'Report ' + name,
+      body: body,
+      actions: [
+        { id: 'cancel', label: 'Cancel', variant: 'ghost' },
+        { id: 'send', label: 'Send report', variant: 'danger' }
+      ]
+    });
+    if (choice !== 'send') return;
+
+    try {
+      const filed = await ZC.store.reportUser(state.me.uid, match.otherUid, select.value, details);
+      toast(filed && filed.duplicate
+        ? 'You already reported ' + name + ' — it is in the review queue.'
+        : 'Thanks — the report has been filed.', 'success');
+      announce('Report filed.');
+    } catch (err) {
+      console.error('[zc] Could not file the report.', err);
+      toast('The report could not be filed. Please try again.', 'error');
+      return;
+    }
+
+    // Most people who report also want distance; offer it without forcing it.
+    const alsoBlock = ZC.ui && typeof ZC.ui.confirm === 'function'
+      ? await ZC.ui.confirm('Also block ' + name + ' and remove this conversation?', {
+        title: 'Block ' + name + '?',
+        confirmLabel: 'Block and unmatch',
+        variant: 'danger'
+      })
+      : false;
+    if (alsoBlock) await endMatch(match, true);
+  }
+
+  /**
    * The ⋯ menu. It is a dialog rather than a dropdown so it inherits the
    * shared focus trap, Escape handling and mobile sizing for free.
    * @returns {Promise<void>}
@@ -1091,9 +1157,10 @@
 
     const choice = await ZC.ui.modal({
       title: name,
-      body: 'Read their full card, or end the conversation. Blocking also keeps the two of you out of each other\'s decks.',
+      body: 'Read their full card, report a problem, or end the conversation. Blocking also keeps the two of you out of each other\'s decks.',
       actions: [
         { id: 'close', label: 'Close', variant: 'ghost' },
+        { id: 'report', label: 'Report', variant: 'danger' },
         { id: 'block', label: 'Block and unmatch', variant: 'danger' },
         { id: 'unmatch', label: 'Unmatch', variant: 'danger' },
         { id: 'profile', label: 'View profile', variant: 'primary' }
@@ -1101,6 +1168,7 @@
     });
 
     if (choice === 'profile') await viewProfile(match);
+    else if (choice === 'report') await reportUser(match);
     else if (choice === 'unmatch') await endMatch(match, false);
     else if (choice === 'block') await endMatch(match, true);
   }
