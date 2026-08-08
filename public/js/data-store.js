@@ -41,8 +41,21 @@
   const MESSAGE_MAX = 1000;
   const REPORT_DETAILS_MAX = 500;
 
-  /** The closed list of report reasons; the Firestore rules enforce the same set. */
-  const REPORT_REASONS = ['fake-profile', 'inappropriate-content', 'harassment', 'underage', 'scam-or-spam', 'other'];
+  /**
+   * The closed list of report reasons with their UI labels — the single place
+   * both the validation and the report dialog draw from. firestore.rules
+   * repeats the slug list literally (rules cannot import), so a change here
+   * must land there in the same commit.
+   */
+  const REPORT_REASONS = [
+    { slug: 'fake-profile', label: 'Fake or impersonating profile' },
+    { slug: 'inappropriate-content', label: 'Inappropriate photos or bio' },
+    { slug: 'harassment', label: 'Harassment or threats' },
+    { slug: 'underage', label: 'Appears to be under 18' },
+    { slug: 'scam-or-spam', label: 'Scam, spam or solicitation' },
+    { slug: 'other', label: 'Something else' }
+  ];
+  const REPORT_REASON_SLUGS = REPORT_REASONS.map(function (r) { return r.slug; });
   const DEFAULT_CANDIDATE_LIMIT = 60;
   const DEFAULT_MESSAGE_LIMIT = 200;
   const TOUCH_THROTTLE_MS = 5 * 60 * 1000;
@@ -887,11 +900,14 @@
 
     async reportUser(fromUid, aboutUid, reason, details) {
       const report = shapeReport(fromUid, aboutUid, reason, details);
-      report.id = 'r-' + (util.uid ? util.uid() : String(Math.random()).slice(2));
+      // Same deterministic id convention as the Firestore adapter: one report
+      // per (reporter, subject) pair, first filing wins.
+      report.id = swipeId(fromUid, aboutUid);
       const reports = readReports();
+      if (reports[report.id]) return { ok: true, id: report.id, duplicate: true };
       reports[report.id] = report;
       writeReports(reports);
-      return { ok: true, id: report.id };
+      return { ok: true, id: report.id, duplicate: false };
     },
 
     async deleteAccountData(uid) {
@@ -1039,7 +1055,7 @@
   function shapeReport(fromUid, aboutUid, reason, details) {
     if (!fromUid || !aboutUid) throw new Error('A report needs both accounts.');
     if (fromUid === aboutUid) throw new Error('You cannot report yourself.');
-    if (REPORT_REASONS.indexOf(reason) === -1) throw new Error('Pick a reason for the report.');
+    if (REPORT_REASON_SLUGS.indexOf(reason) === -1) throw new Error('Pick a reason for the report.');
     const text = String(details || '').trim().slice(0, REPORT_DETAILS_MAX);
     return {
       from: String(fromUid),
@@ -1571,13 +1587,22 @@
 
     async reportUser(fromUid, aboutUid, reason, details) {
       const report = shapeReport(fromUid, aboutUid, reason, details);
-      const ref = db().collection('reports').doc();
-      report.id = ref.id;
-      // Write-only by design: the rules deny reads, updates and deletes, so a
-      // report can be filed but never enumerated, altered or retracted from a
-      // client. The project owner reads the queue in the Firebase console.
-      await ref.set(report);
-      return { ok: true, id: report.id };
+      // Deterministic id: one report per (reporter, subject) pair, which is
+      // what bounds the queue — the rules enforce the same convention and deny
+      // updates, so re-reporting the same person cannot rewrite the original.
+      report.id = swipeId(fromUid, aboutUid);
+      const ref = db().collection('reports').doc(report.id);
+      try {
+        await ref.set(report);
+        return { ok: true, id: report.id, duplicate: false };
+      } catch (err) {
+        // A denied write is either "already reported" (set over an existing
+        // doc counts as an update) or a genuinely invalid report. Our own
+        // existing report is readable, so one get tells the two apart.
+        const mine = await ref.get().catch(function () { return null; });
+        if (mine && mine.exists) return { ok: true, id: report.id, duplicate: true };
+        throw err;
+      }
     },
 
     async deleteAccountData(uid) {
@@ -1596,6 +1621,16 @@
       for (let i = 0; i < matches.docs.length; i += 1) {
         await deleteMatchMessages(matches.docs[i].ref);
         await matches.docs[i].ref.delete();
+      }
+
+      // Reports this account filed — readable and deletable only by their
+      // author, which is exactly what makes this purge possible. Reports about
+      // the account are someone else's documents and stay in the queue.
+      try {
+        const reports = await db().collection('reports').where('from', '==', uid).get();
+        await batchDelete(reports.docs.map(function (doc) { return doc.ref; }));
+      } catch (err) {
+        console.warn('[zc.store] Could not purge filed reports.', err);
       }
 
       // The public projection, then the private document.
@@ -1924,8 +1959,8 @@
       return { allowed: remaining > 0, remaining: remaining, limit: limit, plan: plan };
     },
 
-    /** The closed list of report reasons, for building the report UI. */
-    REPORT_REASONS: REPORT_REASONS.slice(),
+    /** The closed list of report reasons ({slug, label}), for the report UI. */
+    REPORT_REASONS: REPORT_REASONS.map(function (r) { return { slug: r.slug, label: r.label }; }),
 
     /**
      * File a report about another user. Reports are write-only: they can be

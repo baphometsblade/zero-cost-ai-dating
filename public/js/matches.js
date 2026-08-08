@@ -1090,23 +1090,16 @@
     const name = nameOf(match.other);
     const el = ZC.util.el;
 
-    // The human-readable labels for the store's closed reason list.
-    const REASON_LABELS = {
-      'fake-profile': 'Fake or impersonating profile',
-      'inappropriate-content': 'Inappropriate photos or bio',
-      'harassment': 'Harassment or threats',
-      'underage': 'Appears to be under 18',
-      'scam-or-spam': 'Scam, spam or solicitation',
-      'other': 'Something else'
-    };
-    const reasons = (ZC.store.REPORT_REASONS || Object.keys(REASON_LABELS));
+    // Reasons and labels come from the store's single closed list, so the
+    // dialog can never drift from what the validation (and the rules) accept.
+    const reasons = Array.isArray(ZC.store.REPORT_REASONS) ? ZC.store.REPORT_REASONS : [];
 
     let details = '';
     const select = el('select', {
       class: 'select',
       attrs: { 'aria-label': 'Reason for the report' }
-    }, reasons.map(function (slug) {
-      return el('option', { text: REASON_LABELS[slug] || slug, attrs: { value: slug } });
+    }, reasons.map(function (reason) {
+      return el('option', { text: reason.label || reason.slug, attrs: { value: reason.slug } });
     }));
     const textarea = el('textarea', {
       class: 'textarea',
@@ -1130,8 +1123,10 @@
     if (choice !== 'send') return;
 
     try {
-      await ZC.store.reportUser(state.me.uid, match.otherUid, select.value, details);
-      toast('Thanks — the report has been filed.', 'success');
+      const filed = await ZC.store.reportUser(state.me.uid, match.otherUid, select.value, details);
+      toast(filed && filed.duplicate
+        ? 'You already reported ' + name + ' — it is in the review queue.'
+        : 'Thanks — the report has been filed.', 'success');
       announce('Report filed.');
     } catch (err) {
       console.error('[zc] Could not file the report.', err);

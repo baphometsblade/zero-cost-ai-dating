@@ -313,9 +313,10 @@ These are real, and worth knowing before you show this to anyone:
   or low hundreds of profiles and would need a server-side pre-filter well before it was a
   real product.
 - **Moderation is a queue, not a team.** Report (with a reason and optional detail), block and
-  unmatch are built in, and reports land in a write-only `reports` collection that only the
-  project owner can read — from the Firebase console or with admin credentials. Nothing
-  triages that queue automatically, and there is no in-app tooling to act on it.
+  unmatch are built in. Reports land in a `reports` collection capped at one per
+  (reporter, subject) pair, visible only to their own author and to the project owner — who
+  reviews the queue in the Firebase console or with admin credentials. Nothing triages that
+  queue automatically, and there is no in-app tooling to act on it.
 - **The "AI" is classical ML, deliberately.** TF‑IDF, cosine similarity, weighted vector
   distance and a per-tag affinity table. It is explainable and free precisely because it is not
   a neural model, and it will not understand a bio the way a language model would.

@@ -41,10 +41,13 @@ const CORE = [
 ];
 
 self.addEventListener('install', function (event) {
+  // No catch here on purpose: if any CORE asset fails to fetch, installation
+  // must fail so the previous worker — and its working cache — stay active.
+  // Swallowing the failure would activate an empty shell and then delete the
+  // old cache below. A failed install simply retries on the next visit.
   event.waitUntil(
     caches.open(CACHE)
       .then(function (cache) { return cache.addAll(CORE); })
-      .catch(function () { /* offline install is fine — runtime caching fills in */ })
       .then(function () { return self.skipWaiting(); })
   );
 });
@@ -76,9 +79,20 @@ self.addEventListener('fetch', function (event) {
       }
       return response;
     }).catch(function () {
-      return caches.match(request, { ignoreSearch: url.pathname.endsWith('.html') }).then(function (hit) {
-        return hit || caches.match('404.html');
-      });
+      // Navigations are cached under their file names, but with Hosting's
+      // cleanUrls the address bar says '/', '/matches', … — map the pathname
+      // back to its page ('/' -> index.html, '/matches' -> matches.html) so
+      // offline navigation serves the right shell, never the 404 page for a
+      // page that is actually cached.
+      if (request.mode === 'navigate') {
+        const page = url.pathname === '/'
+          ? 'index.html'
+          : url.pathname.replace(/^\//, '').replace(/\.html$/, '') + '.html';
+        return caches.match(page).then(function (hit) {
+          return hit || caches.match('404.html');
+        });
+      }
+      return caches.match(request);
     })
   );
 });

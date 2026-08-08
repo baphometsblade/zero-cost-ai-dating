@@ -368,14 +368,18 @@ service cloud.firestore {
     }
 
     // ---------------------------------------------------------------------------
-    // reports/{reportId} — the abuse-report queue, write-only from clients
+    // reports/{reportId} — the abuse-report queue, id is `from_about`
     // ---------------------------------------------------------------------------
     //
-    // Anyone signed in can file a report about another account, and that is all a
-    // client can ever do here: no reads, updates or deletes, so reports cannot be
-    // enumerated (which would leak who reported whom), altered, or retracted by
-    // the reported party. The project owner reviews the queue in the Firebase
-    // console or with admin credentials.
+    // Anyone signed in can file a report about another account. The deterministic
+    // id bounds the queue — one report per (reporter, subject) pair, so a single
+    // account cannot flood the queue or burn the write quota with random ids —
+    // and the subject must actually exist in discovery, so reports cannot be
+    // filed against invented uids. Reports are invisible to everyone except
+    // their own author: the reported party can never enumerate, alter or retract
+    // them. Authors can read and delete only their own (that is what lets
+    // account deletion honestly purge everything the account wrote). The project
+    // owner reviews the queue in the Firebase console or with admin credentials.
     match /reports/{reportId} {
 
       function reportOk(d) {
@@ -383,13 +387,24 @@ service cloud.firestore {
           && d.from == request.auth.uid
           && d.about is string && d.about.size() > 0
           && d.about != d.from
+          && reportId == d.from + '_' + d.about
+          && exists(/databases/$(database)/documents/discovery/$(d.about))
           && d.reason in ['fake-profile', 'inappropriate-content', 'harassment', 'underage', 'scam-or-spam', 'other']
           && (!('details' in d) || (d.details is string && d.details.size() <= 500))
           && d.createdAt is string;
       }
 
       allow create: if isSignedIn() && reportOk(request.resource.data);
-      allow read, update, delete: if false;
+
+      // Only your own reports, and only ever your own: list queries must be
+      // constrained to from == you. Reads of missing documents deny too, so a
+      // probe of `x_y` cannot distinguish "no such report" from "not yours" —
+      // the reported party can never learn a report about them exists.
+      allow read: if isSignedIn()
+        && resource != null
+        && resource.data.from == request.auth.uid;
+      allow delete: if isSignedIn() && resource.data.from == request.auth.uid;
+      allow update: if false;
     }
 
     // ---------------------------------------------------------------------------

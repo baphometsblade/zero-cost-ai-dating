@@ -430,3 +430,53 @@ test('(e) every page has lang, title, viewport and description', function () {
 
   assert.equal(problems.length, 0, report('Document head problems:', problems));
 });
+
+/* ------------------------------------------------------------------------
+   (f) The service worker's CORE precache list matches the shipped assets
+   ------------------------------------------------------------------------ */
+
+test('(f) sw.js CORE precache list matches the shipped assets', function () {
+  const swPath = path.join(PUBLIC_DIR, 'sw.js');
+  assert.ok(fs.existsSync(swPath), 'public/sw.js is missing');
+  const sw = fs.readFileSync(swPath, 'utf8');
+
+  // Pull the CORE array out with plain string work, same as everything else.
+  const coreMatch = /const CORE = \[([\s\S]*?)\];/.exec(sw);
+  assert.ok(coreMatch, 'Could not find "const CORE = [...]" in public/sw.js');
+  const listed = [];
+  const entryRe = /'([^']+)'/g;
+  let e;
+  while ((e = entryRe.exec(coreMatch[1])) !== null) listed.push(e[1]);
+
+  const problems = [];
+
+  // Every listed asset must exist — a typo here caches nothing and breaks
+  // cache.addAll() for the whole shell.
+  listed.forEach(function (rel) {
+    if (!fs.existsSync(path.join(PUBLIC_DIR, rel))) {
+      problems.push('sw.js CORE lists "' + rel + '" which does not exist in public/');
+    }
+  });
+
+  // And every shell asset must be listed — an app shell that silently skips a
+  // page or script is not usable offline. The worker itself is excluded (the
+  // browser manages its lifecycle; caching it would pin old versions).
+  const expected = [];
+  ['', 'css', 'js'].forEach(function (dir) {
+    const abs = path.join(PUBLIC_DIR, dir);
+    fs.readdirSync(abs).forEach(function (name) {
+      const rel = dir ? dir + '/' + name : name;
+      if (rel === 'sw.js') return;
+      if (!/\.(html|css|js|svg|webmanifest)$/.test(name)) return;
+      if (!fs.statSync(path.join(abs, name)).isFile()) return;
+      expected.push(rel);
+    });
+  });
+  expected.forEach(function (rel) {
+    if (listed.indexOf(rel) === -1) {
+      problems.push('public/' + rel + ' is not in sw.js CORE — it will not be available offline');
+    }
+  });
+
+  assert.equal(problems.length, 0, report('Service worker precache problems:', problems));
+});
