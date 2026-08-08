@@ -1,78 +1,1522 @@
-/* Components CSS - Core styling for UI components */
+/* ==========================================================================
+   Zero Cost AI Dating — product components
+   Swipe deck, compatibility ring, explainability reasons, match burst, chat,
+   match list, profile editor and plan cards. Everything here is built on the
+   tokens defined in style.css, which must be loaded first.
+   ========================================================================== */
 
-/* Card component */
-.card {
-  background: white;
-  border-radius: 8px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-  padding: 20px;
-  margin: 10px;
-}
-
-/* Button component */
-.btn {
-  padding: 12px 24px;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  font-weight: 500;
-  transition: all 0.2s ease;
-}
-
-.btn-primary {
-  background-color: #e91e63;
-  color: white;
-}
-
-.btn-primary:hover {
-  background-color: #c2185b;
-}
-
-/* Profile card component */
-.profile-card {
-  max-width: 400px;
-  border-radius: 12px;
-  overflow: hidden;
+/* --------------------------------------------------------------------------
+   1. Swipe deck
+   The first .swipe-card inside .deck-stack is the interactive top card; the
+   two behind it are scaled and offset to suggest depth.
+   -------------------------------------------------------------------------- */
+.deck {
   position: relative;
-}
-
-.profile-image {
   width: 100%;
-  height: 400px;
+  max-width: 430px;
+  margin-inline: auto;
+
+  /* Vertical budget for the deck screen. On a phone the card must not push
+     the action buttons past the fold, so the stack gets whatever the viewport
+     has left once the chrome around it is paid for: the top nav, this page's
+     head, the actions row, the hint line, the bottom tab bar and the
+     safe-area insets. The per-breakpoint totals live in §11, which is also
+     where --deck-h is put to work; --deck-h is defined here so the stack and
+     the cards inside it agree on one number. */
+  --deck-reserve: 0px;
+  --deck-max: 620px;
+  --deck-floor: 300px;
+  /* A card is never wider than this share of its height, so a short viewport
+     shrinks the card instead of flattening it into a letterbox. */
+  --deck-ratio: 0.8;
+  /* How far each card behind the top one shows below it. The actions row
+     clears exactly this much, so a peeking card never covers a button. */
+  --deck-peek: 10px;
+  /* 100vh first for browsers that predate the small-viewport units; the svh
+     variant below is what phones with a retracting URL bar actually want. */
+  --deck-h: clamp(var(--deck-floor), calc(100vh - var(--deck-reserve)), var(--deck-max));
+}
+
+@supports (height: 100svh) {
+  .deck {
+    --deck-h: clamp(var(--deck-floor), calc(100svh - var(--deck-reserve)), var(--deck-max));
+  }
+}
+
+.deck-stack {
+  position: relative;
+  height: clamp(440px, 68vh, 620px);
+  perspective: 1200px;
+}
+
+/* Standalone (e.g. the live preview on the profile editor) the card keeps its
+   own footprint; inside .deck-stack the cards are absolutely stacked. */
+.swipe-card {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 3 / 4.2;
+  display: block;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-3);
+  transform-origin: 50% 120%;
+  will-change: transform;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grab;
+  transition: transform 0.36s var(--ease), opacity 0.36s var(--ease),
+    box-shadow 0.2s var(--ease);
+}
+
+.deck-stack > .swipe-card {
+  position: absolute;
+  inset: 0;
+  width: auto;
+  aspect-ratio: auto;
+}
+
+/* Cards behind the top one. Counting "of .swipe-card" keeps the depth correct
+   even if the stack also holds a hint, a banner or a live region. */
+.deck-stack > :nth-child(1 of .swipe-card) {
+  z-index: 3;
+}
+
+/* These two scale from their own bottom edge, so --deck-peek is exactly how
+   far they show below the top card whatever the card's height works out to. */
+.deck-stack > :nth-child(2 of .swipe-card) {
+  z-index: 2;
+  transform: translateY(var(--deck-peek)) scale(0.955);
+  transform-origin: 50% 100%;
+  filter: saturate(0.85);
+}
+
+.deck-stack > :nth-child(3 of .swipe-card) {
+  z-index: 1;
+  transform: translateY(calc(var(--deck-peek) * 2)) scale(0.91);
+  transform-origin: 50% 100%;
+  filter: saturate(0.7);
+}
+
+.deck-stack > :nth-child(n + 4 of .swipe-card) {
+  display: none;
+}
+
+/* While a pointer is down the JS owns the transform, so no easing. */
+.swipe-card.is-dragging {
+  transition: box-shadow 0.2s var(--ease);
+  cursor: grabbing;
+  box-shadow: var(--shadow-3), 0 0 0 1px var(--brand-400);
+}
+
+/* Exit animations. !important is deliberate: it has to beat the inline
+   transform left behind by the drag handler. */
+.swipe-card.is-gone-left {
+  transform: translate3d(-140%, 40px, 0) rotate(-24deg) !important;
+  opacity: 0;
+}
+
+.swipe-card.is-gone-right {
+  transform: translate3d(140%, 40px, 0) rotate(24deg) !important;
+  opacity: 0;
+}
+
+.swipe-card.is-gone-up {
+  transform: translate3d(0, -140%, 0) scale(0.9) !important;
+  opacity: 0;
+}
+
+.swipe-photo {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
   object-fit: cover;
+  background: linear-gradient(140deg, var(--brand-soft), var(--accent-soft));
+  pointer-events: none;
 }
 
-/* Match actions */
-.match-actions {
+.swipe-gradient {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 72%;
+  background: linear-gradient(
+    to top,
+    rgba(12, 6, 9, 0.94) 0%,
+    rgba(12, 6, 9, 0.78) 32%,
+    rgba(12, 6, 9, 0.28) 66%,
+    rgba(12, 6, 9, 0) 100%
+  );
+  pointer-events: none;
+}
+
+.swipe-info {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
   display: flex;
-  justify-content: center;
-  gap: 20px;
-  padding: 20px;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-5) var(--space-4) var(--space-4);
+  color: #fff;
 }
 
-.action-btn {
-  width: 60px;
-  height: 60px;
+.swipe-name {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--fs-xl);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+}
+
+.swipe-age {
+  font-size: var(--fs-lg);
+  font-weight: 500;
+  opacity: 0.88;
+}
+
+.swipe-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.86);
+}
+
+.swipe-meta .pill {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.22);
+  color: #fff;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.swipe-bio {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.swipe-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.swipe-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: var(--radius-full);
+  background: rgba(255, 255, 255, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  color: #fff;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  white-space: nowrap;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+/* Drag stamps — the JS fades these in as the card passes the threshold. */
+.swipe-stamp {
+  position: absolute;
+  z-index: 4;
+  top: var(--space-5);
+  padding: 6px var(--space-4);
+  border: 4px solid currentColor;
+  border-radius: var(--radius);
+  font-size: var(--fs-xl);
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: rgba(12, 6, 9, 0.28);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.14s var(--ease);
+}
+
+.swipe-stamp.is-visible {
+  opacity: 1;
+}
+
+.stamp-like {
+  left: var(--space-4);
+  color: #2fd39a;
+  transform: rotate(-14deg);
+}
+
+.stamp-nope {
+  right: var(--space-4);
+  color: #ff6b7a;
+  transform: rotate(14deg);
+}
+
+.stamp-super {
+  top: auto;
+  bottom: 38%;
+  left: 50%;
+  color: #a99cf6;
+  transform: translateX(-50%) rotate(-6deg);
+}
+
+/* --------------------------------------------------------------------------
+   2. Compatibility ring — conic gradient driven by the --pct custom property
+   (0..100, set from JS with el.style.setProperty('--pct', 87)).
+   -------------------------------------------------------------------------- */
+.match-score {
+  position: absolute;
+  top: var(--space-3);
+  right: var(--space-3);
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 6px 12px 6px 6px;
+  border-radius: var(--radius-full);
+  background: rgba(14, 8, 11, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #fff;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  backdrop-filter: blur(10px) saturate(1.4);
+  -webkit-backdrop-filter: blur(10px) saturate(1.4);
+  box-shadow: var(--shadow-2);
+}
+
+.match-score-ring {
+  --pct: 0;
+  position: relative;
+  flex: 0 0 auto;
+  width: 46px;
+  height: 46px;
   border-radius: 50%;
-  border: none;
-  cursor: pointer;
+  background: conic-gradient(
+    from -90deg,
+    var(--brand-400) 0%,
+    var(--brand-500) calc(var(--pct) * 0.5%),
+    var(--accent-400) calc(var(--pct) * 1%),
+    rgba(255, 255, 255, 0.18) calc(var(--pct) * 1%)
+  );
+}
+
+/* Punches the hole in the donut; the value sits above it. */
+.match-score-ring::after {
+  content: '';
+  position: absolute;
+  inset: 5px;
+  border-radius: 50%;
+  background: rgba(16, 10, 13, 0.86);
+  z-index: 1;
+}
+
+.match-score-value {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  font-size: var(--fs-xs);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+}
+
+/* Standalone use (outside a swipe card), e.g. in the match profile modal. */
+.card .match-score,
+.panel .match-score,
+.modal-body .match-score {
+  position: static;
+  background: var(--bg-sunken);
+  border-color: var(--border);
+  color: var(--text);
+  box-shadow: none;
+}
+
+/* --------------------------------------------------------------------------
+   3. Reasons — the explainability payload
+   -------------------------------------------------------------------------- */
+.reasons {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.reason {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: 7px var(--space-3);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.reason-icon {
+  flex: 0 0 auto;
+  font-size: var(--fs-sm);
+  line-height: 1.3;
+}
+
+/* Over a photo the reasons become frosted glass. */
+.swipe-info .reason {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: #fff;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+/* --------------------------------------------------------------------------
+   4. Deck actions, hints and limit banner
+   -------------------------------------------------------------------------- */
+/* The top padding is the peek allowance, so the buttons start below the last
+   card in the stack; the z-index keeps them on top of it either way. */
+.deck-actions {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 24px;
-  transition: transform 0.2s ease;
+  gap: var(--space-3);
+  padding: calc(var(--deck-peek) * 2 + var(--space-1)) 0 var(--space-3);
 }
 
-.action-btn:hover {
-  transform: scale(1.1);
+.action-btn {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: var(--shadow-2);
+  transition: transform 0.16s var(--ease), box-shadow 0.16s var(--ease),
+    border-color 0.16s var(--ease), color 0.16s var(--ease), background-color 0.16s var(--ease);
 }
 
-.reject-btn {
-  background-color: #f44336;
-  color: white;
+.action-btn:hover:not([disabled]) {
+  transform: translateY(-2px) scale(1.06);
 }
 
-.like-btn {
-  background-color: #4caf50;
-  color: white;
+.action-btn:active:not([disabled]) {
+  transform: scale(0.94);
+}
+
+.action-btn[disabled] {
+  opacity: 0.42;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.action-rewind {
+  color: var(--warn);
+}
+
+.action-rewind:hover:not([disabled]) {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.action-pass {
+  width: 64px;
+  height: 64px;
+  font-size: 26px;
+  color: var(--danger);
+}
+
+.action-pass:hover:not([disabled]) {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.action-super {
+  color: var(--accent-500);
+}
+
+.action-super:hover:not([disabled]) {
+  border-color: var(--accent-500);
+  background: var(--accent-soft);
+}
+
+.action-like {
+  width: 64px;
+  height: 64px;
+  font-size: 26px;
+  color: var(--ok);
+}
+
+.action-like:hover:not([disabled]) {
+  border-color: var(--ok);
+  background: var(--ok-soft);
+}
+
+.action-info {
+  color: var(--text-muted);
+}
+
+.action-info:hover:not([disabled]) {
+  border-color: var(--text-faint);
+  background: var(--bg-sunken);
+  color: var(--text);
+}
+
+.deck-hint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding-bottom: var(--space-3);
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  text-align: center;
+}
+
+.limit-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--warn);
+  border-radius: var(--radius);
+  background: var(--warn-soft);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+.limit-banner::before {
+  content: '⏳';
+  font-size: var(--fs-lg);
+}
+
+.limit-banner .btn {
+  margin-left: auto;
+}
+
+/* --------------------------------------------------------------------------
+   5. Match burst overlay
+   -------------------------------------------------------------------------- */
+.match-burst {
+  position: fixed;
+  inset: 0;
+  z-index: 75;
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+  background:
+    radial-gradient(circle at 50% 38%, rgba(232, 68, 106, 0.42), transparent 62%),
+    var(--overlay);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  animation: zc-fade-in 0.2s var(--ease) both;
+}
+
+.match-burst-inner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  width: 100%;
+  max-width: 420px;
+  max-height: 88vh;
+  overflow-y: auto;
+  padding: var(--space-6) var(--space-5);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-3);
+  text-align: center;
+  animation: zc-burst-pop 0.34s var(--ease) both;
+  scrollbar-width: thin;
+}
+
+.match-avatars {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.match-avatar {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 4px solid var(--surface);
+  background: var(--bg-sunken);
+  box-shadow: var(--shadow-2);
+}
+
+.match-avatar:first-child {
+  margin-right: -18px;
+  transform: rotate(-5deg);
+}
+
+.match-avatar:last-child {
+  margin-left: -18px;
+  transform: rotate(5deg);
+}
+
+.match-copy {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.match-copy h2 {
+  font-size: var(--fs-2xl);
+  background: linear-gradient(120deg, var(--brand-500), var(--accent-500));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.match-copy p {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
+.icebreakers {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  list-style: none;
+}
+
+.icebreaker {
+  display: block;
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.16s var(--ease), background-color 0.16s var(--ease),
+    transform 0.16s var(--ease);
+}
+
+.icebreaker:hover {
+  border-color: var(--brand-400);
+  background: var(--brand-soft);
+  transform: translateX(2px);
+  text-decoration: none;
+}
+
+.icebreaker::before {
+  content: '💬 ';
+}
+
+/* --------------------------------------------------------------------------
+   6. Chat
+   -------------------------------------------------------------------------- */
+.chat {
+  display: flex;
+  flex-direction: column;
+  min-height: 60vh;
+  height: 100%;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+}
+
+.chat-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--nav-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.chat-back {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg-elev);
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+  cursor: pointer;
+  transition: background-color 0.16s var(--ease), color 0.16s var(--ease);
+}
+
+.chat-back:hover {
+  background: var(--bg-sunken);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.chat-peer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.chat-peer img {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--bg-sunken);
+}
+
+.chat-peer small {
+  display: block;
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.chat-log {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--bg);
+  scrollbar-width: thin;
+}
+
+/* Day separator between message groups. */
+.chat-day {
+  align-self: center;
+  margin: var(--space-2) 0;
+  padding: 3px var(--space-3);
+  border-radius: var(--radius-full);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+}
+
+.msg {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: min(78%, 520px);
+}
+
+.msg-me {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.msg-them {
+  align-self: flex-start;
+  align-items: flex-start;
+}
+
+.msg-text {
+  padding: 9px var(--space-4);
+  border-radius: var(--radius-lg);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.msg-me .msg-text {
+  background: linear-gradient(135deg, var(--brand-400), var(--brand-600));
+  color: #fff;
+  border-bottom-right-radius: var(--radius-sm);
+  box-shadow: var(--shadow-1);
+}
+
+.msg-them .msg-text {
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-bottom-left-radius: var(--radius-sm);
+}
+
+.msg-time {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-form {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-top: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+
+.chat-input {
+  flex: 1 1 auto;
+  min-height: 44px;
+  max-height: 148px;
+  padding: 11px var(--space-4);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+  resize: none;
+  overflow-y: auto;
+  transition: border-color 0.16s var(--ease), box-shadow 0.16s var(--ease);
+}
+
+.chat-input::placeholder {
+  color: var(--text-faint);
+}
+
+.chat-input:focus {
+  outline: none;
+  border-color: var(--brand-500);
+  box-shadow: 0 0 0 4px var(--brand-soft);
+}
+
+.chat-input:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.chat-send {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--brand-400), var(--brand-600));
+  color: #fff;
+  font-size: var(--fs-md);
+  cursor: pointer;
+  box-shadow: var(--shadow-brand);
+  transition: transform 0.16s var(--ease), filter 0.16s var(--ease);
+}
+
+.chat-send:hover:not([disabled]) {
+  transform: scale(1.06);
+  filter: brightness(1.05);
+}
+
+.chat-send[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+/* --------------------------------------------------------------------------
+   7. Match list + new matches strip
+   -------------------------------------------------------------------------- */
+.new-matches {
+  display: flex;
+  gap: var(--space-3);
+  padding: var(--space-1) var(--space-1) var(--space-3);
+  overflow-x: auto;
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
+}
+
+.new-match {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 76px;
+  flex: 0 0 auto;
+  scroll-snap-align: start;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--text);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-align: center;
+  cursor: pointer;
+}
+
+.new-match:hover {
+  text-decoration: none;
+}
+
+.new-match > span {
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.new-match-avatar {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--bg-sunken);
+  border: 3px solid var(--brand-500);
+  padding: 2px;
+  box-shadow: var(--shadow-1);
+  transition: transform 0.16s var(--ease);
+}
+
+.new-match:hover .new-match-avatar {
+  transform: scale(1.05);
+}
+
+.match-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  list-style: none;
+}
+
+.match-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-3);
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.16s var(--ease);
+}
+
+.match-row:hover {
+  background: var(--bg-sunken);
+  text-decoration: none;
+}
+
+.match-row.is-active {
+  background: var(--brand-soft);
+}
+
+.match-row-avatar {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--bg-sunken);
+}
+
+.match-row-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.match-row-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  color: var(--text);
+}
+
+.match-row-preview {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+
+.match-row-time {
+  align-self: flex-start;
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.match-row-dot {
+  grid-column: 3;
+  justify-self: end;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--brand-500);
+  box-shadow: 0 0 0 3px var(--brand-soft);
+}
+
+/* Unread rows are bolder as well as dotted — never colour alone. */
+.match-row.is-unread .match-row-name {
+  font-weight: 800;
+}
+
+.match-row.is-unread .match-row-preview {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.match-row:not(.is-unread) .match-row-dot {
+  visibility: hidden;
+}
+
+/* --------------------------------------------------------------------------
+   8. Profile hero + editor
+   -------------------------------------------------------------------------- */
+.profile-hero {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(140deg, var(--brand-soft), var(--accent-soft));
+  box-shadow: var(--shadow-1);
+}
+
+.profile-photo {
+  width: 92px;
+  height: 92px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 4px solid var(--surface);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+}
+
+.profile-name {
+  font-size: var(--fs-xl);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+.profile-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  flex: 1 1 220px;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
+.completeness {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.completeness-bar {
+  height: 10px;
+  overflow: hidden;
+  border-radius: var(--radius-full);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+}
+
+.completeness-fill {
+  height: 100%;
+  width: 0;
+  border-radius: var(--radius-full);
+  background: linear-gradient(90deg, var(--brand-400), var(--accent-500));
+  transition: width 0.45s var(--ease);
+}
+
+.personality-grid {
+  display: grid;
+  gap: var(--space-4);
+  grid-template-columns: 1fr;
+}
+
+.personality-axis {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+}
+
+.axis-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  color: var(--text);
+}
+
+.axis-label output,
+.axis-label span:last-child {
+  font-variant-numeric: tabular-nums;
+  color: var(--brand-600);
+}
+
+.axis-ends {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+.photo-grid {
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+}
+
+.photo-slot {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+}
+
+.photo-slot img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.photo-slot.is-empty {
+  display: grid;
+  place-items: center;
+  border-style: dashed;
+  border-width: 1.5px;
+  color: var(--text-faint);
+  font-size: var(--fs-sm);
+  text-align: center;
+}
+
+.photo-remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(14, 8, 11, 0.66);
+  color: #fff;
+  font-size: var(--fs-xs);
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.16s var(--ease), transform 0.16s var(--ease);
+}
+
+.photo-remove:hover {
+  background: var(--danger);
+  transform: scale(1.08);
+}
+
+/* --------------------------------------------------------------------------
+   9. Plans
+   -------------------------------------------------------------------------- */
+.plans {
+  display: grid;
+  gap: var(--space-4);
+  grid-template-columns: 1fr;
+  align-items: stretch;
+}
+
+.plan {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+}
+
+.plan.is-featured {
+  border-color: var(--brand-500);
+  background: linear-gradient(180deg, var(--brand-50), var(--surface) 44%);
+  box-shadow: var(--shadow-2);
+}
+
+.plan.is-featured::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 4px;
+  background: linear-gradient(90deg, var(--brand-400), var(--accent-500));
+}
+
+.plan.is-current {
+  border-color: var(--ok);
+  box-shadow: 0 0 0 3px var(--ok-soft);
+}
+
+.plan-ribbon {
+  position: absolute;
+  top: var(--space-4);
+  right: var(--space-4);
+  padding: 3px 10px;
+  border-radius: var(--radius-full);
+  background: linear-gradient(135deg, var(--brand-400), var(--accent-500));
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.plan-name {
+  font-size: var(--fs-lg);
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+
+.plan-price {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: var(--fs-3xl);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  color: var(--brand-600);
+}
+
+.plan-period {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.plan-features {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  list-style: none;
+  font-size: var(--fs-sm);
+}
+
+.plan-feature {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  color: var(--text);
+}
+
+.plan-feature::before {
+  content: '✓';
+  flex: 0 0 auto;
+  font-weight: 800;
+  color: var(--ok);
+}
+
+.plan-feature.is-off {
+  color: var(--text-faint);
+}
+
+.plan-feature.is-off::before {
+  content: '✕';
+  color: var(--text-faint);
+}
+
+.plan-cta {
+  margin-top: auto;
+  padding-top: var(--space-2);
+}
+
+.plan-cta .btn {
+  width: 100%;
+}
+
+/* --------------------------------------------------------------------------
+   10. Component keyframes
+   -------------------------------------------------------------------------- */
+@keyframes zc-burst-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.86) translateY(16px);
+  }
+  60% {
+    transform: scale(1.02) translateY(0);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   11. Responsive
+   -------------------------------------------------------------------------- */
+/* Phones — the tab bar is on screen and the whole deck screen has to fit
+   between it and the top nav, buttons included. 348px is the measured cost of
+   that chrome: nav 61 + page head 53 + actions 92 + hint 71 + tab bar 63 +
+   the 8px the body keeps clear above the bar. */
+@media (max-width: 720px) {
+  .deck {
+    --deck-reserve: calc(348px + env(safe-area-inset-top, 0px) + env(safe-area-inset-bottom, 0px));
+    --deck-peek: 8px;
+  }
+
+  /* Naming the stack as a size container lets the card's overlay respond to
+     how tall the card actually came out, rather than guessing from the
+     viewport — see the @container block below. */
+  .deck-stack {
+    height: var(--deck-h);
+    container: deck / size;
+  }
+
+  /* Cards are centred inside the full-width stack and capped by --deck-ratio,
+     so they stay portrait however little height is going. */
+  .deck-stack > .swipe-card {
+    width: min(100%, calc(var(--deck-h) * var(--deck-ratio)));
+    margin-inline: auto;
+  }
+
+  /* The empty, error and loading states share the stack's footprint rather
+     than growing past it into the action buttons. */
+  .deck-stack > .empty {
+    height: 100%;
+    justify-content: center;
+    overflow-y: auto;
+    padding: var(--space-5) var(--space-4);
+  }
+
+  /* A shorter card needs a shorter overlay, or the name at the top of it is
+     clipped by the card's own edge. Padding and one line of bio go first. */
+  .deck-stack .swipe-info {
+    gap: var(--space-1);
+    padding: var(--space-4) var(--space-3) var(--space-3);
+  }
+
+  .deck-stack .swipe-bio {
+    -webkit-line-clamp: 2;
+  }
+
+  .deck-actions {
+    padding-bottom: var(--space-2);
+  }
+
+  .deck-hint {
+    padding-bottom: var(--space-2);
+  }
+
+  /* The deck's page head is trimmed to a title on a phone. The tab bar
+     already names the screen, and the sub-copy's four lines of prose are four
+     lines the primary controls would have to fall below; the same explanation
+     is on every card and in full under the info button. It is taken out of
+     the flow rather than removed, so it still reaches a screen reader. */
+  main:has(> .deck) .page-head {
+    padding: var(--space-4) 0 var(--space-3);
+  }
+
+  main:has(> .deck) .page-title {
+    font-size: var(--fs-xl);
+  }
+
+  main:has(> .deck) .page-sub {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /* The deck needs the gap above the tab bar tighter than other pages do. */
+  body:has(.deck).has-tabbar {
+    padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px) + var(--space-2));
+  }
+}
+
+/* A card under 460px tall cannot carry the whole overlay — the name at the top
+   of it would be clipped by the card's own edge. What survives is what makes
+   the ranking legible: who they are and the two strongest reasons. The bio and
+   the rest of the reasons stay one tap away under the info button. Only the
+   phone layout makes the stack a container, so wider layouts are untouched. */
+@container deck (max-height: 460px) {
+  .swipe-name {
+    font-size: var(--fs-lg);
+  }
+
+  .swipe-age {
+    font-size: var(--fs-md);
+  }
+
+  .swipe-bio {
+    display: none;
+  }
+
+  .swipe-tags {
+    max-height: 29px;
+    overflow: hidden;
+  }
+
+  .reasons .reason:nth-child(n + 3) {
+    display: none;
+  }
+}
+
+/* Short phones (a 640px-tall Android, or a browser with its URL bar out).
+   Every band gives something back — the padding halves and the buttons come
+   down towards their 44px tap-target floor — so that the card keeps a usable
+   share of a very small screen. The budget here is
+   nav 53 + head 45 + actions 78 + hint 63 + tab bar 56 + the 8px above it. */
+@media (max-width: 720px) and (max-height: 720px) {
+  .deck {
+    --deck-reserve: calc(303px + env(safe-area-inset-top, 0px) + env(safe-area-inset-bottom, 0px));
+    --deck-peek: 5px;
+  }
+
+  main:has(> .deck) .page-head {
+    padding: var(--space-3) 0 var(--space-2);
+  }
+
+  .deck-hint {
+    gap: var(--space-1);
+    padding-bottom: var(--space-1);
+  }
+
+  .action-btn {
+    width: 48px;
+    height: 48px;
+    font-size: 18px;
+  }
+
+  .action-pass,
+  .action-like {
+    width: 56px;
+    height: 56px;
+    font-size: 22px;
+  }
+}
+
+@media (min-width: 560px) {
+  .personality-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .plans {
+    grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+  }
+}
+
+@media (min-width: 900px) {
+  .deck-stack {
+    height: clamp(500px, 64vh, 640px);
+  }
+
+  .chat {
+    min-height: 0;
+    height: min(74vh, 720px);
+  }
+
+  .match-burst-inner {
+    padding: var(--space-6);
+  }
+
+  .plan.is-featured {
+    transform: translateY(-6px);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   12. Forced colours
+   -------------------------------------------------------------------------- */
+@media (forced-colors: active) {
+  .match-copy h2 {
+    background: none;
+    color: CanvasText;
+    -webkit-text-fill-color: CanvasText;
+  }
+
+  .swipe-card,
+  .match-score,
+  .swipe-tag,
+  .reason {
+    border: 1px solid CanvasText;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   13. Reduced motion
+   -------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  .swipe-card {
+    transition: none;
+  }
+
+  .swipe-card.is-gone-left,
+  .swipe-card.is-gone-right,
+  .swipe-card.is-gone-up {
+    transform: none !important;
+    opacity: 0;
+  }
+
+  .action-btn:hover:not([disabled]),
+  .action-btn:active:not([disabled]),
+  .icebreaker:hover,
+  .chat-send:hover:not([disabled]),
+  .new-match:hover .new-match-avatar,
+  .photo-remove:hover,
+  .plan.is-featured {
+    transform: none;
+  }
+
+  .match-burst-inner {
+    animation: none;
+  }
 }

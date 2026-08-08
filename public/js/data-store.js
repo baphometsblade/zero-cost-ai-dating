@@ -1,0 +1,1922 @@
+/* ==========================================================================
+   Zero Cost AI Dating — data store
+   One promise-based facade over two interchangeable adapters:
+
+     • firestore — a real Firebase project (Spark plan, client-side only)
+     • demo      — localStorage, seeded from the bundled profiles
+
+   Pages never touch `firebase` or `localStorage` directly; they call ZC.store
+   and get the same shapes either way. Every method is async, every read is
+   defensive, and no write is allowed to take the UI down with it.
+   Exposes: ZC.store.
+   ========================================================================== */
+(function () {
+  'use strict';
+
+  window.ZC = window.ZC || {};
+  const ZC = window.ZC;
+  const util = ZC.util || {};
+
+  // Tolerate a duplicated <script> tag.
+  if (ZC.store && ZC.store.ready) {
+    return;
+  }
+
+  /* ------------------------------------------------------------------------
+     1. Constants and the canonical user shape
+     ------------------------------------------------------------------------ */
+
+  /** Every demo-mode key lives under the zc.demo.* prefix. */
+  const KEYS = {
+    users: 'zc.demo.users',
+    swipes: 'zc.demo.swipes',
+    matches: 'zc.demo.matches',
+    messages: 'zc.demo.messages',
+    session: 'zc.demo.session',
+    seeded: 'zc.demo.seeded'
+  };
+
+  const SEED_VERSION = 1;
+  const MESSAGE_MAX = 1000;
+  const DEFAULT_CANDIDATE_LIMIT = 60;
+  const DEFAULT_MESSAGE_LIMIT = 200;
+  const TOUCH_THROTTLE_MS = 5 * 60 * 1000;
+  const POLL_MS = 1500;
+  const GENDERS = ['woman', 'man', 'nonbinary', 'other'];
+  /** The bundled demo account every seeded relationship hangs off. */
+  const DEMO_UID = 'demo-you';
+
+  /**
+   * The canonical UserDoc with sane defaults. Treat it as read-only — every
+   * writer merges a copy of it so all agents agree on the shape.
+   */
+  const DEFAULT_USER = {
+    uid: '',
+    email: '',
+    displayName: '',
+    createdAt: null,
+    updatedAt: null,
+    lastActiveAt: null,
+    profileComplete: false,
+    plan: 'free',
+    planSince: null,
+    profile: {
+      birthdate: null,
+      age: null,
+      gender: 'other',
+      pronouns: '',
+      bio: '',
+      photos: [],
+      interests: [],
+      personality: { openness: 50, conscientiousness: 50, extraversion: 50, agreeableness: 50, stability: 50 },
+      location: null,
+      showAge: true,
+      showDistance: true
+    },
+    preferences: {
+      interestedIn: GENDERS.slice(),
+      ageMin: 18,
+      ageMax: 100,
+      maxDistanceKm: 500,
+      notifications: true,
+      theme: 'system',
+      discoverable: true
+    },
+    learning: { interestAffinity: {}, likeCount: 0, passCount: 0 },
+    usage: { date: null, likes: 0, superLikes: 0, rewinds: 0 },
+    blocked: []
+  };
+
+  /* ------------------------------------------------------------------------
+     2. Plain-object helpers
+     ------------------------------------------------------------------------ */
+
+  function nowIso() {
+    return new Date().toISOString();
+  }
+
+  function isPlainObject(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  /** A finite number, or null. */
+  function num(value) {
+    const n = Number(value);
+    return value === null || value === undefined || !isFinite(n) ? null : n;
+  }
+
+  /**
+   * Structural deep copy of JSON-ish data.
+   * @param {*} value value to copy
+   * @returns {*} copy
+   */
+  function cloneDeep(value) {
+    if (Array.isArray(value)) return value.map(cloneDeep);
+    if (isPlainObject(value)) {
+      const out = {};
+      Object.keys(value).forEach(function (key) { out[key] = cloneDeep(value[key]); });
+      return out;
+    }
+    return value;
+  }
+
+  /**
+   * Dot-paths whose object values are atomic: the patch replaces them whole
+   * instead of merging key by key. The list exists because some maps are
+   * pruned by their writer, and a merge would silently undo the pruning —
+   * ZC.matching.updateLearning drops interest affinities that have decayed
+   * below 0.01 and caps the map at 60 entries, so merging would restore every
+   * dropped tag from the stored document on the very next write and the map
+   * could only ever grow. Omitting an atomic path from a patch still leaves
+   * the stored value untouched; only a supplied value replaces it.
+   */
+  const ATOMIC_PATHS = ['learning.interestAffinity'];
+
+  /**
+   * Recursive merge; nested objects merge, arrays and scalars replace,
+   * `undefined` values in the patch are ignored (Firestore rejects them).
+   * Objects at an ATOMIC_PATHS path replace rather than merge.
+   * @param {Object} base starting object
+   * @param {Object} patch changes to apply
+   * @param {string} [path] dot-path of `base` within the document root
+   * @returns {Object} a new object
+   */
+  function deepMerge(base, patch, path) {
+    const out = isPlainObject(base) ? cloneDeep(base) : {};
+    if (!isPlainObject(patch)) return out;
+    const prefix = path ? path + '.' : '';
+    Object.keys(patch).forEach(function (key) {
+      const value = patch[key];
+      if (value === undefined) return;
+      const here = prefix + key;
+      if (isPlainObject(value) && isPlainObject(out[key]) && ATOMIC_PATHS.indexOf(here) === -1) {
+        out[key] = deepMerge(out[key], value, here);
+      } else {
+        out[key] = cloneDeep(value);
+      }
+    });
+    return out;
+  }
+
+  function toIso(value) {
+    const d = util.toDate ? util.toDate(value) : (value ? new Date(value) : null);
+    return d ? d.toISOString() : null;
+  }
+
+  function todayKey() {
+    return util.todayKey ? util.todayKey() : new Date().toISOString().slice(0, 10);
+  }
+
+  /**
+   * Fill a raw record out to the full UserDoc shape.
+   * @param {Object} doc partial user document
+   * @returns {Object} complete UserDoc
+   */
+  function normalizeUser(doc) {
+    const user = deepMerge(DEFAULT_USER, isPlainObject(doc) ? doc : {});
+    user.uid = String(user.uid || '');
+    user.plan = user.plan === 'premium' ? 'premium' : 'free';
+    user.profileComplete = !!user.profileComplete;
+    if (!Array.isArray(user.profile.photos)) user.profile.photos = [];
+    if (!Array.isArray(user.profile.interests)) user.profile.interests = [];
+    if (!Array.isArray(user.preferences.interestedIn)) user.preferences.interestedIn = GENDERS.slice();
+    if (!Array.isArray(user.blocked)) user.blocked = [];
+    if (!isPlainObject(user.learning.interestAffinity)) user.learning.interestAffinity = {};
+    // Age is denormalised for filtering — keep it consistent with the birthdate.
+    if (user.profile.birthdate && util.ageFromBirthdate) {
+      const derived = util.ageFromBirthdate(user.profile.birthdate);
+      if (derived !== null) user.profile.age = derived;
+    }
+    user.usage = normalizeUsage(user.usage);
+    return user;
+  }
+
+  /**
+   * Coerce a usage record into `{ date, likes, superLikes, rewinds }`.
+   * @param {Object} usage raw usage record
+   * @returns {Object} usage record (date defaults to today)
+   */
+  function normalizeUsage(usage) {
+    const u = isPlainObject(usage) ? usage : {};
+    return {
+      date: typeof u.date === 'string' && u.date ? u.date : todayKey(),
+      likes: Math.max(0, Number(u.likes) || 0),
+      superLikes: Math.max(0, Number(u.superLikes) || 0),
+      rewinds: Math.max(0, Number(u.rewinds) || 0)
+    };
+  }
+
+  /** A stand-in doc for a match whose other half is missing from storage. */
+  function placeholderUser(uid) {
+    return normalizeUser({ uid: uid, displayName: 'Someone' });
+  }
+
+  function swipeId(from, to) {
+    return String(from) + '_' + String(to);
+  }
+
+  function pairId(a, b) {
+    return [String(a), String(b)].sort().join('_');
+  }
+
+  function isPositive(action) {
+    return action === 'like' || action === 'super';
+  }
+
+  function normalizeAction(action) {
+    if (action === 'pass') return 'pass';
+    if (action === 'super') return 'super';
+    return 'like';
+  }
+
+  /**
+   * Trim and cap outgoing message text.
+   * @param {string} text raw input
+   * @returns {string} sanitised text (may be empty)
+   */
+  function normalizeText(text) {
+    return String(text === null || text === undefined ? '' : text).trim().slice(0, MESSAGE_MAX);
+  }
+
+  /**
+   * A fresh message id. `seq` only matters on the clock-based fallback, where
+   * a batch written in the same millisecond would otherwise collide.
+   * @param {number} [seq=0] position within the batch being written
+   * @returns {string} message id
+   */
+  function newMessageId(seq) {
+    return util.uid ? util.uid() : String(Date.now()) + '-' + (Number(seq) || 0);
+  }
+
+  /**
+   * Turn the durable "this many hours before seed time" convention the bundled
+   * data uses into a real timestamp, so nothing in the demo ever rots.
+   * @param {number} stamp epoch ms used as "now"
+   * @param {*} offsetHours hours before `stamp` (non-numeric counts as 0)
+   * @returns {string} ISO timestamp
+   */
+  function offsetIso(stamp, offsetHours) {
+    const hours = Number(offsetHours);
+    return new Date(stamp - (isFinite(hours) ? hours : 0) * 3600000).toISOString();
+  }
+
+  /**
+   * The uid we should render "the other side" relative to, when a caller does
+   * not pass one: the signed-in user, else the demo session.
+   * @returns {string|null}
+   */
+  function currentUid() {
+    if (ZC.auth && ZC.auth.current && ZC.auth.current.uid) return ZC.auth.current.uid;
+    const session = readJson(KEYS.session, null);
+    if (typeof session === 'string' && session) return session;
+    if (isPlainObject(session) && typeof session.uid === 'string') return session.uid;
+    return null;
+  }
+
+  /**
+   * Sort helper: most recent conversation first.
+   * @param {Object} a match view
+   * @param {Object} b match view
+   * @returns {number}
+   */
+  function byRecency(a, b) {
+    const ta = Date.parse(a.lastMessageAt || a.createdAt || 0) || 0;
+    const tb = Date.parse(b.lastMessageAt || b.createdAt || 0) || 0;
+    if (tb !== ta) return tb - ta;
+    return String(a.matchId).localeCompare(String(b.matchId));
+  }
+
+  /* ------------------------------------------------------------------------
+     3. Guarded localStorage access
+     ------------------------------------------------------------------------ */
+
+  let storageWarned = false;
+
+  /**
+   * Warn once per session when storage misbehaves, without spamming toasts.
+   * @param {string} message human-readable explanation
+   * @returns {void}
+   */
+  function warnStorageOnce(message) {
+    if (storageWarned) return;
+    storageWarned = true;
+    try {
+      // Best effort only — a failed storage write must never become a crash.
+      if (ZC.ui && typeof ZC.ui.toast === 'function') ZC.ui.toast(message, 'warn', 6000);
+    } catch (err) {
+      console.warn('[zc.store] ' + message);
+    }
+  }
+
+  /**
+   * Read and parse a JSON entry. Missing, unreadable or corrupt values fall
+   * back to a copy of `fallback` (and the corrupt entry is dropped).
+   * @param {string} key localStorage key
+   * @param {*} fallback value to return when the entry is unusable
+   * @returns {*} parsed value or fallback
+   */
+  function readJson(key, fallback) {
+    let raw = null;
+    try {
+      raw = window.localStorage.getItem(key);
+    } catch (err) {
+      return cloneDeep(fallback);
+    }
+    if (raw === null || raw === undefined || raw === '') return cloneDeep(fallback);
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed === null || parsed === undefined) return cloneDeep(fallback);
+      return parsed;
+    } catch (err) {
+      console.warn('[zc.store] Corrupt JSON in ' + key + ' — resetting that entry.', err);
+      try { window.localStorage.removeItem(key); } catch (ignored) { /* nothing else to do */ }
+      return cloneDeep(fallback);
+    }
+  }
+
+  /**
+   * Serialise and store a value, surviving quota and privacy-mode failures.
+   * @param {string} key localStorage key
+   * @param {*} value JSON-serialisable value
+   * @returns {boolean} true when the write landed
+   */
+  function writeJson(key, value) {
+    try {
+      window.localStorage.setItem(key, JSON.stringify(value));
+      return true;
+    } catch (err) {
+      const quota = !!err && (
+        err.name === 'QuotaExceededError' ||
+        err.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+        err.code === 22 || err.code === 1014
+      );
+      console.warn('[zc.store] Could not write ' + key + (quota ? ' — storage is full.' : ' — storage is unavailable.'), err);
+      warnStorageOnce(quota
+        ? 'Your browser storage is full, so recent changes were not saved.'
+        : 'Browser storage is unavailable, so changes will not be saved.');
+      return false;
+    }
+  }
+
+  function removeKey(key) {
+    try {
+      window.localStorage.removeItem(key);
+    } catch (err) {
+      console.warn('[zc.store] Could not clear ' + key, err);
+    }
+  }
+
+  function readUsers() { return readJson(KEYS.users, {}); }
+  function writeUsers(map) { return writeJson(KEYS.users, map); }
+  function readSwipes() { return readJson(KEYS.swipes, {}); }
+  function writeSwipes(map) { return writeJson(KEYS.swipes, map); }
+  function readMatches() { return readJson(KEYS.matches, {}); }
+  function writeMatches(map) { return writeJson(KEYS.matches, map); }
+  function readMessages() { return readJson(KEYS.messages, {}); }
+  function writeMessages(map) { return writeJson(KEYS.messages, map); }
+
+  /* ------------------------------------------------------------------------
+     4. Demo message listeners (storage event + poll)
+     ------------------------------------------------------------------------ */
+
+  const listeners = [];
+  let pollTimer = null;
+
+  function messagesSignature(list) {
+    if (!list.length) return '0:';
+    const last = list[list.length - 1] || {};
+    return list.length + ':' + (last.id || '') + ':' + (last.createdAt || '');
+  }
+
+  /**
+   * Push the current message list to one listener if it changed.
+   * @param {Object} rec listener record
+   * @param {boolean} force deliver even when unchanged
+   * @returns {void}
+   */
+  function deliver(rec, force) {
+    const all = readMessages();
+    const list = Array.isArray(all[rec.matchId]) ? all[rec.matchId] : [];
+    const sig = messagesSignature(list);
+    if (!force && sig === rec.sig) return;
+    rec.sig = sig;
+    try {
+      rec.cb(cloneDeep(list));
+    } catch (err) {
+      console.warn('[zc.store] A message listener threw.', err);
+    }
+  }
+
+  function pollAll() {
+    listeners.slice().forEach(function (rec) { deliver(rec, false); });
+  }
+
+  // Other tabs announce their writes through the storage event; our own tab
+  // never fires it, so local writes call pollAll() directly.
+  function onStorageEvent(event) {
+    if (!event || !event.key || event.key === KEYS.messages || event.key === KEYS.matches) pollAll();
+  }
+
+  function ensurePlumbing() {
+    if (pollTimer) return;
+    window.addEventListener('storage', onStorageEvent);
+    pollTimer = setInterval(pollAll, POLL_MS);
+  }
+
+  function teardownPlumbing() {
+    if (listeners.length || !pollTimer) return;
+    window.removeEventListener('storage', onStorageEvent);
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+
+  /* ------------------------------------------------------------------------
+     5. Demo adapter — localStorage
+     ------------------------------------------------------------------------ */
+
+  /**
+   * Turn a bundled seed profile into a stored UserDoc: the durable
+   * `lastActiveOffsetHours` becomes a real timestamp relative to seed time.
+   * @param {Object} seed seed profile
+   * @param {number} stamp epoch ms used as "now"
+   * @returns {Object|null} UserDoc, or null when the seed is unusable
+   */
+  function seedToUser(seed, stamp) {
+    if (!isPlainObject(seed) || !seed.uid) return null;
+    const raw = cloneDeep(seed);
+    const offsetHours = raw.lastActiveOffsetHours;
+    delete raw.lastActiveOffsetHours;
+    const user = normalizeUser(raw);
+    user.lastActiveAt = offsetIso(stamp, offsetHours);
+    if (!user.createdAt) user.createdAt = new Date(stamp - 45 * 86400000).toISOString();
+    if (!user.updatedAt) user.updatedAt = user.lastActiveAt;
+    user.usage = normalizeUsage({ date: todayKey() });
+    return user;
+  }
+
+  /**
+   * How many messages at the tail of a conversation the viewer did not send —
+   * everything after their own last message. That is the unread count a
+   * seeded conversation should open with.
+   * @param {Object[]} docs messages ascending by createdAt
+   * @param {string} uid the viewer
+   * @returns {number} trailing messages from the other side
+   */
+  function trailingUnread(docs, uid) {
+    let count = 0;
+    for (let i = docs.length - 1; i >= 0; i -= 1) {
+      if (docs[i].from === uid) break;
+      count += 1;
+    }
+    return count;
+  }
+
+  /**
+   * Seed the relationships the demo account starts life with: inbound likes it
+   * can match with in one right swipe, one live conversation, and one match
+   * with no messages yet. Without these, matches, chat and "Who liked you" are
+   * all unreachable from a fresh demo database.
+   *
+   * Doc shapes and ids are exactly the ones recordSwipe/sendMessage write, so
+   * seeded history is indistinguishable from history the user made.
+   * @param {Object} users the user map just written, keyed by uid
+   * @param {number} stamp epoch ms used as "now"
+   * @param {boolean} force overwrite relationships that are already stored
+   * @returns {void}
+   */
+  function seedRelationships(users, stamp, force) {
+    // Only meaningful when the bundled demo account is actually present.
+    if (!isPlainObject(users) || !users[DEMO_UID]) return;
+    const likes = Array.isArray(ZC.SEED_INBOUND_LIKES) ? ZC.SEED_INBOUND_LIKES : [];
+    const conversations = Array.isArray(ZC.SEED_CONVERSATIONS) ? ZC.SEED_CONVERSATIONS : [];
+    if (!likes.length && !conversations.length) return;
+
+    const swipes = readSwipes();
+    const matches = readMatches();
+    const messages = readMessages();
+    let touchedSwipes = false;
+    let touchedMatches = false;
+    let touchedMessages = false;
+
+    /** Write one swipe unless it is already there (a re-seed never clobbers). */
+    function putSwipe(from, to, action, createdAt) {
+      const id = swipeId(from, to);
+      if (!force && swipes[id]) return;
+      swipes[id] = { id: id, from: String(from), to: String(to), action: normalizeAction(action), createdAt: createdAt };
+      touchedSwipes = true;
+    }
+
+    // People who liked the demo account and are waiting on an answer: they
+    // still sit in the deck, so any of them is one right swipe from a match.
+    likes.forEach(function (like) {
+      if (!isPlainObject(like) || !like.from || like.from === DEMO_UID) return;
+      if (!users[like.from]) return;
+      putSwipe(like.from, DEMO_UID, like.action, offsetIso(stamp, like.offsetHours));
+    });
+
+    conversations.forEach(function (convo) {
+      if (!isPlainObject(convo)) return;
+      const other = String(convo.with || '');
+      if (!other || other === DEMO_UID || !users[other]) return;
+      const matchedAt = offsetIso(stamp, convo.matchedOffsetHours);
+
+      // A match only exists because both sides swiped right, so write both.
+      putSwipe(DEMO_UID, other, 'like', matchedAt);
+      putSwipe(other, DEMO_UID, 'like', matchedAt);
+
+      const raw = Array.isArray(convo.messages) ? convo.messages : [];
+      const docs = [];
+      raw.forEach(function (message, index) {
+        if (!isPlainObject(message)) return;
+        const body = normalizeText(message.text);
+        if (!body) return;
+        docs.push({
+          id: newMessageId(index),
+          from: message.from === DEMO_UID ? DEMO_UID : other,
+          text: body,
+          createdAt: offsetIso(stamp, message.offsetHours)
+        });
+      });
+      // The bundled list is oldest first; sort anyway so a stray offset cannot
+      // hand the chat view a backwards conversation.
+      docs.sort(function (a, b) { return (Date.parse(a.createdAt) || 0) - (Date.parse(b.createdAt) || 0); });
+      const last = docs.length ? docs[docs.length - 1] : null;
+
+      const matchId = pairId(DEMO_UID, other);
+      if (force || !matches[matchId]) {
+        const unread = {};
+        unread[other] = 0;
+        unread[DEMO_UID] = trailingUnread(docs, DEMO_UID);
+        matches[matchId] = {
+          id: matchId,
+          users: [DEMO_UID, other].sort(),
+          createdAt: matchedAt,
+          lastMessage: last ? last.text : null,
+          lastMessageAt: last ? last.createdAt : null,
+          unread: unread
+        };
+        touchedMatches = true;
+      }
+
+      const stored = messages[matchId];
+      if (docs.length && (force || !Array.isArray(stored) || !stored.length)) {
+        messages[matchId] = docs;
+        touchedMessages = true;
+      }
+    });
+
+    if (touchedSwipes) writeSwipes(swipes);
+    if (touchedMatches) writeMatches(matches);
+    if (touchedMessages) writeMessages(messages);
+  }
+
+  /**
+   * Seed the demo database from ZC.SEED_PROFILES, plus the relationships in
+   * ZC.SEED_INBOUND_LIKES and ZC.SEED_CONVERSATIONS.
+   * @param {boolean} [force=false] wipe and re-seed even if already seeded
+   * @returns {Promise<boolean>} true when seeding ran
+   */
+  async function demoSeed(force) {
+    const flag = readJson(KEYS.seeded, null);
+    const alreadySeeded = isPlainObject(flag) && flag.version === SEED_VERSION;
+    if (alreadySeeded && !force) return false;
+
+    const seeds = Array.isArray(ZC.SEED_PROFILES) ? ZC.SEED_PROFILES : [];
+    if (!seeds.length && !force) {
+      // seed-data.js missing or empty: keep going with an empty database.
+      console.warn('[zc.store] No ZC.SEED_PROFILES found — demo mode starts empty.');
+    }
+
+    const stamp = Date.now();
+    const users = force ? {} : readUsers();
+    seeds.forEach(function (seed) {
+      const doc = seedToUser(seed, stamp);
+      if (!doc) return;
+      // Never clobber a real account that happens to share a uid.
+      if (!force && users[doc.uid]) return;
+      users[doc.uid] = doc;
+    });
+
+    writeUsers(users);
+    // Same pass, same timestamp: the demo account gets its history immediately.
+    seedRelationships(users, stamp, !!force);
+    writeJson(KEYS.seeded, { version: SEED_VERSION, at: new Date(stamp).toISOString(), count: seeds.length });
+    return true;
+  }
+
+  const demoAdapter = {
+    mode: 'demo',
+
+    async init() {
+      await demoSeed(false);
+      return true;
+    },
+
+    async getUser(uid) {
+      if (!uid) return null;
+      const users = readUsers();
+      return users[uid] ? normalizeUser(users[uid]) : null;
+    },
+
+    async createUser(uid, partial) {
+      const users = readUsers();
+      const existing = users[uid];
+      const stamp = nowIso();
+      const user = normalizeUser(deepMerge(existing || {}, partial || {}));
+      user.uid = String(uid);
+      user.createdAt = (existing && existing.createdAt) || stamp;
+      user.updatedAt = stamp;
+      user.lastActiveAt = stamp;
+      user.usage = normalizeUsage({ date: todayKey() });
+      users[user.uid] = user;
+      writeUsers(users);
+      return cloneDeep(user);
+    },
+
+    async updateUser(uid, patch) {
+      const users = readUsers();
+      const base = users[uid] || { uid: uid };
+      const user = normalizeUser(deepMerge(base, patch || {}));
+      user.uid = String(uid);
+      user.updatedAt = nowIso();
+      users[user.uid] = user;
+      writeUsers(users);
+      return cloneDeep(user);
+    },
+
+    async setLastActive(uid, iso) {
+      const users = readUsers();
+      if (!users[uid]) return false;
+      users[uid].lastActiveAt = iso;
+      return writeUsers(users);
+    },
+
+    async listCandidates(uid, options) {
+      const limit = Math.max(1, Number((options || {}).limit) || DEFAULT_CANDIDATE_LIMIT);
+      const users = readUsers();
+      const swipes = readSwipes();
+      const me = users[uid] ? normalizeUser(users[uid]) : null;
+      const swiped = swipedSet(Object.keys(swipes).map(function (key) { return swipes[key]; }), uid);
+      const myBlocks = me ? me.blocked : [];
+      const out = [];
+      Object.keys(users).forEach(function (key) {
+        if (key === uid) return;
+        if (swiped[key]) return;
+        const candidate = normalizeUser(users[key]);
+        if (myBlocks.indexOf(key) !== -1) return;
+        if (candidate.blocked.indexOf(uid) !== -1) return;
+        out.push(candidate);
+      });
+      out.sort(function (a, b) {
+        return (Date.parse(b.lastActiveAt || 0) || 0) - (Date.parse(a.lastActiveAt || 0) || 0);
+      });
+      return out.slice(0, limit);
+    },
+
+    async getSwipes(uid) {
+      const swipes = readSwipes();
+      return Object.keys(swipes)
+        .map(function (key) { return swipes[key]; })
+        .filter(function (swipe) { return isPlainObject(swipe) && swipe.from === uid; })
+        .sort(function (a, b) {
+          return (Date.parse(b.createdAt || 0) || 0) - (Date.parse(a.createdAt || 0) || 0);
+        })
+        .map(cloneDeep);
+    },
+
+    async recordSwipe(fromUid, toUid, action) {
+      const act = normalizeAction(action);
+      const swipes = readSwipes();
+      const id = swipeId(fromUid, toUid);
+      const existing = isPlainObject(swipes[id]) ? swipes[id] : null;
+
+      // Mirror the Firestore adapter, where the rules make swipes create-or-delete only:
+      // an already-recorded decision stands and re-recording it writes nothing.
+      let effective = act;
+      if (existing) {
+        effective = normalizeAction(existing.action);
+      } else {
+        swipes[id] = {
+          id: id,
+          from: fromUid,
+          to: toUid,
+          action: act,
+          createdAt: nowIso()
+        };
+        writeSwipes(swipes);
+      }
+
+      if (!isPositive(effective)) return { matched: false, matchId: null, created: false };
+      const reverse = swipes[swipeId(toUid, fromUid)];
+      if (!reverse || !isPositive(reverse.action)) return { matched: false, matchId: null, created: false };
+
+      // Mutual like — create the match once and only once.
+      const matches = readMatches();
+      const matchId = pairId(fromUid, toUid);
+      let created = false;
+      if (!matches[matchId]) {
+        const unread = {};
+        unread[fromUid] = 0;
+        unread[toUid] = 0;
+        matches[matchId] = {
+          id: matchId,
+          users: [String(fromUid), String(toUid)].sort(),
+          createdAt: nowIso(),
+          lastMessage: null,
+          lastMessageAt: null,
+          unread: unread
+        };
+        writeMatches(matches);
+        created = true;
+      }
+      return { matched: true, matchId: matchId, created: created };
+    },
+
+    async undoSwipe(fromUid, toUid) {
+      const swipes = readSwipes();
+      const id = swipeId(fromUid, toUid);
+      if (swipes[id]) {
+        delete swipes[id];
+        writeSwipes(swipes);
+      }
+      // A rewind also unwinds the match that swipe created.
+      const matches = readMatches();
+      const matchId = pairId(fromUid, toUid);
+      let removedMatch = false;
+      if (matches[matchId]) {
+        delete matches[matchId];
+        writeMatches(matches);
+        const messages = readMessages();
+        if (messages[matchId]) {
+          delete messages[matchId];
+          writeMessages(messages);
+        }
+        removedMatch = true;
+        pollAll();
+      }
+      return { ok: true, removedMatch: removedMatch };
+    },
+
+    async getLikesReceived(uid) {
+      const swipes = readSwipes();
+      const users = readUsers();
+      const me = users[uid] ? normalizeUser(users[uid]) : null;
+      const myBlocks = me ? me.blocked : [];
+      const out = [];
+      Object.keys(swipes).forEach(function (key) {
+        const swipe = swipes[key];
+        if (!isPlainObject(swipe) || swipe.to !== uid || !isPositive(swipe.action)) return;
+        // Only the ones I have not answered yet.
+        if (swipes[swipeId(uid, swipe.from)]) return;
+        if (myBlocks.indexOf(swipe.from) !== -1) return;
+        const candidate = users[swipe.from];
+        if (!candidate) return;
+        const doc = normalizeUser(candidate);
+        if (doc.blocked.indexOf(uid) !== -1) return;
+        out.push(doc);
+      });
+      return out;
+    },
+
+    async getMatches(uid) {
+      const users = readUsers();
+      const matches = readMatches();
+      return Object.keys(matches)
+        .map(function (key) { return matches[key]; })
+        .filter(function (match) { return isPlainObject(match) && Array.isArray(match.users) && match.users.indexOf(uid) !== -1; })
+        .map(function (match) { return toMatchView(match, uid, users[otherOf(match, uid)]); })
+        .sort(byRecency);
+    },
+
+    async getMatch(matchId, uid) {
+      const matches = readMatches();
+      const match = matches[matchId];
+      if (!isPlainObject(match)) return null;
+      const viewer = uid || currentUid() || (Array.isArray(match.users) ? match.users[0] : null);
+      const users = readUsers();
+      return toMatchView(match, viewer, users[otherOf(match, viewer)]);
+    },
+
+    async unmatch(matchId, uid) {
+      const matches = readMatches();
+      const match = matches[matchId];
+      if (!match) return { ok: true, removed: false };
+      if (uid && Array.isArray(match.users) && match.users.indexOf(uid) === -1) {
+        throw new Error('You are not part of that match.');
+      }
+      delete matches[matchId];
+      writeMatches(matches);
+      const messages = readMessages();
+      if (messages[matchId]) {
+        delete messages[matchId];
+        writeMessages(messages);
+      }
+      pollAll();
+      return { ok: true, removed: true };
+    },
+
+    async getMessages(matchId, options) {
+      const limit = Math.max(1, Number((options || {}).limit) || DEFAULT_MESSAGE_LIMIT);
+      const all = readMessages();
+      const list = Array.isArray(all[matchId]) ? all[matchId] : [];
+      return cloneDeep(list.slice(Math.max(0, list.length - limit)));
+    },
+
+    async sendMessage(matchId, fromUid, text) {
+      const body = normalizeText(text);
+      if (!body) throw new Error('Message cannot be empty.');
+      const matches = readMatches();
+      const match = matches[matchId];
+      if (!isPlainObject(match)) throw new Error('That conversation no longer exists.');
+
+      const message = { id: newMessageId(0), from: fromUid, text: body, createdAt: nowIso() };
+      const all = readMessages();
+      if (!Array.isArray(all[matchId])) all[matchId] = [];
+      all[matchId].push(message);
+      writeMessages(all);
+
+      // Denormalise the preview + unread counter onto the match.
+      const other = otherOf(match, fromUid);
+      match.lastMessage = body;
+      match.lastMessageAt = message.createdAt;
+      if (!isPlainObject(match.unread)) match.unread = {};
+      match.unread[other] = (Number(match.unread[other]) || 0) + 1;
+      match.unread[fromUid] = Number(match.unread[fromUid]) || 0;
+      writeMatches(matches);
+
+      // Our own tab gets no storage event, so nudge listeners directly.
+      pollAll();
+      return cloneDeep(message);
+    },
+
+    listenMessages(matchId, cb) {
+      const rec = { matchId: matchId, cb: cb, sig: null };
+      listeners.push(rec);
+      ensurePlumbing();
+      // First delivery is async so callers can finish wiring up first.
+      Promise.resolve().then(function () {
+        if (listeners.indexOf(rec) !== -1) deliver(rec, true);
+      });
+      return function unsubscribe() {
+        const index = listeners.indexOf(rec);
+        if (index !== -1) listeners.splice(index, 1);
+        teardownPlumbing();
+      };
+    },
+
+    async markRead(matchId, uid) {
+      const matches = readMatches();
+      const match = matches[matchId];
+      if (!isPlainObject(match)) return false;
+      if (!isPlainObject(match.unread)) match.unread = {};
+      if (!match.unread[uid]) {
+        match.unread[uid] = 0;
+        return true;
+      }
+      match.unread[uid] = 0;
+      writeMatches(matches);
+      return true;
+    },
+
+    async deleteAccountData(uid) {
+      // Swipes in both directions, matches (and their messages) either way,
+      // then the account document itself — mirroring the Firestore adapter.
+      const swipes = readSwipes();
+      Object.keys(swipes).forEach(function (id) {
+        const swipe = swipes[id];
+        if (swipe && (swipe.from === uid || swipe.to === uid)) delete swipes[id];
+      });
+      writeSwipes(swipes);
+
+      const matches = readMatches();
+      const messages = readMessages();
+      Object.keys(matches).forEach(function (id) {
+        const match = matches[id];
+        if (match && Array.isArray(match.users) && match.users.indexOf(uid) !== -1) {
+          delete matches[id];
+          delete messages[id];
+        }
+      });
+      writeMatches(matches);
+      writeMessages(messages);
+
+      const users = readUsers();
+      delete users[uid];
+      writeUsers(users);
+      pollAll();
+      return true;
+    },
+
+    async seedDemo(force) {
+      return demoSeed(!!force);
+    },
+
+    async resetDemo() {
+      [KEYS.users, KEYS.swipes, KEYS.matches, KEYS.messages, KEYS.seeded].forEach(removeKey);
+      await demoSeed(true);
+      pollAll();
+      return true;
+    },
+
+    async exportDemo() {
+      return {
+        version: SEED_VERSION,
+        exportedAt: nowIso(),
+        mode: 'demo',
+        users: readUsers(),
+        swipes: readSwipes(),
+        matches: readMatches(),
+        messages: readMessages()
+      };
+    },
+
+    async importDemo(json) {
+      let data = json;
+      if (typeof data === 'string') {
+        try {
+          data = JSON.parse(data);
+        } catch (err) {
+          throw new Error('That file is not valid JSON.');
+        }
+      }
+      if (!isPlainObject(data) || !isPlainObject(data.users)) {
+        throw new Error('That export does not contain any users.');
+      }
+      writeUsers(data.users);
+      writeSwipes(isPlainObject(data.swipes) ? data.swipes : {});
+      writeMatches(isPlainObject(data.matches) ? data.matches : {});
+      writeMessages(isPlainObject(data.messages) ? data.messages : {});
+      writeJson(KEYS.seeded, { version: SEED_VERSION, at: nowIso(), count: Object.keys(data.users).length });
+      pollAll();
+      return true;
+    }
+  };
+
+  /**
+   * Build the `{ [uid]: true }` set of everyone `uid` has already swiped.
+   * @param {Array} swipes swipe docs
+   * @param {string} uid the swiper
+   * @returns {Object}
+   */
+  function swipedSet(swipes, uid) {
+    const set = {};
+    (swipes || []).forEach(function (swipe) {
+      if (isPlainObject(swipe) && swipe.from === uid && swipe.to) set[swipe.to] = true;
+    });
+    return set;
+  }
+
+  function otherOf(match, uid) {
+    const users = Array.isArray(match.users) ? match.users : [];
+    for (let i = 0; i < users.length; i += 1) {
+      if (users[i] !== uid) return users[i];
+    }
+    return users[0] || null;
+  }
+
+  /**
+   * Mutual gender and age eligibility, mirroring the matching engine's hard
+   * filters (an empty `interestedIn` means open to all; a missing age on the
+   * viewer never excludes anyone). Used only to keep pagination from spending
+   * its budget on profiles the engine would reject anyway.
+   * @param {Object} a one user
+   * @param {Object} b the other
+   * @returns {boolean} true when neither side's gender/age filters exclude the other
+   */
+  function mutuallyEligible(a, b) {
+    function open(user, candidate) {
+      const wants = user.preferences && Array.isArray(user.preferences.interestedIn)
+        ? user.preferences.interestedIn : [];
+      const gender = candidate.profile && candidate.profile.gender;
+      if (wants.length && gender && wants.indexOf(gender) === -1) return false;
+      const age = candidate.profile ? num(candidate.profile.age) : null;
+      if (age !== null && user.preferences) {
+        const lo = num(user.preferences.ageMin);
+        const hi = num(user.preferences.ageMax);
+        if (lo !== null && age < lo) return false;
+        if (hi !== null && age > hi) return false;
+      }
+      return true;
+    }
+    return open(a, b) && open(b, a);
+  }
+
+  /**
+   * Shape a stored match into the MatchView pages render.
+   * @param {Object} match MatchDoc
+   * @param {string} uid the viewer
+   * @param {Object} otherDoc the other participant's UserDoc (may be missing)
+   * @returns {Object} MatchView
+   */
+  function toMatchView(match, uid, otherDoc) {
+    const otherUid = otherOf(match, uid);
+    const unread = isPlainObject(match.unread) ? Number(match.unread[uid]) || 0 : 0;
+    return {
+      matchId: match.id || pairId(uid, otherUid),
+      otherUid: otherUid,
+      other: otherDoc ? normalizeUser(otherDoc) : placeholderUser(otherUid),
+      createdAt: match.createdAt || null,
+      lastMessage: match.lastMessage || null,
+      lastMessageAt: match.lastMessageAt || null,
+      unread: unread
+    };
+  }
+
+  /* ------------------------------------------------------------------------
+     6. Firestore adapter
+     ------------------------------------------------------------------------ */
+
+  function db() {
+    if (!ZC.firebase || !ZC.firebase.db) throw new Error('Firestore is not available.');
+    return ZC.firebase.db;
+  }
+
+  /** FieldValue.increment when the SDK exposes it, else null. */
+  function fieldValue() {
+    if (typeof firebase === 'undefined' || !firebase.firestore || !firebase.firestore.FieldValue) return null;
+    return firebase.firestore.FieldValue;
+  }
+
+  function docToUser(snap) {
+    if (!snap || !snap.exists) return null;
+    const data = snap.data() || {};
+    data.uid = data.uid || snap.id;
+    return normalizeUser(data);
+  }
+
+  /**
+   * Delete a list of document refs in write batches (Firestore caps a batch
+   * at 500 operations).
+   * @param {Array} refs document references
+   * @returns {Promise<void>}
+   */
+  async function batchDelete(refs) {
+    for (let i = 0; i < refs.length; i += 400) {
+      const batch = db().batch();
+      refs.slice(i, i + 400).forEach(function (ref) { batch.delete(ref); });
+      await batch.commit();
+    }
+  }
+
+  /**
+   * Remove every message under a match. Runs before the match document is
+   * deleted, because the message-delete rule proves membership via the parent.
+   * @param {Object} matchRef the match document reference
+   * @returns {Promise<void>}
+   */
+  async function deleteMatchMessages(matchRef) {
+    for (;;) {
+      const snap = await matchRef.collection('messages').limit(200).get();
+      if (snap.empty) return;
+      await batchDelete(snap.docs.map(function (doc) { return doc.ref; }));
+      if (snap.size < 200) return;
+    }
+  }
+
+  /** Round a coordinate to ~1 km precision for the public projection. */
+  function roundCoord(value) {
+    const n = Number(value);
+    return isFinite(n) ? Math.round(n * 100) / 100 : 0;
+  }
+
+  /**
+   * The public projection of a UserDoc — the only shape other signed-in users
+   * can read. `users/{uid}` itself is owner-only: email, birthdate, block
+   * lists, usage counters and learned affinities never leave the account.
+   * Coordinates are rounded to ~1 km so exact positions are never published.
+   * @param {Object} user full UserDoc
+   * @returns {Object} discovery document
+   */
+  function projectDiscovery(user) {
+    const p = isPlainObject(user.profile) ? user.profile : {};
+    const f = isPlainObject(user.preferences) ? user.preferences : {};
+    const location = isPlainObject(p.location) ? {
+      label: String(p.location.label || ''),
+      lat: roundCoord(p.location.lat),
+      lng: roundCoord(p.location.lng)
+    } : null;
+    return {
+      uid: String(user.uid),
+      displayName: String(user.displayName || ''),
+      profileComplete: !!user.profileComplete,
+      lastActiveAt: user.lastActiveAt || nowIso(),
+      profile: {
+        age: num(p.age),
+        gender: p.gender || 'other',
+        pronouns: String(p.pronouns || ''),
+        bio: String(p.bio || ''),
+        photos: Array.isArray(p.photos) ? p.photos.slice(0, 6) : [],
+        interests: Array.isArray(p.interests) ? p.interests.slice(0, 12) : [],
+        personality: isPlainObject(p.personality) ? p.personality : null,
+        location: location,
+        showAge: p.showAge !== false,
+        showDistance: p.showDistance !== false
+      },
+      preferences: {
+        interestedIn: Array.isArray(f.interestedIn) ? f.interestedIn.slice(0, 4) : [],
+        ageMin: num(f.ageMin) === null ? 18 : num(f.ageMin),
+        ageMax: num(f.ageMax) === null ? 100 : num(f.ageMax),
+        maxDistanceKm: num(f.maxDistanceKm) === null ? 500 : num(f.maxDistanceKm),
+        discoverable: f.discoverable !== false
+      }
+    };
+  }
+
+  /**
+   * Keep the discovery projection in step with the private doc. Best-effort:
+   * a failed projection write must never fail the profile save that caused it.
+   * @param {Object} user full UserDoc
+   * @returns {Promise<void>}
+   */
+  async function writeDiscovery(user) {
+    try {
+      await db().collection('discovery').doc(String(user.uid)).set(projectDiscovery(user));
+    } catch (err) {
+      console.warn('[zc.store] Could not update the discovery profile.', err);
+    }
+  }
+
+  /**
+   * Fetch several public discovery profiles at once, tolerating individual
+   * failures. Other people are only ever read through this projection.
+   * @param {string[]} uids ids to fetch
+   * @returns {Promise<Object>} map of uid -> UserDoc-shaped public profile
+   */
+  async function fetchProfiles(uids) {
+    const unique = [];
+    (uids || []).forEach(function (uid) {
+      if (uid && unique.indexOf(uid) === -1) unique.push(uid);
+    });
+    const results = await Promise.all(unique.map(function (uid) {
+      return db().collection('discovery').doc(uid).get().then(docToUser, function (err) {
+        console.warn('[zc.store] Could not load profile ' + uid, err);
+        return null;
+      });
+    }));
+    const map = {};
+    unique.forEach(function (uid, index) {
+      if (results[index]) map[uid] = results[index];
+    });
+    return map;
+  }
+
+  const firestoreAdapter = {
+    mode: 'firebase',
+
+    async init() {
+      return true;
+    },
+
+    async getUser(uid) {
+      if (!uid) return null;
+      return docToUser(await db().collection('users').doc(uid).get());
+    },
+
+    async createUser(uid, partial) {
+      const stamp = nowIso();
+      const user = normalizeUser(partial || {});
+      user.uid = String(uid);
+      user.createdAt = stamp;
+      user.updatedAt = stamp;
+      user.lastActiveAt = stamp;
+      user.usage = normalizeUsage({ date: todayKey() });
+      await db().collection('users').doc(user.uid).set(user);
+      await writeDiscovery(user);
+      return user;
+    },
+
+    async updateUser(uid, patch) {
+      // Read-modify-write so nested maps behave exactly like the demo adapter
+      // (a merged set would resurrect keys that learning pruning removed).
+      const ref = db().collection('users').doc(uid);
+      const snap = await ref.get();
+      const base = snap.exists ? snap.data() || {} : { uid: uid };
+      const user = normalizeUser(deepMerge(base, patch || {}));
+      user.uid = String(uid);
+      if (!user.createdAt) user.createdAt = nowIso();
+      user.updatedAt = nowIso();
+      await ref.set(user);
+      await writeDiscovery(user);
+      return user;
+    },
+
+    async setLastActive(uid, iso) {
+      try {
+        await db().collection('users').doc(uid).update({ lastActiveAt: iso });
+        // The projection carries lastActiveAt too — it drives ranking's
+        // activity signal, so it has to stay as fresh as the private doc.
+        await db().collection('discovery').doc(uid).update({ lastActiveAt: iso }).catch(function () {});
+        return true;
+      } catch (err) {
+        // Missing doc or offline — activity is a nicety, never an error path.
+        console.warn('[zc.store] Could not update lastActiveAt', err);
+        return false;
+      }
+    },
+
+    async listCandidates(uid, options) {
+      const limit = Math.max(1, Number((options || {}).limit) || DEFAULT_CANDIDATE_LIMIT);
+      const pageSize = Math.min(200, Math.max(60, limit * 2));
+      const discovery = db().collection('discovery');
+
+      const [me, mySwipes] = await Promise.all([
+        firestoreAdapter.getUser(uid),
+        firestoreAdapter.getSwipes(uid)
+      ]);
+      const swiped = swipedSet(mySwipes, uid);
+      const myBlocks = me ? me.blocked : [];
+
+      // Everyone recently active can be ineligible (already swiped, or failing
+      // the mutual filters), so a single newest-first slice would eventually
+      // report an empty deck while older eligible profiles still exist. Walk
+      // the collection with a cursor until the deck is full, the collection is
+      // exhausted, or a hard scan cap is hit.
+      const out = [];
+      let cursor = null;
+      let scanned = 0;
+      let ordered = true;
+      while (out.length < limit && scanned < 1500) {
+        let snap;
+        try {
+          // Matches the composite index shipped in firestore.indexes.json.
+          let query = discovery
+            .where('profileComplete', '==', true)
+            .where('preferences.discoverable', '==', true)
+            .orderBy('lastActiveAt', 'desc')
+            .limit(pageSize);
+          if (cursor) query = query.startAfter(cursor);
+          snap = await query.get();
+        } catch (err) {
+          console.warn('[zc.store] Indexed candidate query unavailable, falling back.', err);
+          try {
+            let query = discovery.orderBy('lastActiveAt', 'desc').limit(pageSize);
+            if (cursor) query = query.startAfter(cursor);
+            snap = await query.get();
+          } catch (innerErr) {
+            console.warn('[zc.store] Ordered candidate query unavailable, falling back again.', innerErr);
+            snap = await discovery.limit(pageSize).get();
+            ordered = false;
+          }
+        }
+        if (snap.empty) break;
+        cursor = snap.docs[snap.docs.length - 1];
+        scanned += snap.size;
+
+        snap.forEach(function (doc) {
+          if (out.length >= limit) return;
+          if (doc.id === uid) return;
+          if (swiped[doc.id]) return;
+          if (myBlocks.indexOf(doc.id) !== -1) return;
+          const candidate = docToUser(doc);
+          if (!candidate) return;
+          // Cheap mutual gender/age pre-filters (same semantics as the
+          // engine's hard filters) so ineligible profiles do not use up the
+          // page budget; distance and the rest stay with the engine.
+          if (me && !mutuallyEligible(me, candidate)) return;
+          out.push(candidate);
+        });
+
+        // The unordered fallback cannot paginate; take the one page it gives.
+        if (!ordered || snap.size < pageSize) break;
+      }
+      return out;
+    },
+
+    async getSwipes(uid) {
+      let snap;
+      try {
+        snap = await db().collection('swipes').where('from', '==', uid).orderBy('createdAt', 'desc').get();
+      } catch (err) {
+        console.warn('[zc.store] Ordered swipe query unavailable, falling back.', err);
+        snap = await db().collection('swipes').where('from', '==', uid).get();
+      }
+      const out = [];
+      snap.forEach(function (doc) {
+        const data = doc.data() || {};
+        out.push({
+          id: doc.id,
+          from: data.from,
+          to: data.to,
+          action: normalizeAction(data.action),
+          createdAt: toIso(data.createdAt)
+        });
+      });
+      out.sort(function (a, b) {
+        return (Date.parse(b.createdAt || 0) || 0) - (Date.parse(a.createdAt || 0) || 0);
+      });
+      return out;
+    },
+
+    async recordSwipe(fromUid, toUid, action) {
+      const act = normalizeAction(action);
+      const id = swipeId(fromUid, toUid);
+      const ref = db().collection('swipes').doc(id);
+      const existing = await ref.get();
+
+      // Swipes are immutable: the rules allow create and delete but never update, and a
+      // set() over an existing document counts as an update. Re-recording the same pair
+      // (two tabs on one deck, or a retry whose first write actually landed) therefore
+      // writes nothing and simply re-reports the outcome. Changing your mind goes through
+      // undoSwipe, which deletes the document so the next record creates it afresh.
+      let effective = act;
+      if (existing.exists) {
+        effective = normalizeAction((existing.data() || {}).action);
+      } else {
+        await ref.set({
+          id: id,
+          from: fromUid,
+          to: toUid,
+          action: act,
+          createdAt: nowIso()
+        });
+      }
+
+      if (!isPositive(effective)) return { matched: false, matchId: null, created: false };
+
+      const reverseSnap = await db().collection('swipes').doc(swipeId(toUid, fromUid)).get();
+      if (!reverseSnap.exists || !isPositive((reverseSnap.data() || {}).action)) {
+        return { matched: false, matchId: null, created: false };
+      }
+
+      // Mutual like — create the match doc only when it is not already there.
+      const matchId = pairId(fromUid, toUid);
+      const matchRef = db().collection('matches').doc(matchId);
+      const matchSnap = await matchRef.get();
+      let created = false;
+      if (!matchSnap.exists) {
+        const unread = {};
+        unread[fromUid] = 0;
+        unread[toUid] = 0;
+        await matchRef.set({
+          id: matchId,
+          users: [String(fromUid), String(toUid)].sort(),
+          createdAt: nowIso(),
+          lastMessage: null,
+          lastMessageAt: null,
+          unread: unread
+        });
+        created = true;
+      }
+      return { matched: true, matchId: matchId, created: created };
+    },
+
+    async undoSwipe(fromUid, toUid) {
+      await db().collection('swipes').doc(swipeId(fromUid, toUid)).delete();
+      const matchId = pairId(fromUid, toUid);
+      const matchRef = db().collection('matches').doc(matchId);
+      const snap = await matchRef.get();
+      let removedMatch = false;
+      if (snap.exists) {
+        await matchRef.delete();
+        removedMatch = true;
+      }
+      return { ok: true, removedMatch: removedMatch };
+    },
+
+    async getLikesReceived(uid) {
+      let snap;
+      try {
+        snap = await db().collection('swipes').where('to', '==', uid).where('action', 'in', ['like', 'super']).get();
+      } catch (err) {
+        console.warn('[zc.store] "in" query unavailable, filtering client-side.', err);
+        snap = await db().collection('swipes').where('to', '==', uid).get();
+      }
+      const senders = [];
+      snap.forEach(function (doc) {
+        const data = doc.data() || {};
+        if (!isPositive(data.action) || !data.from) return;
+        if (senders.indexOf(data.from) === -1) senders.push(data.from);
+      });
+      if (!senders.length) return [];
+
+      const [me, mySwipes] = await Promise.all([
+        firestoreAdapter.getUser(uid),
+        firestoreAdapter.getSwipes(uid)
+      ]);
+      const answered = swipedSet(mySwipes, uid);
+      const myBlocks = me ? me.blocked : [];
+      const pending = senders.filter(function (from) {
+        return !answered[from] && myBlocks.indexOf(from) === -1;
+      });
+      const users = await fetchProfiles(pending);
+      return pending
+        .map(function (from) { return users[from]; })
+        .filter(function (user) { return !!user && user.blocked.indexOf(uid) === -1; });
+    },
+
+    async getMatches(uid) {
+      const collection = db().collection('matches');
+      let snap;
+      try {
+        snap = await collection.where('users', 'array-contains', uid).orderBy('lastMessageAt', 'desc').get();
+      } catch (err) {
+        console.warn('[zc.store] Ordered match query unavailable, sorting client-side.', err);
+        snap = await collection.where('users', 'array-contains', uid).get();
+      }
+      const docs = [];
+      snap.forEach(function (doc) {
+        const data = doc.data() || {};
+        data.id = data.id || doc.id;
+        docs.push(data);
+      });
+      const users = await fetchProfiles(docs.map(function (match) { return otherOf(match, uid); }));
+      return docs
+        .map(function (match) { return toMatchView(match, uid, users[otherOf(match, uid)]); })
+        .sort(byRecency);
+    },
+
+    async getMatch(matchId, uid) {
+      const snap = await db().collection('matches').doc(matchId).get();
+      if (!snap.exists) return null;
+      const data = snap.data() || {};
+      data.id = data.id || snap.id;
+      const viewer = uid || currentUid() || (Array.isArray(data.users) ? data.users[0] : null);
+      const otherUid = otherOf(data, viewer);
+      const users = await fetchProfiles([otherUid]);
+      return toMatchView(data, viewer, users[otherUid]);
+    },
+
+    async unmatch(matchId, uid) {
+      const ref = db().collection('matches').doc(matchId);
+      const snap = await ref.get();
+      if (!snap.exists) return { ok: true, removed: false };
+      const data = snap.data() || {};
+      if (uid && Array.isArray(data.users) && data.users.indexOf(uid) === -1) {
+        throw new Error('You are not part of that match.');
+      }
+      // Messages first: the delete rule checks membership of the parent match,
+      // which stops being checkable the moment the match document is gone.
+      await deleteMatchMessages(ref);
+      await ref.delete();
+      return { ok: true, removed: true };
+    },
+
+    async getMessages(matchId, options) {
+      const limit = Math.max(1, Number((options || {}).limit) || DEFAULT_MESSAGE_LIMIT);
+      const snap = await db().collection('matches').doc(matchId).collection('messages')
+        .orderBy('createdAt', 'desc').limit(limit).get();
+      const out = [];
+      snap.forEach(function (doc) {
+        const data = doc.data() || {};
+        out.push({ id: doc.id, from: data.from, text: String(data.text || ''), createdAt: toIso(data.createdAt) });
+      });
+      return out.reverse();
+    },
+
+    async sendMessage(matchId, fromUid, text) {
+      const body = normalizeText(text);
+      if (!body) throw new Error('Message cannot be empty.');
+      const matchRef = db().collection('matches').doc(matchId);
+      const ref = matchRef.collection('messages').doc();
+      const message = { id: ref.id, from: fromUid, text: body, createdAt: nowIso() };
+      await ref.set(message);
+
+      // Update the conversation preview + the other side's unread counter.
+      try {
+        const snap = await matchRef.get();
+        const other = otherOf(snap.data() || {}, fromUid);
+        const patch = { lastMessage: body, lastMessageAt: message.createdAt };
+        const FV = fieldValue();
+        if (other) {
+          patch['unread.' + other] = FV ? FV.increment(1) : (Number(((snap.data() || {}).unread || {})[other]) || 0) + 1;
+        }
+        await matchRef.update(patch);
+      } catch (err) {
+        console.warn('[zc.store] Message sent but the conversation preview did not update.', err);
+      }
+      return message;
+    },
+
+    listenMessages(matchId, cb) {
+      try {
+        return db().collection('matches').doc(matchId).collection('messages')
+          .orderBy('createdAt', 'asc')
+          .limit(500)
+          .onSnapshot(function (snap) {
+            const out = [];
+            snap.forEach(function (doc) {
+              const data = doc.data() || {};
+              out.push({ id: doc.id, from: data.from, text: String(data.text || ''), createdAt: toIso(data.createdAt) });
+            });
+            cb(out);
+          }, function (err) {
+            console.warn('[zc.store] Live message stream failed.', err);
+          });
+      } catch (err) {
+        console.warn('[zc.store] Could not open the live message stream.', err);
+        return function () { /* nothing to unsubscribe */ };
+      }
+    },
+
+    async markRead(matchId, uid) {
+      const patch = {};
+      patch['unread.' + uid] = 0;
+      try {
+        await db().collection('matches').doc(matchId).update(patch);
+        return true;
+      } catch (err) {
+        console.warn('[zc.store] Could not clear the unread counter.', err);
+        return false;
+      }
+    },
+
+    async deleteAccountData(uid) {
+      // Swipes in both directions: the ones this account made, and the ones
+      // aimed at it — an inbound like is data about this account and must not
+      // outlive it.
+      const swipes = db().collection('swipes');
+      const directions = ['from', 'to'];
+      for (let d = 0; d < directions.length; d += 1) {
+        const snap = await swipes.where(directions[d], '==', uid).get();
+        await batchDelete(snap.docs.map(function (doc) { return doc.ref; }));
+      }
+
+      // Every match this account is in, messages first (see unmatch).
+      const matches = await db().collection('matches').where('users', 'array-contains', uid).get();
+      for (let i = 0; i < matches.docs.length; i += 1) {
+        await deleteMatchMessages(matches.docs[i].ref);
+        await matches.docs[i].ref.delete();
+      }
+
+      // The public projection, then the private document.
+      await db().collection('discovery').doc(uid).delete().catch(function (err) {
+        console.warn('[zc.store] Could not delete the discovery profile.', err);
+      });
+      await db().collection('users').doc(uid).delete();
+      return true;
+    },
+
+    // Demo-only helpers: inert against a real project.
+    async seedDemo() {
+      return false;
+    },
+
+    async resetDemo() {
+      throw new Error('Demo data can only be reset in demo mode.');
+    },
+
+    async exportDemo() {
+      return null;
+    },
+
+    async importDemo() {
+      return false;
+    }
+  };
+
+  /* ------------------------------------------------------------------------
+     7. Facade
+     ------------------------------------------------------------------------ */
+
+  const mode = (ZC.config && ZC.config.mode === 'firebase' && ZC.firebase && ZC.firebase.db) ? 'firebase' : 'demo';
+  const adapter = mode === 'firebase' ? firestoreAdapter : demoAdapter;
+
+  // Resolves once the adapter can serve reads (demo mode seeds itself first).
+  const ready = (async function initStore() {
+    try {
+      await adapter.init();
+      return true;
+    } catch (err) {
+      console.warn('[zc.store] Adapter initialisation problem — continuing anyway.', err);
+      return false;
+    }
+  })();
+
+  const lastTouch = {};
+
+  /** Map a usage field onto the matching plan limit. */
+  const LIMIT_FIELDS = { likes: 'likesPerDay', superLikes: 'superLikesPerDay', rewinds: 'rewinds' };
+
+  function planLimits(plan) {
+    const limits = (ZC.config && ZC.config.limits) || {};
+    return limits[plan === 'premium' ? 'premium' : 'free'] || { likesPerDay: 25, superLikesPerDay: 1, rewinds: 0 };
+  }
+
+  const store = {
+    /** 'firebase' or 'demo' — which adapter is live. */
+    mode: mode,
+
+    /** Promise that resolves when the adapter is usable. */
+    ready: ready,
+
+    /** Canonical UserDoc defaults. Copy it, do not mutate it. */
+    DEFAULT_USER: DEFAULT_USER,
+
+    /** Demo-mode storage keys, exposed for the Settings data tools. */
+    KEYS: KEYS,
+
+    /**
+     * Load a user document.
+     * @param {string} uid user id
+     * @returns {Promise<Object|null>} UserDoc or null
+     */
+    async getUser(uid) {
+      await ready;
+      return adapter.getUser(uid);
+    },
+
+    /**
+     * Create a user document, filling every field from DEFAULT_USER.
+     * @param {string} uid user id
+     * @param {Object} [partial] initial values
+     * @returns {Promise<Object>} the stored UserDoc
+     */
+    async createUser(uid, partial) {
+      await ready;
+      if (!uid) throw new Error('A uid is required to create a user.');
+      return adapter.createUser(uid, partial || {});
+    },
+
+    /**
+     * Deep-merge a patch into a user document and stamp updatedAt.
+     * Nested objects merge; arrays replace.
+     * @param {string} uid user id
+     * @param {Object} patch changes
+     * @returns {Promise<Object>} the updated UserDoc
+     */
+    async updateUser(uid, patch) {
+      await ready;
+      if (!uid) throw new Error('A uid is required to update a user.');
+      return adapter.updateUser(uid, patch || {});
+    },
+
+    /**
+     * Record that the user is around. Throttled to one write per 5 minutes.
+     * @param {string} uid user id
+     * @returns {Promise<boolean>} true when a write happened
+     */
+    async touchActive(uid) {
+      await ready;
+      if (!uid) return false;
+      const now = Date.now();
+      if (lastTouch[uid] && now - lastTouch[uid] < TOUCH_THROTTLE_MS) return false;
+      lastTouch[uid] = now;
+      return adapter.setLastActive(uid, new Date(now).toISOString());
+    },
+
+    /**
+     * Candidates for the deck: everyone except me, anyone I have already
+     * swiped, and blocks in either direction. Ranking is the engine's job.
+     * @param {string} uid viewer id
+     * @param {{limit?:number}} [options] max candidates (default 60)
+     * @returns {Promise<Object[]>} UserDocs
+     */
+    async listCandidates(uid, options) {
+      await ready;
+      if (!uid) return [];
+      return adapter.listCandidates(uid, options || {});
+    },
+
+    /**
+     * Every swipe this user has made, newest first.
+     * @param {string} uid swiper id
+     * @returns {Promise<Object[]>} SwipeDocs
+     */
+    async getSwipes(uid) {
+      await ready;
+      if (!uid) return [];
+      return adapter.getSwipes(uid);
+    },
+
+    /**
+     * Write a swipe and create the match when the like is mutual. Idempotent:
+     * re-recording the same swipe never produces a second match.
+     * @param {string} fromUid swiper
+     * @param {string} toUid swiped
+     * @param {'like'|'pass'|'super'} action what they did
+     * @returns {Promise<{matched:boolean, matchId:string|null, created:boolean}>}
+     */
+    async recordSwipe(fromUid, toUid, action) {
+      await ready;
+      if (!fromUid || !toUid) throw new Error('A swipe needs both people.');
+      if (fromUid === toUid) throw new Error('You cannot swipe on yourself.');
+      return adapter.recordSwipe(fromUid, toUid, action);
+    },
+
+    /**
+     * Undo a swipe, removing the match it created if there is one.
+     * @param {string} fromUid swiper
+     * @param {string} toUid swiped
+     * @returns {Promise<{ok:boolean, removedMatch:boolean}>}
+     */
+    async undoSwipe(fromUid, toUid) {
+      await ready;
+      if (!fromUid || !toUid) throw new Error('A rewind needs both people.');
+      return adapter.undoSwipe(fromUid, toUid);
+    },
+
+    /**
+     * People who liked me and are still waiting for my answer.
+     * @param {string} uid viewer id
+     * @returns {Promise<Object[]>} UserDocs
+     */
+    async getLikesReceived(uid) {
+      await ready;
+      if (!uid) return [];
+      return adapter.getLikesReceived(uid);
+    },
+
+    /**
+     * All of this user's matches as render-ready views, newest activity first.
+     * @param {string} uid viewer id
+     * @returns {Promise<Object[]>} MatchViews
+     */
+    async getMatches(uid) {
+      await ready;
+      if (!uid) return [];
+      return adapter.getMatches(uid);
+    },
+
+    /**
+     * One match as a render-ready view.
+     * @param {string} matchId match id
+     * @param {string} [uid] viewer (defaults to the signed-in user)
+     * @returns {Promise<Object|null>} MatchView or null
+     */
+    async getMatch(matchId, uid) {
+      await ready;
+      if (!matchId) return null;
+      return adapter.getMatch(matchId, uid || currentUid());
+    },
+
+    /**
+     * Remove a match (and, in demo mode, its messages).
+     * @param {string} matchId match id
+     * @param {string} uid the participant asking
+     * @returns {Promise<{ok:boolean, removed:boolean}>}
+     */
+    async unmatch(matchId, uid) {
+      await ready;
+      if (!matchId) throw new Error('A match id is required.');
+      return adapter.unmatch(matchId, uid);
+    },
+
+    /**
+     * Conversation history, oldest first.
+     * @param {string} matchId match id
+     * @param {{limit?:number}} [options] how many of the newest messages (default 200)
+     * @returns {Promise<Object[]>} MessageDocs
+     */
+    async getMessages(matchId, options) {
+      await ready;
+      if (!matchId) return [];
+      return adapter.getMessages(matchId, options || {});
+    },
+
+    /**
+     * Send a message; trims, caps at 1000 chars and rejects empty text.
+     * @param {string} matchId match id
+     * @param {string} fromUid sender
+     * @param {string} text message body
+     * @returns {Promise<Object>} the stored MessageDoc
+     */
+    async sendMessage(matchId, fromUid, text) {
+      await ready;
+      if (!matchId || !fromUid) throw new Error('A message needs a conversation and a sender.');
+      return adapter.sendMessage(matchId, fromUid, text);
+    },
+
+    /**
+     * Subscribe to a conversation. Firestore uses onSnapshot; demo mode uses
+     * the cross-tab storage event plus a 1.5s poll.
+     * @param {string} matchId match id
+     * @param {Function} cb called with the full ascending message list
+     * @returns {Function} unsubscribe
+     */
+    listenMessages(matchId, cb) {
+      if (!matchId || typeof cb !== 'function') return function () { /* nothing to do */ };
+      return adapter.listenMessages(matchId, cb);
+    },
+
+    /**
+     * Clear this user's unread counter on a match.
+     * @param {string} matchId match id
+     * @param {string} uid the reader
+     * @returns {Promise<boolean>}
+     */
+    async markRead(matchId, uid) {
+      await ready;
+      if (!matchId || !uid) return false;
+      return adapter.markRead(matchId, uid);
+    },
+
+    /**
+     * Today's usage counters, reset automatically when the stored date is not
+     * today (the reset is persisted).
+     * @param {string} uid user id
+     * @returns {Promise<{date:string, likes:number, superLikes:number, rewinds:number}>}
+     */
+    async getUsage(uid) {
+      await ready;
+      const today = todayKey();
+      const empty = { date: today, likes: 0, superLikes: 0, rewinds: 0 };
+      if (!uid) return empty;
+      const user = await adapter.getUser(uid);
+      if (!user) return empty;
+      const usage = normalizeUsage(user.usage);
+      if (usage.date === today) return usage;
+      const fresh = { date: today, likes: 0, superLikes: 0, rewinds: 0 };
+      try {
+        await adapter.updateUser(uid, { usage: fresh });
+      } catch (err) {
+        console.warn('[zc.store] Could not persist the daily usage reset.', err);
+      }
+      return fresh;
+    },
+
+    /**
+     * Increment one usage counter for today.
+     * @param {string} uid user id
+     * @param {'likes'|'superLikes'|'rewinds'} field counter to bump
+     * @param {number} [by=1] amount
+     * @returns {Promise<Object>} the updated usage record
+     */
+    async bumpUsage(uid, field, by) {
+      await ready;
+      const usage = await store.getUsage(uid);
+      if (!uid || !Object.prototype.hasOwnProperty.call(LIMIT_FIELDS, field)) return usage;
+      const amount = by === undefined ? 1 : Number(by) || 0;
+      usage[field] = Math.max(0, usage[field] + amount);
+      try {
+        await adapter.updateUser(uid, { usage: usage });
+      } catch (err) {
+        console.warn('[zc.store] Could not persist usage.', err);
+      }
+      return usage;
+    },
+
+    /**
+     * Whether the user has budget left for an action today.
+     * @param {string} uid user id
+     * @param {'likes'|'superLikes'|'rewinds'} field counter to check
+     * @returns {Promise<{allowed:boolean, remaining:number, limit:number, plan:string}>}
+     */
+    async canSpend(uid, field) {
+      await ready;
+      const user = uid ? await adapter.getUser(uid) : null;
+      const plan = user && user.plan === 'premium' ? 'premium' : 'free';
+      const limits = planLimits(plan);
+      const limitKey = LIMIT_FIELDS[field] || 'likesPerDay';
+      const limit = limits[limitKey];
+      const usage = await store.getUsage(uid);
+      const used = Number(usage[field]) || 0;
+      const remaining = limit === Infinity ? Infinity : Math.max(0, limit - used);
+      return { allowed: remaining > 0, remaining: remaining, limit: limit, plan: plan };
+    },
+
+    /**
+     * Remove everything stored about an account: swipes in both directions,
+     * matches with their messages, the public discovery projection (firebase
+     * mode) and the account document itself. Deleting the sign-in credential
+     * is the caller's job — this only clears the data.
+     * @param {string} uid the account being deleted
+     * @returns {Promise<boolean>}
+     */
+    async deleteAccountData(uid) {
+      await ready;
+      if (!uid) throw new Error('deleteAccountData needs a uid.');
+      return adapter.deleteAccountData(uid);
+    },
+
+    /**
+     * Seed the demo database from the bundled profiles. No-op in firebase mode.
+     * @param {boolean} [force=false] wipe and re-seed
+     * @returns {Promise<boolean>} true when seeding ran
+     */
+    async seedDemo(force) {
+      await ready;
+      return adapter.seedDemo(!!force);
+    },
+
+    /**
+     * Wipe and re-seed the demo database. Throws in firebase mode.
+     * @returns {Promise<boolean>}
+     */
+    async resetDemo() {
+      await ready;
+      return adapter.resetDemo();
+    },
+
+    /**
+     * Snapshot of the whole demo database, for the "export my data" download.
+     * Returns null in firebase mode.
+     * @returns {Promise<Object|null>}
+     */
+    async exportDemo() {
+      await ready;
+      return adapter.exportDemo();
+    },
+
+    /**
+     * Restore a snapshot produced by exportDemo(). No-op in firebase mode.
+     * @param {Object|string} json export object or JSON string
+     * @returns {Promise<boolean>}
+     */
+    async importDemo(json) {
+      await ready;
+      return adapter.importDemo(json);
+    }
+  };
+
+  ZC.store = store;
+})();

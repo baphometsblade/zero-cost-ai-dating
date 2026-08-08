@@ -1,0 +1,377 @@
+rules_version = '2';
+
+// zero-cost-ai-dating — Firestore security rules.
+//
+// This app runs entirely in the browser on the Firebase Spark (free) plan: there are no
+// Cloud Functions and no trusted server code anywhere. These rules are therefore the ONLY
+// server-side enforcement that exists. Anything the client is not allowed to do must be
+// impossible here, and every write is shape-checked against the data model in the
+// implementation contract (§4) so a tampered client cannot poison other people's feeds.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------------------------------------------------------------------------
+    // Shared helpers
+    // ---------------------------------------------------------------------------
+
+    // Any authenticated caller (email/password or Google). Anonymous/demo sessions never
+    // reach Firestore — they live purely in localStorage.
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // The caller owns the document keyed by this uid.
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // The `users` array of a match document, read once from the parent match.
+    function matchUsers(matchId) {
+      return get(/databases/$(database)/documents/matches/$(matchId)).data.users;
+    }
+
+    // The caller is one of the two people in the given match.
+    function isParticipant(matchId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/matches/$(matchId))
+        && request.auth.uid in matchUsers(matchId);
+    }
+
+    // ---------------------------------------------------------------------------
+    // users/{uid} — the profile documents that power discovery
+    // ---------------------------------------------------------------------------
+    //
+    // Readable by any signed-in user because discovery has to scan candidates locally
+    // (the matching engine is on-device). Writable only by the owner, and only in the
+    // exact shape the app produces.
+    match /users/{uid} {
+
+      // profile.personality — five integer axes, 0..100, all optional.
+      function personalityOk(pp) {
+        return pp == null || (
+          pp is map
+          && (!('openness' in pp) || (pp.openness is number && pp.openness >= 0 && pp.openness <= 100))
+          && (!('conscientiousness' in pp) || (pp.conscientiousness is number && pp.conscientiousness >= 0 && pp.conscientiousness <= 100))
+          && (!('extraversion' in pp) || (pp.extraversion is number && pp.extraversion >= 0 && pp.extraversion <= 100))
+          && (!('agreeableness' in pp) || (pp.agreeableness is number && pp.agreeableness >= 0 && pp.agreeableness <= 100))
+          && (!('stability' in pp) || (pp.stability is number && pp.stability >= 0 && pp.stability <= 100))
+        );
+      }
+
+      // profile.location — either null or a real coordinate pair with a short label.
+      function locationOk(loc) {
+        return loc == null || (
+          loc is map
+          && loc.lat is number && loc.lat >= -90 && loc.lat <= 90
+          && loc.lng is number && loc.lng >= -180 && loc.lng <= 180
+          && (!('label' in loc) || (loc.label is string && loc.label.size() <= 120))
+        );
+      }
+
+      // profile.* — bounded bio, capped interest/photo lists, known gender values.
+      function profileOk(p) {
+        return p is map
+          && (!('bio' in p) || (p.bio is string && p.bio.size() <= 500))
+          && (!('interests' in p) || (p.interests is list && p.interests.size() <= 12))
+          && (!('photos' in p) || (p.photos is list && p.photos.size() <= 6))
+          && (!('gender' in p) || p.gender in ['woman', 'man', 'nonbinary', 'other'])
+          && (!('pronouns' in p) || (p.pronouns is string && p.pronouns.size() <= 40))
+          && (!('birthdate' in p) || p.birthdate == null || (p.birthdate is string && p.birthdate.size() == 10))
+          && (!('age' in p) || p.age == null || (p.age is number && p.age >= 18 && p.age <= 120))
+          && (!('showAge' in p) || p.showAge is bool)
+          && (!('showDistance' in p) || p.showDistance is bool)
+          && (!('personality' in p) || personalityOk(p.personality))
+          && (!('location' in p) || locationOk(p.location));
+      }
+
+      // preferences.* — the mutual filters. Age window must stay inside 18..100 and
+      // ordered, distance inside 1..500 km (500 means "anywhere").
+      function prefsOk(f) {
+        return f is map
+          && (!('ageMin' in f) || (f.ageMin is number && f.ageMin >= 18 && f.ageMin <= 100))
+          && (!('ageMax' in f) || (f.ageMax is number && f.ageMax >= 18 && f.ageMax <= 100))
+          && (!(('ageMin' in f) && ('ageMax' in f)) || f.ageMin <= f.ageMax)
+          && (!('maxDistanceKm' in f) || (f.maxDistanceKm is number && f.maxDistanceKm >= 1 && f.maxDistanceKm <= 500))
+          && (!('interestedIn' in f) || (f.interestedIn is list && f.interestedIn.size() <= 4))
+          && (!('theme' in f) || f.theme in ['system', 'light', 'dark'])
+          && (!('notifications' in f) || f.notifications is bool)
+          && (!('discoverable' in f) || f.discoverable is bool);
+      }
+
+      // learning.* and usage.* — small bookkeeping maps; keep the counters sane so the
+      // document cannot be grown without bound.
+      function bookkeepingOk(d) {
+        return (!('learning' in d) || (
+            d.learning is map
+            && (!('interestAffinity' in d.learning) || (d.learning.interestAffinity is map && d.learning.interestAffinity.keys().size() <= 60))
+            && (!('likeCount' in d.learning) || (d.learning.likeCount is number && d.learning.likeCount >= 0))
+            && (!('passCount' in d.learning) || (d.learning.passCount is number && d.learning.passCount >= 0))
+          ))
+          && (!('usage' in d) || (
+            d.usage is map
+            && (!('date' in d.usage) || (d.usage.date is string && d.usage.date.size() == 10))
+            && (!('likes' in d.usage) || (d.usage.likes is number && d.usage.likes >= 0))
+            && (!('superLikes' in d.usage) || (d.usage.superLikes is number && d.usage.superLikes >= 0))
+            && (!('rewinds' in d.usage) || (d.usage.rewinds is number && d.usage.rewinds >= 0))
+          ))
+          && (!('blocked' in d) || (d.blocked is list && d.blocked.size() <= 1000));
+      }
+
+      // The whole UserDoc: required top-level keys plus every nested validator.
+      // `createdAt` is required so that the immutability check below can always compare
+      // it without tripping over a missing field.
+      function userDocOk(d) {
+        return d.keys().hasAll(['uid', 'email', 'displayName', 'createdAt', 'plan', 'profile', 'preferences'])
+          && d.uid is string
+          && d.email is string && d.email.size() <= 320
+          && d.displayName is string && d.displayName.size() <= 60
+          && d.plan in ['free', 'premium']
+          && (!('planSince' in d) || d.planSince == null || d.planSince is string)
+          && (!('profileComplete' in d) || d.profileComplete is bool)
+          && d.createdAt is string
+          && (!('updatedAt' in d) || d.updatedAt is string)
+          && (!('lastActiveAt' in d) || d.lastActiveAt is string)
+          && profileOk(d.profile)
+          && prefsOk(d.preferences)
+          && bookkeepingOk(d);
+      }
+
+      // Identity fields are set once at sign-up and can never be rewritten afterwards —
+      // this is what stops an account from impersonating another or back-dating itself.
+      function identityUnchanged() {
+        return request.resource.data.uid == resource.data.uid
+          && request.resource.data.email == resource.data.email
+          && request.resource.data.createdAt == resource.data.createdAt;
+      }
+
+      // Owner only. Other people are discovered through discovery/{uid}, a
+      // projection holding just the public fields — email, birthdate, block
+      // lists, usage counters and learned affinities never leave the account.
+      allow read: if isOwner(uid);
+
+      // Create: only your own document, and the embedded uid must match the doc id.
+      allow create: if isOwner(uid)
+        && request.resource.data.uid == uid
+        && userDocOk(request.resource.data);
+
+      // Update: only your own document, shape re-validated, identity fields frozen.
+      allow update: if isOwner(uid)
+        && userDocOk(request.resource.data)
+        && identityUnchanged();
+
+      // Delete: account deletion, owner only.
+      allow delete: if isOwner(uid);
+    }
+
+    // ---------------------------------------------------------------------------
+    // discovery/{uid} — the public projection of a profile
+    // ---------------------------------------------------------------------------
+    //
+    // The on-device matching engine needs to scan other people's profiles, so this
+    // collection is readable by any signed-in user — and therefore it may contain
+    // ONLY fields meant for other users. `hasOnly` guarantees a tampered client
+    // cannot smuggle private fields (email, birthdate, blocked, learning, usage)
+    // into the readable copy. The app writes it as a mirror of users/{uid} on
+    // every profile save, with coordinates rounded to ~1 km.
+    match /discovery/{uid} {
+
+      // The public subset of profile.* — same bounds as the private doc, but the
+      // key list is closed: no birthdate here, only the derived age.
+      function discoveryProfileOk(p) {
+        return p is map
+          && p.keys().hasOnly(['age', 'gender', 'pronouns', 'bio', 'photos', 'interests',
+                               'personality', 'location', 'showAge', 'showDistance'])
+          && (!('bio' in p) || (p.bio is string && p.bio.size() <= 500))
+          && (!('interests' in p) || (p.interests is list && p.interests.size() <= 12))
+          && (!('photos' in p) || (p.photos is list && p.photos.size() <= 6))
+          && (!('gender' in p) || p.gender in ['woman', 'man', 'nonbinary', 'other'])
+          && (!('pronouns' in p) || (p.pronouns is string && p.pronouns.size() <= 40))
+          && (!('age' in p) || p.age == null || (p.age is number && p.age >= 18 && p.age <= 120))
+          && (!('showAge' in p) || p.showAge is bool)
+          && (!('showDistance' in p) || p.showDistance is bool);
+      }
+
+      // The public subset of preferences.* — just the mutual discovery filters.
+      function discoveryPrefsOk(f) {
+        return f is map
+          && f.keys().hasOnly(['interestedIn', 'ageMin', 'ageMax', 'maxDistanceKm', 'discoverable'])
+          && (!('ageMin' in f) || (f.ageMin is number && f.ageMin >= 18 && f.ageMin <= 100))
+          && (!('ageMax' in f) || (f.ageMax is number && f.ageMax >= 18 && f.ageMax <= 100))
+          && (!('maxDistanceKm' in f) || (f.maxDistanceKm is number && f.maxDistanceKm >= 1 && f.maxDistanceKm <= 500))
+          && (!('interestedIn' in f) || (f.interestedIn is list && f.interestedIn.size() <= 4))
+          && (!('discoverable' in f) || f.discoverable is bool);
+      }
+
+      // The whole projection: a closed key list at the top level too.
+      function discoveryOk(d) {
+        return d.keys().hasOnly(['uid', 'displayName', 'profileComplete', 'lastActiveAt',
+                                 'profile', 'preferences'])
+          && d.uid == uid
+          && d.displayName is string && d.displayName.size() <= 60
+          && (!('profileComplete' in d) || d.profileComplete is bool)
+          && (!('lastActiveAt' in d) || d.lastActiveAt is string)
+          && (!('profile' in d) || discoveryProfileOk(d.profile))
+          && (!('preferences' in d) || discoveryPrefsOk(d.preferences));
+      }
+
+      // Read: any signed-in user — this is the discovery surface.
+      allow read: if isSignedIn();
+
+      // Write: only your own projection, only in the public shape. The partial
+      // lastActiveAt refresh must also stay inside the closed key list.
+      allow create: if isOwner(uid) && discoveryOk(request.resource.data);
+      allow update: if isOwner(uid) && discoveryOk(request.resource.data);
+
+      // Delete: account deletion, owner only.
+      allow delete: if isOwner(uid);
+    }
+
+    // ---------------------------------------------------------------------------
+    // swipes/{swipeId} — one document per (from, to) decision, id is `from_to`
+    // ---------------------------------------------------------------------------
+    match /swipes/{swipeId} {
+
+      // A swipe is a tiny immutable record; the doc id encodes both parties so a client
+      // cannot create two conflicting swipes for the same pair.
+      function swipeOk(d) {
+        return d.keys().hasAll(['from', 'to', 'action', 'createdAt'])
+          && d.from is string && d.from.size() > 0
+          && d.to is string && d.to.size() > 0
+          && d.from != d.to
+          && d.action in ['like', 'pass', 'super']
+          && d.createdAt is string
+          && swipeId == d.from + '_' + d.to;
+      }
+
+      // Read: the swipes you made, plus the swipes aimed at you — the latter is required
+      // for match detection and for the premium "who liked you" list. No one else's.
+      //
+      // `resource` is null when the requested document does not exist, and dereferencing
+      // it would raise an evaluation error (surfacing to the client as PERMISSION_DENIED
+      // rather than an empty snapshot). Every first swipe reads its own not-yet-written
+      // document and the usually-absent reciprocal one, so the miss has to be an allowed
+      // read that reports `exists == false`. This leaks nothing: a null resource carries
+      // no data, and list queries — where documents do exist — still have to be
+      // constrained to `from`/`to == uid`.
+      allow read: if isSignedIn()
+        && (resource == null
+            || resource.data.from == request.auth.uid
+            || resource.data.to == request.auth.uid);
+
+      // Create: you may only record swipes authored by yourself.
+      allow create: if isSignedIn()
+        && request.resource.data.from == request.auth.uid
+        && swipeOk(request.resource.data);
+
+      // Never editable — a rewind deletes and re-creates instead.
+      allow update: if false;
+
+      // Delete: your own swipe (the rewind path), or a swipe aimed at you — an
+      // inbound like is data about you, and account deletion must be able to
+      // purge it.
+      allow delete: if isSignedIn()
+        && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid);
+    }
+
+    // ---------------------------------------------------------------------------
+    // matches/{matchId} — id is the two uids sorted and joined with '_'
+    // ---------------------------------------------------------------------------
+    match /matches/{matchId} {
+
+      // Exactly two participants, sorted, and the doc id derived from them. The caller
+      // must be one of them, so nobody can invent a match between two other people.
+      function matchOk(d) {
+        return d.keys().hasAll(['users', 'createdAt'])
+          && d.users is list
+          && d.users.size() == 2
+          && d.users[0] is string
+          && d.users[1] is string
+          && d.users[0] < d.users[1]
+          && matchId == d.users[0] + '_' + d.users[1]
+          && request.auth.uid in d.users
+          && d.createdAt is string
+          && (!('lastMessage' in d) || d.lastMessage == null || (d.lastMessage is string && d.lastMessage.size() <= 1000))
+          && (!('lastMessageAt' in d) || d.lastMessageAt == null || d.lastMessageAt is string)
+          && (!('unread' in d) || (d.unread is map && d.unread.keys().size() <= 2));
+      }
+
+      // The other side of a match document, from the caller's point of view.
+      function otherOf(d) {
+        return d.users[0] == request.auth.uid ? d.users[1] : d.users[0];
+      }
+
+      // The swipe the other person aimed at the caller — `swipes/{other}_{me}`.
+      function inboundSwipe(d) {
+        return /databases/$(database)/documents/swipes/$(otherOf(d) + '_' + request.auth.uid);
+      }
+
+      // True only when that person has actually liked (or super-liked) the caller, which
+      // is exactly the condition recordSwipe checks client-side before writing a match.
+      function likedByOther(d) {
+        return exists(inboundSwipe(d))
+          && get(inboundSwipe(d)).data.action in ['like', 'super'];
+      }
+
+      // Read: participants only. As with swipes, a read of a document that does not
+      // exist has `resource == null`, and dereferencing it errors instead of returning
+      // an empty snapshot — rewind always probes the (usually absent) match document for
+      // the pair, and `getMatch()` must answer `null` for a stale or hand-typed id.
+      allow read: if isSignedIn()
+        && (resource == null || request.auth.uid in resource.data.users);
+
+      // Create: a participant creating a well-formed match document, but only once the
+      // other person has actually liked them back. Without that proof any signed-in user
+      // could mint a match against a uid found through the (deliberately open) users
+      // read and then message a stranger, since message writes are gated purely on
+      // membership of the match. The client already satisfies this: recordSwipe writes
+      // the swipe and only then, as a separate operation, creates the match.
+      allow create: if isSignedIn()
+        && matchOk(request.resource.data)
+        && likedByOther(request.resource.data);
+
+      // Update: participants only, for lastMessage / lastMessageAt / unread counters.
+      // The participant list itself is frozen.
+      allow update: if isSignedIn()
+        && request.auth.uid in resource.data.users
+        && request.resource.data.users == resource.data.users
+        && matchOk(request.resource.data);
+
+      // Delete: unmatching, by either participant.
+      allow delete: if isSignedIn() && request.auth.uid in resource.data.users;
+
+      // -------------------------------------------------------------------------
+      // matches/{matchId}/messages/{msgId} — chat, append-only
+      // -------------------------------------------------------------------------
+      match /messages/{msgId} {
+
+        // Read: participants of the parent match.
+        allow read: if isParticipant(matchId);
+
+        // Create: a participant, writing as themselves, with 1..1000 chars of text.
+        allow create: if isParticipant(matchId)
+          && request.resource.data.keys().hasAll(['from', 'text', 'createdAt'])
+          && request.resource.data.from == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() >= 1
+          && request.resource.data.text.size() <= 1000
+          && request.resource.data.createdAt is string;
+
+        // Messages are never edited, so neither side can rewrite what was said.
+        // Deletes are allowed to participants because unmatch and account
+        // deletion must purge the conversation before removing the parent match
+        // (a deleted match would strand its messages forever, unreadable but
+        // undeletable). The trade-off is deliberate: participants can remove
+        // messages, nobody can alter them.
+        allow update: if false;
+        allow delete: if isParticipant(matchId);
+      }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Everything else is denied. New collections must opt in above, explicitly.
+    // ---------------------------------------------------------------------------
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

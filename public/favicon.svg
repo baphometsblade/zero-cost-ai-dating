@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Zero Cost AI Dating — brand mark: a heart on the brand gradient. -->
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff6b8a"/>
+      <stop offset="1" stop-color="#d2325a"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#g)"/>
+  <path fill="#fff" d="M32 47.5c-.6 0-1.2-.2-1.7-.6C24 41.6 15 34.2 15 26.3 15 20.6 19.4 16 24.9 16c2.8 0 5.4 1.2 7.1 3.3A9.2 9.2 0 0 1 39.1 16C44.6 16 49 20.6 49 26.3c0 7.9-9 15.3-15.3 20.6-.5.4-1.1.6-1.7.6z"/>
+</svg>

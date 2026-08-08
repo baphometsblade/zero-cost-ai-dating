@@ -1,1 +1,5 @@
-// Firebase project configuration placeholder
+{
+  "projects": {
+    "default": "zero-cost-ai-dating"
+  }
+}

@@ -1,19 +1,274 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Zero Cost AI Dating</title>
-    <link rel="stylesheet" href="css/style.css">
-    <link rel="stylesheet" href="css/components.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Zero Cost AI Dating — dating that explains itself</title>
+  <meta name="description" content="A dating app whose matching runs entirely on your device. Every match arrives with the reasons behind it, there are no AI API calls, and the whole thing costs $0 a month to run.">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/components.css">
 </head>
-<body>
-    <div id="app">
-        <!-- Main app content will be loaded here -->
-    </div>
-    
-    <script src="js/firebase-config.js"></script>
-    <script src="js/auth.js"></script>
-    <script src="js/app.js"></script>
+<body class="app-shell">
+  <main>
+
+    <!-- Hero: the promise, the CTAs, and a worked example of an explanation. -->
+    <section class="hero">
+      <div class="hero-inner">
+        <div class="hero-copy">
+          <span class="pill">On-device matching · $0 a month to run</span>
+          <h1 class="hero-title">Dating that actually explains itself</h1>
+          <p class="hero-sub">
+            Most apps hand you a face and hope. This one hands you a face and the reasons:
+            the interests you share, how your bios overlap, how your personalities line up,
+            how far apart you are. The scoring happens in your browser, in about a
+            millisecond per profile — no model API, no server, no bill.
+          </p>
+          <div class="hero-cta">
+            <a class="btn btn-primary btn-lg" href="auth.html?mode=signup" data-cta="primary">Create your free account</a>
+            <a class="btn btn-secondary btn-lg" href="auth.html" data-cta="secondary">Sign in</a>
+            <button class="btn btn-ghost btn-lg hidden" type="button" data-cta="demo">Try the demo — no signup</button>
+          </div>
+          <p class="text-muted" data-mode-note>
+            Runs in demo mode out of the box: no Firebase project, no API keys, nothing to configure.
+          </p>
+        </div>
+
+        <div class="hero-art">
+          <p class="sr-only">An example of the explanation shown on every card.</p>
+          <div class="card">
+            <div class="card-head">
+              <span>Why you matched</span>
+              <span class="badge badge-new">Great fit</span>
+            </div>
+            <div class="card-body stack stack-sm">
+              <div class="spread">
+                <div>
+                  <p class="feature-title">Priya, 29</p>
+                  <p class="text-muted">4 km away · active today</p>
+                </div>
+                <span class="match-score">
+                  <span class="match-score-ring" data-pct="94">
+                    <span class="match-score-value">94</span>
+                  </span>
+                  <span>match</span>
+                </span>
+              </div>
+              <div class="reasons">
+                <p class="reason"><span class="reason-icon" aria-hidden="true">✨</span>You both love hiking, live music and cooking</p>
+                <p class="reason"><span class="reason-icon" aria-hidden="true">🧭</span>Very similar outlook — you match closely on openness and warmth</p>
+                <p class="reason"><span class="reason-icon" aria-hidden="true">💬</span>Your bios both mention climbing and vinyl</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- What makes it different. -->
+    <section class="container">
+      <div class="page-head">
+        <h2 class="page-title">Four things it does differently</h2>
+        <p class="page-sub">
+          No black box, no data trade, no monthly invoice, and nothing engineered to keep you swiping.
+        </p>
+      </div>
+      <div class="features">
+        <article class="feature">
+          <span class="feature-icon" aria-hidden="true">✨</span>
+          <h3 class="feature-title">Explainable matching</h3>
+          <p>
+            Every card carries up to four plain-English reasons and a compatibility score you can
+            interrogate: shared interests, bio overlap, personality fit, distance, age and recent activity —
+            each with its own weight.
+          </p>
+        </article>
+        <article class="feature">
+          <span class="feature-icon" aria-hidden="true">🔒</span>
+          <h3 class="feature-title">On-device by design</h3>
+          <p>
+            Your bio, your interests and your personality sliders are scored inside your own browser tab.
+            Nothing is posted to an AI provider, because the app never calls one — there is no model API
+            key anywhere in the source.
+          </p>
+        </article>
+        <article class="feature">
+          <span class="feature-icon" aria-hidden="true">💸</span>
+          <h3 class="feature-title">Genuinely zero cost</h3>
+          <p>
+            Static hosting plus the Firebase free tier, with no Cloud Functions, no Storage bucket and no
+            paid inference. Fork it, deploy it, run it for a year: the bill stays at zero.
+          </p>
+        </article>
+        <article class="feature">
+          <span class="feature-icon" aria-hidden="true">🚫</span>
+          <h3 class="feature-title">No ads, no dark patterns</h3>
+          <p>
+            Nothing is sold to you mid-swipe. The Premium tier is a local simulation that exists purely so
+            the daily-limit code can be exercised — no card is ever collected.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <!-- Three steps from nothing to a conversation. -->
+    <section class="container">
+      <div class="page-head">
+        <h2 class="page-title">How it works</h2>
+        <p class="page-sub">Three steps, and the middle one is the whole product.</p>
+      </div>
+      <div class="how">
+        <article class="step">
+          <span class="step-num" aria-hidden="true">1</span>
+          <h3>Tell it who you are</h3>
+          <p>
+            A short bio, up to twelve interests, five personality sliders, your city and how far you are
+            willing to travel. That is the entire input — no quiz, no questionnaire, no tracking.
+          </p>
+        </article>
+        <article class="step">
+          <span class="step-num" aria-hidden="true">2</span>
+          <h3>The engine ranks everyone</h3>
+          <p>
+            TF-IDF vectors over bios compared with cosine similarity, weighted Jaccard over interest tags,
+            per-axis personality scoring, great-circle distance, age and recency — combined into one score
+            and turned into readable reasons. It runs locally, in milliseconds.
+          </p>
+        </article>
+        <article class="step">
+          <span class="step-num" aria-hidden="true">3</span>
+          <h3>Swipe, match, actually talk</h3>
+          <p>
+            Match with someone and you get icebreakers built from what the two of you genuinely share,
+            not a blank box and a shrug. Keyboard shortcuts work everywhere the drag gestures do.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <!-- The honesty section: where the money would have gone. -->
+    <section class="container">
+      <div class="page-head">
+        <h2 class="page-title">Where the cost went</h2>
+        <p class="page-sub">
+          Every part of a normal dating app that costs money has been designed out rather than paid for.
+        </p>
+      </div>
+      <div class="card">
+        <div class="card-body">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Piece</th>
+                <th scope="col">How it stays free</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Hosting</td>
+                <td>Static files on the Firebase Hosting free tier. No build step, no server process.</td>
+              </tr>
+              <tr>
+                <td>Database</td>
+                <td>Firestore on the free Spark plan — or your browser's localStorage in demo mode.</td>
+              </tr>
+              <tr>
+                <td>Matching</td>
+                <td>Classic ML in the page: TF-IDF, cosine similarity and weighted vectors. No inference bill.</td>
+              </tr>
+              <tr>
+                <td>Photos</td>
+                <td>Deterministic SVG avatars generated from your name, or image URLs you already host.</td>
+              </tr>
+              <tr>
+                <td>Backend code</td>
+                <td>There isn't any. No Cloud Functions means nothing to invoke and nothing to meter.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Short, direct FAQ. -->
+    <section class="container">
+      <div class="page-head">
+        <h2 class="page-title">Straight answers</h2>
+      </div>
+      <div class="faq">
+        <details class="faq-item">
+          <summary>Is it actually AI?</summary>
+          <p>
+            It is machine learning, not a large language model: term-frequency vectors, cosine similarity
+            and weighted scoring — the maths recommendation systems ran on for years. That is a deliberate
+            trade. It is deterministic, instant, explainable line by line, and it costs nothing per request.
+            No prompt is ever sent anywhere.
+          </p>
+        </details>
+        <details class="faq-item">
+          <summary>Is it really free, or free-for-now?</summary>
+          <p>
+            Free by architecture. The app is deliberately built inside the always-free tiers: static hosting,
+            the Firestore free quota, no Cloud Functions, no Cloud Storage, no paid API. There is no
+            metered service to switch on later.
+          </p>
+        </details>
+        <details class="faq-item">
+          <summary>What happens to my data?</summary>
+          <p>
+            In demo mode it never leaves your browser — profiles, swipes, matches and messages all live in
+            localStorage, and clearing your site data deletes them. Connect your own Firebase project and it
+            lives in your Firestore, under rules that let only you write your own document.
+          </p>
+        </details>
+        <details class="faq-item">
+          <summary>Is Premium a real payment?</summary>
+          <p>
+            No, and the upgrade screen says so before you click. Premium flips a local flag so the daily
+            limits, rewinds and "who liked you" gating can be tried out. No card details are collected and
+            no payment is processed.
+          </p>
+        </details>
+        <details class="faq-item">
+          <summary>Can I point it at my own Firebase project?</summary>
+          <p>
+            Yes. Paste your web config into Settings and the app switches from demo mode to your project on
+            the next load — no files to edit, no redeploy.
+          </p>
+        </details>
+        <details class="faq-item">
+          <summary>Why can't I upload photos?</summary>
+          <p>
+            Cloud Storage needs a paid plan on new Firebase projects, so uploads were cut. Instead every
+            profile gets a distinctive gradient avatar generated from its name, and you can add up to six
+            https image URLs of your own.
+          </p>
+        </details>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="site-foot">
+    <p>Zero Cost AI Dating — matching runs on your device, and no AI API is ever called.</p>
+    <p>
+      <a href="auth.html">Sign in</a> ·
+      <a href="auth.html?mode=signup">Create an account</a> ·
+      <a href="subscription.html">Plans</a>
+      <span data-app-version></span>
+    </p>
+  </footer>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js" crossorigin="anonymous"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js" crossorigin="anonymous"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js" crossorigin="anonymous"></script>
+  <script src="js/firebase-config.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/seed-data.js"></script>
+  <script src="js/data-store.js"></script>
+  <script src="js/matching-engine.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/app.js"></script>
 </body>
 </html>

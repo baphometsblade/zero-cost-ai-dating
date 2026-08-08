@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Matches · Zero Cost AI Dating</title>
+  <meta name="description" content="Your matches and conversations: the new ones you have not written to yet, every thread sorted by its last message, and a chat that reads and writes on your device.">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/components.css">
+</head>
+<body class="app-shell">
+  <main class="container" id="main">
+    <div class="stack-lg">
+
+      <!-- Heading -->
+      <header class="page-head">
+        <h1 class="page-title">Matches</h1>
+        <p class="page-sub">
+          Everyone here said yes to you, and you said yes back. Conversations are ordered by their
+          last message, and the openers we suggest are built from what the two of you actually
+          share — the same scoring that ranked the deck, reused for something more useful.
+        </p>
+      </header>
+
+      <noscript>
+        <p class="notice notice-warn">
+          This page needs JavaScript. Matches and messages are read and rendered in your browser,
+          so there is no server-rendered version to fall back to.
+        </p>
+      </noscript>
+
+      <!-- Conversation list beside the chat on wide screens; one at a time on
+           phones, where matches.js hides whichever pane is not in use. -->
+      <div class="two-pane" id="matches-layout">
+
+        <!-- ============================ List pane ============================ -->
+        <section class="stack" id="list-pane" aria-labelledby="list-heading">
+          <h2 class="sr-only" id="list-heading">Your matches</h2>
+
+          <!-- Matches with no messages yet. Hidden until there is at least one. -->
+          <section class="card hidden" id="new-matches-card" aria-labelledby="new-matches-title">
+            <div class="card-head">
+              <span id="new-matches-title">New matches</span>
+              <span class="badge badge-new" id="new-matches-count">0</span>
+            </div>
+            <div class="card-body">
+              <div class="new-matches" id="new-matches"></div>
+            </div>
+          </section>
+
+          <!-- The conversation list itself. -->
+          <section class="card" id="conversations-card" aria-labelledby="conversations-title">
+            <div class="card-head">
+              <span id="conversations-title">Conversations</span>
+              <span class="badge hidden" id="unread-badge"></span>
+            </div>
+            <div class="card-body">
+
+              <div class="stack stack-sm" id="list-loading" aria-live="polite" aria-busy="true">
+                <p class="sr-only">Loading your matches…</p>
+                <div class="skeleton skeleton-text" aria-hidden="true"></div>
+                <div class="skeleton skeleton-text" aria-hidden="true"></div>
+                <div class="skeleton skeleton-text" aria-hidden="true"></div>
+              </div>
+
+              <ul class="match-list hidden" id="match-list"></ul>
+
+              <!-- No matches at all yet. -->
+              <div class="empty hidden" id="list-empty">
+                <span class="empty-icon" aria-hidden="true">💬</span>
+                <h3>No matches yet</h3>
+                <p>
+                  A conversation opens the moment two people like each other. Nothing here is
+                  ranked by who paid — go through the deck and the matches will follow.
+                </p>
+                <a class="btn btn-primary" href="dashboard.html">Back to Discover</a>
+              </div>
+
+              <!-- Load failure: say what happened, offer the one useful button. -->
+              <div class="empty hidden" id="list-error">
+                <span class="empty-icon" aria-hidden="true">⚠️</span>
+                <h3>Your matches could not load</h3>
+                <p id="list-error-text">
+                  The conversation list could not be read just now. Nothing has been lost — your
+                  matches and messages are exactly where you left them.
+                </p>
+                <button class="btn btn-primary" type="button" id="list-retry">Try again</button>
+              </div>
+
+            </div>
+          </section>
+
+          <!-- Who liked you. Real names for Premium, a blurred placeholder and
+               an honest upsell for everyone else. matches.js fills both. -->
+          <section class="card hidden" id="likes-card" aria-labelledby="likes-title">
+            <div class="card-head">
+              <span id="likes-title">Who liked you</span>
+              <span class="badge badge-premium hidden" id="likes-badge">Premium</span>
+            </div>
+            <div class="card-body stack" id="likes-body"></div>
+          </section>
+
+        </section>
+
+        <!-- ============================ Chat pane ============================ -->
+        <section class="stack" id="chat-pane" aria-labelledby="chat-heading">
+          <h2 class="sr-only" id="chat-heading">Conversation</h2>
+
+          <!-- Shown on wide screens while no conversation is selected. -->
+          <div class="empty" id="chat-placeholder">
+            <span class="empty-icon" aria-hidden="true">👋</span>
+            <h3>Pick a conversation</h3>
+            <p>
+              Choose someone on the left to read the thread and write back. Messages stay on this
+              device in demo mode, and in your own Firestore project when one is connected.
+            </p>
+          </div>
+
+          <div class="chat hidden" id="chat">
+
+            <header class="chat-head">
+              <button class="chat-back" type="button" id="chat-back" aria-label="Back to your matches">←</button>
+              <div class="chat-peer">
+                <img id="chat-peer-photo" alt="" width="40" height="40" decoding="async">
+                <span class="truncate">
+                  <span id="chat-peer-name">Conversation</span>
+                  <small id="chat-peer-meta"></small>
+                </span>
+              </div>
+              <button class="btn btn-ghost btn-sm" type="button" id="chat-menu" aria-haspopup="dialog" aria-label="Conversation options">⋯</button>
+            </header>
+
+            <!-- Messages, oldest first, with day separators between them. -->
+            <div class="chat-log" id="chat-log" role="log" aria-label="Messages" tabindex="0"></div>
+
+            <form class="chat-form" id="chat-form" novalidate>
+              <label class="sr-only" for="chat-input">Write a message</label>
+              <textarea class="chat-input" id="chat-input" name="message" rows="1" maxlength="1000"
+                placeholder="Write something…" autocomplete="off"
+                aria-describedby="chat-hint chat-count"></textarea>
+              <button class="chat-send" type="submit" id="chat-send" aria-label="Send message" disabled>➤</button>
+            </form>
+
+            <p class="sr-only" id="chat-hint">Enter sends your message. Shift and Enter start a new line. Up to 1000 characters.</p>
+            <p class="char-count hidden" id="chat-count">0 / 1000</p>
+
+          </div>
+
+          <!-- Sends, failures and arrivals are announced here for screen readers. -->
+          <p class="sr-only" id="chat-status" role="status" aria-live="polite"></p>
+
+        </section>
+
+      </div>
+    </div>
+  </main>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js" crossorigin="anonymous"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js" crossorigin="anonymous"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js" crossorigin="anonymous"></script>
+  <script src="js/firebase-config.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/seed-data.js"></script>
+  <script src="js/data-store.js"></script>
+  <script src="js/matching-engine.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/app.js"></script>
+  <script src="js/matches.js"></script>
+</body>
+</html>
