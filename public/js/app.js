@@ -636,6 +636,23 @@
   let initialised = false;
 
   /**
+   * Register the service worker (network-first static cache; makes demo mode
+   * work offline and the app installable). Best-effort: registration failing —
+   * unsupported browser, insecure origin, file:// — is silent and harmless.
+   * @returns {void}
+   */
+  function registerServiceWorker() {
+    if (!('serviceWorker' in navigator)) return;
+    try {
+      navigator.serviceWorker.register('sw.js').catch(function (err) {
+        console.info('[zc] Service worker not registered:', err && err.message);
+      });
+    } catch (err) {
+      console.info('[zc] Service worker not registered:', err && err.message);
+    }
+  }
+
+  /**
    * Build the shell. Runs automatically on DOMContentLoaded and is idempotent,
    * so a page script may call it early without side effects.
    * @returns {Promise<Object|null>} resolves with the signed-in UserDoc or null
@@ -647,6 +664,7 @@
     if (ZC.ui && typeof ZC.ui.mountToastHost === 'function') ZC.ui.mountToastHost();
     wireSignOut();
     resolveDeferredLinks();
+    registerServiceWorker();
 
     const page = currentPage();
     mountNav(page);

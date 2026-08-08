@@ -229,6 +229,7 @@ adapter keeps a single local store since nothing ever leaves the browser there.
 | `swipes` | `${from}_${to}` | `{ id, from, to, action: 'like'\|'pass'\|'super', createdAt }` |
 | `matches` | `[a,b].sort().join('_')` | `{ id, users: [uidA, uidB], createdAt, lastMessage, lastMessageAt, unread: { [uid]: number } }` |
 | `matches/{id}/messages` | random | `{ id, from, text, createdAt }` |
+| `reports` | random | `{ id, from, about, reason, details, createdAt }` — write-only from clients; the owner reads the queue in the console |
 
 **Deterministic ids are load-bearing.** Because a swipe id is `from_to` and a match id is the
 sorted pair, both writes are idempotent: re-recording the same swipe cannot create a duplicate

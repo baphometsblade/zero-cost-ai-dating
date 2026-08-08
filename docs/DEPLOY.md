@@ -109,6 +109,10 @@ has, so it is worth the five minutes:
 - `matches/{matchId}/messages/{msgId}` — read if you participate in the parent match; create
   only as yourself with 1–1000 characters of text. Never editable; deletable by participants
   so unmatch and account deletion can purge the conversation before the match goes.
+- `reports/{reportId}` — write-only from clients: anyone signed in can file a report about
+  another account (closed reason list, ≤ 500 chars of detail), and nobody can read, edit or
+  retract one from a client. **You review this queue yourself** in Firestore → Data →
+  `reports`, or with an admin script; nothing triages it for you.
 - Everything else: denied.
 
 If you change the data model, change these rules in the same commit. They are not decoration —

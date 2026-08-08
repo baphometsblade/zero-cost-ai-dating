@@ -368,6 +368,31 @@ service cloud.firestore {
     }
 
     // ---------------------------------------------------------------------------
+    // reports/{reportId} — the abuse-report queue, write-only from clients
+    // ---------------------------------------------------------------------------
+    //
+    // Anyone signed in can file a report about another account, and that is all a
+    // client can ever do here: no reads, updates or deletes, so reports cannot be
+    // enumerated (which would leak who reported whom), altered, or retracted by
+    // the reported party. The project owner reviews the queue in the Firebase
+    // console or with admin credentials.
+    match /reports/{reportId} {
+
+      function reportOk(d) {
+        return d.keys().hasOnly(['id', 'from', 'about', 'reason', 'details', 'createdAt'])
+          && d.from == request.auth.uid
+          && d.about is string && d.about.size() > 0
+          && d.about != d.from
+          && d.reason in ['fake-profile', 'inappropriate-content', 'harassment', 'underage', 'scam-or-spam', 'other']
+          && (!('details' in d) || (d.details is string && d.details.size() <= 500))
+          && d.createdAt is string;
+      }
+
+      allow create: if isSignedIn() && reportOk(request.resource.data);
+      allow read, update, delete: if false;
+    }
+
+    // ---------------------------------------------------------------------------
     // Everything else is denied. New collections must opt in above, explicitly.
     // ---------------------------------------------------------------------------
     match /{document=**} {

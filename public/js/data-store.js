@@ -32,12 +32,17 @@
     swipes: 'zc.demo.swipes',
     matches: 'zc.demo.matches',
     messages: 'zc.demo.messages',
+    reports: 'zc.demo.reports',
     session: 'zc.demo.session',
     seeded: 'zc.demo.seeded'
   };
 
   const SEED_VERSION = 1;
   const MESSAGE_MAX = 1000;
+  const REPORT_DETAILS_MAX = 500;
+
+  /** The closed list of report reasons; the Firestore rules enforce the same set. */
+  const REPORT_REASONS = ['fake-profile', 'inappropriate-content', 'harassment', 'underage', 'scam-or-spam', 'other'];
   const DEFAULT_CANDIDATE_LIMIT = 60;
   const DEFAULT_MESSAGE_LIMIT = 200;
   const TOUCH_THROTTLE_MS = 5 * 60 * 1000;
@@ -374,6 +379,8 @@
   function writeMatches(map) { return writeJson(KEYS.matches, map); }
   function readMessages() { return readJson(KEYS.messages, {}); }
   function writeMessages(map) { return writeJson(KEYS.messages, map); }
+  function readReports() { return readJson(KEYS.reports, {}); }
+  function writeReports(map) { return writeJson(KEYS.reports, map); }
 
   /* ------------------------------------------------------------------------
      4. Demo message listeners (storage event + poll)
@@ -878,6 +885,15 @@
       return true;
     },
 
+    async reportUser(fromUid, aboutUid, reason, details) {
+      const report = shapeReport(fromUid, aboutUid, reason, details);
+      report.id = 'r-' + (util.uid ? util.uid() : String(Math.random()).slice(2));
+      const reports = readReports();
+      reports[report.id] = report;
+      writeReports(reports);
+      return { ok: true, id: report.id };
+    },
+
     async deleteAccountData(uid) {
       // Swipes in both directions, matches (and their messages) either way,
       // then the account document itself — mirroring the Firestore adapter.
@@ -900,6 +916,14 @@
       writeMatches(matches);
       writeMessages(messages);
 
+      // Reports the account filed carry its uid; reports about it stay, the
+      // same way the Firestore queue retains them for review.
+      const reports = readReports();
+      Object.keys(reports).forEach(function (id) {
+        if (reports[id] && reports[id].from === uid) delete reports[id];
+      });
+      writeReports(reports);
+
       const users = readUsers();
       delete users[uid];
       writeUsers(users);
@@ -912,7 +936,7 @@
     },
 
     async resetDemo() {
-      [KEYS.users, KEYS.swipes, KEYS.matches, KEYS.messages, KEYS.seeded].forEach(removeKey);
+      [KEYS.users, KEYS.swipes, KEYS.matches, KEYS.messages, KEYS.reports, KEYS.seeded].forEach(removeKey);
       await demoSeed(true);
       pollAll();
       return true;
@@ -926,7 +950,8 @@
         users: readUsers(),
         swipes: readSwipes(),
         matches: readMatches(),
-        messages: readMessages()
+        messages: readMessages(),
+        reports: readReports()
       };
     },
 
@@ -946,6 +971,7 @@
       writeSwipes(isPlainObject(data.swipes) ? data.swipes : {});
       writeMatches(isPlainObject(data.matches) ? data.matches : {});
       writeMessages(isPlainObject(data.messages) ? data.messages : {});
+      writeReports(isPlainObject(data.reports) ? data.reports : {});
       writeJson(KEYS.seeded, { version: SEED_VERSION, at: nowIso(), count: Object.keys(data.users).length });
       pollAll();
       return true;
@@ -999,6 +1025,29 @@
       return true;
     }
     return open(a, b) && open(b, a);
+  }
+
+  /**
+   * Validate and shape a user report. Throws on anything malformed so a bad
+   * report never reaches storage in either adapter.
+   * @param {string} fromUid the reporter
+   * @param {string} aboutUid the account being reported
+   * @param {string} reason one of REPORT_REASONS
+   * @param {string} [details] optional free text, capped at 500 chars
+   * @returns {Object} the report document (without an id)
+   */
+  function shapeReport(fromUid, aboutUid, reason, details) {
+    if (!fromUid || !aboutUid) throw new Error('A report needs both accounts.');
+    if (fromUid === aboutUid) throw new Error('You cannot report yourself.');
+    if (REPORT_REASONS.indexOf(reason) === -1) throw new Error('Pick a reason for the report.');
+    const text = String(details || '').trim().slice(0, REPORT_DETAILS_MAX);
+    return {
+      from: String(fromUid),
+      about: String(aboutUid),
+      reason: reason,
+      details: text,
+      createdAt: nowIso()
+    };
   }
 
   /**
@@ -1520,6 +1569,17 @@
       }
     },
 
+    async reportUser(fromUid, aboutUid, reason, details) {
+      const report = shapeReport(fromUid, aboutUid, reason, details);
+      const ref = db().collection('reports').doc();
+      report.id = ref.id;
+      // Write-only by design: the rules deny reads, updates and deletes, so a
+      // report can be filed but never enumerated, altered or retracted from a
+      // client. The project owner reads the queue in the Firebase console.
+      await ref.set(report);
+      return { ok: true, id: report.id };
+    },
+
     async deleteAccountData(uid) {
       // Swipes in both directions: the ones this account made, and the ones
       // aimed at it — an inbound like is data about this account and must not
@@ -1862,6 +1922,24 @@
       const used = Number(usage[field]) || 0;
       const remaining = limit === Infinity ? Infinity : Math.max(0, limit - used);
       return { allowed: remaining > 0, remaining: remaining, limit: limit, plan: plan };
+    },
+
+    /** The closed list of report reasons, for building the report UI. */
+    REPORT_REASONS: REPORT_REASONS.slice(),
+
+    /**
+     * File a report about another user. Reports are write-only: they can be
+     * filed but never listed, edited or retracted from a client — in Firebase
+     * mode the project owner reviews the queue in the console.
+     * @param {string} fromUid the reporter
+     * @param {string} aboutUid the account being reported
+     * @param {string} reason one of REPORT_REASONS
+     * @param {string} [details] optional free text, capped at 500 chars
+     * @returns {Promise<{ok: boolean, id: string}>}
+     */
+    async reportUser(fromUid, aboutUid, reason, details) {
+      await ready;
+      return adapter.reportUser(fromUid, aboutUid, reason, details);
     },
 
     /**
