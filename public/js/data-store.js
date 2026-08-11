@@ -1665,13 +1665,16 @@
     async retractReport(fromUid, aboutUid) {
       const ref = db().collection('reports').doc(swipeId(fromUid, aboutUid));
       // Firestore deletes a missing document "successfully", so probe first.
-      // The rules only let an author read a report that exists — a clean miss
-      // and a permission denial both mean there is nothing left to retract.
+      // The rules deny author reads of missing reports, so PERMISSION_DENIED
+      // here is the expected "nothing left to retract" signal. Any other
+      // failure (offline, quota, …) must propagate — reporting a report as
+      // already-removed while it still sits in the queue would be a lie.
       let snap = null;
       try {
         snap = await ref.get();
       } catch (err) {
-        return { ok: true, removed: false };
+        if (err && err.code === 'permission-denied') return { ok: true, removed: false };
+        throw err;
       }
       if (!snap.exists) return { ok: true, removed: false };
       await ref.delete();
