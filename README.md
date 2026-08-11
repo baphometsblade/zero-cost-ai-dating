@@ -64,7 +64,7 @@ all work. Nothing is sent anywhere.
 | **Discover** (`dashboard.html`) | The deck. Pointer-driven swiping with rotation, stamps and velocity commit — plus a complete keyboard equivalent (`←` pass, `→` like, `↑` super like, `z` rewind, `i` details, `?` shortcuts). Compatibility ring, up to three reasons per card, daily limits with a countdown, match celebration with generated icebreakers. |
 | **Profile** (`profile.html`) | Bio with counter, 48 interest chips grouped by category, five personality sliders, 18+ birthdate guard, city picker or `navigator.geolocation`, up to six photo URLs, a live preview of your own card, and a completeness meter. |
 | **Matches** (`matches.html`) | New-matches strip, conversation list with unread dots, live chat with day separators, icebreaker suggestions on empty threads, report/unmatch/block, and the premium "who liked you" list. |
-| **Settings** (`settings.html`) | Discovery preferences, theme, notifications, **connect your own Firebase project** (paste a config, no code edits), data export, demo reset, account deletion. |
+| **Settings** (`settings.html`) | Discovery preferences, theme, notifications, **connect your own Firebase project** (paste a config, no code edits), viewing and retracting the reports you have filed, data export, demo reset, account deletion. |
 | **Plans** (`subscription.html`) | An honest, non-deceptive plan comparison. Premium is a **local simulation** — see [Limitations](#limitations). |
 
 Everything is mobile-first, works in light and dark, respects `prefers-reduced-motion`, and
@@ -204,10 +204,11 @@ npm test          # node --test   (no dependencies, no install)
 npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.json
 ```
 
-Three suites, all on Node's built-in runner:
+Four suites, all on Node's built-in runner:
 
 | Suite | What it pins down |
 | --- | --- |
+| `tests/data-store.test.js` | The demo storage adapter, loaded for real in Node against a `localStorage` shim: seeding (32 profiles, inbound likes, both conversations, idempotency, force re-seed), user create/update deep-merge semantics with wholesale `interestAffinity` replacement, swipe/match/undo idempotency, messaging with unread counters and the 1000-char cap, daily usage limits per plan, the reports lifecycle (file, list, retract, purge on account deletion), and export/import/reset round-trips. |
 | `tests/matching-engine.test.js` | Every hard filter including the mutual gender/age cases, the neutral missing-location path, score bounds, determinism, tokeniser and cosine behaviour, learning clamp/prune/cap, ranking tie-breaks, weight renormalisation, and a golden end-to-end score. |
 | `tests/seed.test.js` | The shape of all 32 seeded profiles against the data model, unique uids and emails, valid interest slugs, ages consistent with birthdates, and `seed-data.js` being in sync with `seed/profiles.json`. |
 | `tests/static.test.js` | Parses every HTML page: no dead local `src`/`href`, correct script load order, no inline scripts / `style=` / `on*=` handlers (the CSP would block them), no class token that the CSS does not define, and `lang` + `title` + viewport + description on every page. |
@@ -314,9 +315,10 @@ These are real, and worth knowing before you show this to anyone:
   real product.
 - **Moderation is a queue, not a team.** Report (with a reason and optional detail), block and
   unmatch are built in. Reports land in a `reports` collection capped at one per
-  (reporter, subject) pair, visible only to their own author and to the project owner — who
-  reviews the queue in the Firebase console or with admin credentials. Nothing triages that
-  queue automatically, and there is no in-app tooling to act on it.
+  (reporter, subject) pair, visible only to their own author — and can be reviewed or
+  retracted from Settings — and to the project owner, who reviews the queue in the Firebase
+  console or with admin credentials. Nothing triages that queue automatically, and there is
+  no in-app tooling for the owner to act on it.
 - **The "AI" is classical ML, deliberately.** TF‑IDF, cosine similarity, weighted vector
   distance and a per-tag affinity table. It is explainable and free precisely because it is not
   a neural model, and it will not understand a bio the way a language model would.

@@ -910,6 +910,31 @@
       return { ok: true, id: report.id, duplicate: false };
     },
 
+    async getMyReports(uid) {
+      const reports = readReports();
+      return Object.keys(reports)
+        .map(function (key) { return reports[key]; })
+        .filter(function (report) { return isPlainObject(report) && report.from === uid; })
+        .sort(function (a, b) {
+          return (Date.parse(b.createdAt || 0) || 0) - (Date.parse(a.createdAt || 0) || 0);
+        })
+        .map(cloneDeep);
+    },
+
+    async retractReport(fromUid, aboutUid) {
+      const reports = readReports();
+      const id = swipeId(fromUid, aboutUid);
+      if (!reports[id]) return { ok: true, removed: false };
+      delete reports[id];
+      writeReports(reports);
+      return { ok: true, removed: true };
+    },
+
+    async getPublicProfile(uid) {
+      // Demo mode has no separate projection — the stored doc is the profile.
+      return demoAdapter.getUser(uid);
+    },
+
     async deleteAccountData(uid) {
       // Swipes in both directions, matches (and their messages) either way,
       // then the account document itself — mirroring the Firestore adapter.
@@ -1605,6 +1630,65 @@
       }
     },
 
+    async getMyReports(uid) {
+      // The rules permit exactly this query (author-only read). Anything that
+      // still goes wrong degrades to an empty list so the settings page keeps
+      // rendering — a permissions hiccup must never take the page down.
+      let snap;
+      try {
+        snap = await db().collection('reports').where('from', '==', uid).get();
+      } catch (err) {
+        console.warn('[zc.store] Could not load the filed reports.', err);
+        return [];
+      }
+      const out = [];
+      snap.forEach(function (doc) {
+        const data = doc.data() || {};
+        out.push({
+          id: doc.id,
+          from: data.from,
+          about: data.about,
+          reason: data.reason,
+          // Same normalisation the demo adapter stores: trimmed and capped,
+          // so both adapters hand the UI presentation-ready text even for a
+          // document written outside the app (e.g. by an admin script).
+          details: String(data.details || '').trim().slice(0, REPORT_DETAILS_MAX),
+          createdAt: toIso(data.createdAt)
+        });
+      });
+      out.sort(function (a, b) {
+        return (Date.parse(b.createdAt || 0) || 0) - (Date.parse(a.createdAt || 0) || 0);
+      });
+      return out;
+    },
+
+    async retractReport(fromUid, aboutUid) {
+      const ref = db().collection('reports').doc(swipeId(fromUid, aboutUid));
+      // Firestore deletes a missing document "successfully", so probe first.
+      // The rules deny author reads of missing reports, so PERMISSION_DENIED
+      // here is the expected "nothing left to retract" signal. Any other
+      // failure (offline, quota, …) must propagate — reporting a report as
+      // already-removed while it still sits in the queue would be a lie.
+      let snap = null;
+      try {
+        snap = await ref.get();
+      } catch (err) {
+        if (err && err.code === 'permission-denied') return { ok: true, removed: false };
+        throw err;
+      }
+      if (!snap.exists) return { ok: true, removed: false };
+      await ref.delete();
+      return { ok: true, removed: true };
+    },
+
+    async getPublicProfile(uid) {
+      if (!uid) return null;
+      // One-profile read through the same discovery projection every list
+      // fetch uses, so the shape and the failure handling stay identical.
+      const map = await fetchProfiles([uid]);
+      return map[uid] || null;
+    },
+
     async deleteAccountData(uid) {
       // Swipes in both directions: the ones this account made, and the ones
       // aimed at it — an inbound like is data about this account and must not
@@ -1963,9 +2047,10 @@
     REPORT_REASONS: REPORT_REASONS.map(function (r) { return { slug: r.slug, label: r.label }; }),
 
     /**
-     * File a report about another user. Reports are write-only: they can be
-     * filed but never listed, edited or retracted from a client — in Firebase
-     * mode the project owner reviews the queue in the console.
+     * File a report about another user. One report per (reporter, subject)
+     * pair, never editable; the author can list their own filings with
+     * getMyReports and withdraw one with retractReport — in Firebase mode the
+     * project owner reviews the queue in the console.
      * @param {string} fromUid the reporter
      * @param {string} aboutUid the account being reported
      * @param {string} reason one of REPORT_REASONS
@@ -1975,6 +2060,46 @@
     async reportUser(fromUid, aboutUid, reason, details) {
       await ready;
       return adapter.reportUser(fromUid, aboutUid, reason, details);
+    },
+
+    /**
+     * Every report this user has filed, newest first. Read problems (offline,
+     * a rules mismatch) degrade to an empty list with a console warning — the
+     * settings page has to render either way.
+     * @param {string} uid the reporter
+     * @returns {Promise<Object[]>} ReportDocs ({id, from, about, reason, details, createdAt})
+     */
+    async getMyReports(uid) {
+      await ready;
+      if (!uid) return [];
+      return adapter.getMyReports(uid);
+    },
+
+    /**
+     * Withdraw a filed report. Retracting one that no longer exists is not an
+     * error — it just reports `removed: false`.
+     * @param {string} fromUid the reporter
+     * @param {string} aboutUid the account the report is about
+     * @returns {Promise<{ok: boolean, removed: boolean}>}
+     */
+    async retractReport(fromUid, aboutUid) {
+      await ready;
+      if (!fromUid || !aboutUid) throw new Error('A retraction needs both accounts.');
+      return adapter.retractReport(fromUid, aboutUid);
+    },
+
+    /**
+     * The public face of an account: what any signed-in user may see of it.
+     * Demo mode serves the stored document itself; firebase mode reads the
+     * discovery projection. Null when the account is gone or unreadable —
+     * callers should treat that as "a deleted account", not as an error.
+     * @param {string} uid the account to look up
+     * @returns {Promise<Object|null>} UserDoc-shaped public profile or null
+     */
+    async getPublicProfile(uid) {
+      await ready;
+      if (!uid) return null;
+      return adapter.getPublicProfile(uid);
     },
 
     /**
