@@ -193,7 +193,20 @@
         </div>
       </section>
 
-      <!-- 5. Data and account removal ---------------------------------------- -->
+      <!-- 5. Your reports ----------------------------------------------------- -->
+      <section class="card" aria-labelledby="reports-heading">
+        <div class="card-head">
+          <h2 id="reports-heading">Your reports</h2>
+        </div>
+        <div class="card-body stack">
+          <p class="field-hint">Reports you have filed. Only you and the project owner can see these.</p>
+          <p class="field-hint" id="reports-status" role="status" aria-live="polite"></p>
+          <!-- settings.js fills this with one row per filed report. -->
+          <ul class="stack hidden" id="reports-list"></ul>
+        </div>
+      </section>
+
+      <!-- 6. Data and account removal ---------------------------------------- -->
       <section class="card danger-zone" aria-labelledby="danger-heading">
         <div class="card-head">
           <h2 id="danger-heading">Your data</h2>

@@ -2,8 +2,9 @@
    Zero Cost AI Dating — settings
    Everything about an account that is not the profile itself: the display
    name, the discovery filters the matching engine reads, theme and
-   notifications, the "bring your own Firebase project" panel, and the data
-   tools (export, demo reset, delete).
+   notifications, the "bring your own Firebase project" panel, the reports the
+   account has filed (with retraction), and the data tools (export, demo
+   reset, delete).
 
    Reads and writes go through ZC.store, with one deliberate exception that is
    commented where it happens: deleting an account needs to remove the user
@@ -90,6 +91,9 @@
     firebaseError: document.getElementById('error-firebase'),
     saveFirebase: document.getElementById('save-firebase'),
     resetFirebase: document.getElementById('reset-firebase'),
+
+    reportsStatus: document.getElementById('reports-status'),
+    reportsList: document.getElementById('reports-list'),
 
     exportData: document.getElementById('export-data'),
     demoTools: document.getElementById('demo-tools'),
@@ -592,7 +596,122 @@
   }
 
   /* ------------------------------------------------------------------------
-     7. Export
+     7. Your reports
+     ------------------------------------------------------------------------ */
+
+  /**
+   * The human label for a report reason slug, from the store's closed list.
+   * @param {string} slug reason slug as stored on the report
+   * @returns {string} the UI label, or a neutral fallback for unknown slugs
+   */
+  function reasonLabel(slug) {
+    const reasons = (ZC.store && ZC.store.REPORT_REASONS) || [];
+    for (let i = 0; i < reasons.length; i += 1) {
+      if (reasons[i].slug === slug) return reasons[i].label;
+    }
+    return 'Reported';
+  }
+
+  /**
+   * Build one list row for a filed report: who, why, when, and the button
+   * that takes it back. Every string here is user-authored or derived from
+   * user input, so it all goes through el({text}).
+   * @param {Object} report ReportDoc
+   * @param {string} name the subject's display name (already resolved)
+   * @returns {HTMLElement} the <li>
+   */
+  function reportRow(report, name) {
+    const meta = reasonLabel(report.reason) + ' · ' + (util.timeAgo(report.createdAt) || 'some time ago');
+    const body = util.el('div', { class: 'stack stack-sm' }, [
+      util.el('strong', { text: name }),
+      util.el('p', { class: 'field-hint', text: meta })
+    ]);
+    if (report.details) {
+      body.appendChild(util.el('p', { class: 'field-hint text-muted', text: '“' + report.details + '”' }));
+    }
+    const button = util.el('button', {
+      class: 'btn btn-sm btn-ghost',
+      text: 'Retract',
+      attrs: { type: 'button' },
+      on: { click: function () { onRetractReport(report, name, button); } }
+    });
+    return util.el('li', { class: 'spread' }, [body, button]);
+  }
+
+  /**
+   * Paint the reports list from resolved data. The empty state is a sentence,
+   * never a blank hole.
+   * @param {Object[]} reports ReportDocs, newest first
+   * @param {Array<Object|null>} subjects public profile (or null) per report
+   * @returns {void}
+   */
+  function renderReports(reports, subjects) {
+    dom.reportsList.textContent = '';
+    if (!reports.length) {
+      dom.reportsList.classList.add('hidden');
+      setStatus(dom.reportsStatus, 'You have not reported anyone.');
+      return;
+    }
+    setStatus(dom.reportsStatus, '');
+    dom.reportsList.classList.remove('hidden');
+    reports.forEach(function (report, index) {
+      const subject = subjects[index];
+      // A missing subject is expected: deleted accounts keep their reports.
+      const name = (subject && subject.displayName) || 'a deleted account';
+      dom.reportsList.appendChild(reportRow(report, name));
+    });
+  }
+
+  /**
+   * Load the reports this account has filed and resolve each subject's public
+   * name, then paint the panel. Called on boot and after every retraction.
+   * @returns {Promise<void>}
+   */
+  async function loadReports() {
+    setStatus(dom.reportsStatus, 'Loading your reports…');
+    try {
+      const reports = await ZC.store.getMyReports(me.uid);
+      const subjects = await Promise.all(reports.map(function (report) {
+        return ZC.store.getPublicProfile(report.about).catch(function () { return null; });
+      }));
+      renderReports(reports, subjects);
+    } catch (err) {
+      console.error('[zc] Could not load your reports:', err);
+      setStatus(dom.reportsStatus, 'Could not load your reports. Reload the page to try again.');
+    }
+  }
+
+  /**
+   * Confirm, retract one report, then repaint the panel.
+   * @param {Object} report the ReportDoc being withdrawn
+   * @param {string} name the subject's resolved display name
+   * @param {HTMLElement} button the row's Retract control
+   * @returns {Promise<void>}
+   */
+  async function onRetractReport(report, name, button) {
+    const ok = typeof ui.confirm === 'function'
+      ? await ui.confirm(
+        'Retract your report about ' + name + '? The project owner will no longer see it.',
+        { title: 'Retract this report?', confirmLabel: 'Retract it', variant: 'danger' }
+      )
+      : true;
+    if (!ok) return;
+
+    busy(button, true, 'Retracting…');
+    try {
+      const result = await ZC.store.retractReport(me.uid, report.about);
+      toast(result.removed ? 'Report retracted.' : 'That report had already been removed.', 'success');
+    } catch (err) {
+      console.error('[zc] Could not retract the report:', err);
+      toast('Could not retract that report. Please try again.', 'error');
+    } finally {
+      busy(button, false);
+    }
+    await loadReports();
+  }
+
+  /* ------------------------------------------------------------------------
+     8. Export
      ------------------------------------------------------------------------ */
 
   /**
@@ -671,7 +790,7 @@
   }
 
   /* ------------------------------------------------------------------------
-     8. Demo reset
+     9. Demo reset
      ------------------------------------------------------------------------ */
 
   /**
@@ -701,7 +820,7 @@
   }
 
   /* ------------------------------------------------------------------------
-     9. Account deletion
+     10. Account deletion
 
      ZC.store has no "delete this user" method — nothing else in the app needs
      one — so the last step reaches past the facade on purpose: localStorage in
@@ -897,7 +1016,7 @@
   }
 
   /* ------------------------------------------------------------------------
-     10. Wiring
+     11. Wiring
      ------------------------------------------------------------------------ */
 
   /**
@@ -943,6 +1062,10 @@
     dom.firebaseInput.addEventListener('input', function () {
       clearFieldError(dom.firebaseField, dom.firebaseError, dom.firebaseInput);
     });
+
+    // The reports list is a plain semantic <ul> with no dedicated CSS class,
+    // so the marker comes off here via CSSOM (the CSP forbids style="...").
+    dom.reportsList.style.setProperty('list-style', 'none');
 
     dom.exportData.addEventListener('click', onExport);
     dom.resetDemo.addEventListener('click', onResetDemo);
@@ -993,6 +1116,9 @@
       me = doc;
       render(me);
       wire();
+      // Async on purpose: the rest of the page must not wait on this list,
+      // and loadReports handles its own failures.
+      loadReports();
     } catch (err) {
       console.error('[zc] Settings could not start:', err);
       toast('Could not load your settings. Please reload the page.', 'error');
