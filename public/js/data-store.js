@@ -1649,7 +1649,10 @@
           from: data.from,
           about: data.about,
           reason: data.reason,
-          details: String(data.details || ''),
+          // Same normalisation the demo adapter stores: trimmed and capped,
+          // so both adapters hand the UI presentation-ready text even for a
+          // document written outside the app (e.g. by an admin script).
+          details: String(data.details || '').trim().slice(0, REPORT_DETAILS_MAX),
           createdAt: toIso(data.createdAt)
         });
       });
