@@ -336,6 +336,12 @@
   /**
    * Everything the strip and the rows draw, in one comparable string, so a
    * refresh that found nothing new can leave their nodes alone.
+   *
+   * Deliberately built from raw timestamps rather than their timeAgo text: a
+   * relative stamp changes as the clock advances even when nothing about the
+   * conversation has, and a fingerprint that drifts on its own would repaint
+   * the list on almost every poll — exactly what it exists to prevent. The
+   * displayed stamps are kept honest separately, in refreshStamps().
    * @param {Object[]} fresh matches nobody has written to yet
    * @param {Object[]} rows every match, in the order they are listed
    * @returns {string}
@@ -353,7 +359,7 @@
           ZC.util.photoOf(match.other),
           Math.max(0, Number(match.unread) || 0),
           typeof match.lastMessage === 'string' ? match.lastMessage : '',
-          ZC.util.timeAgo(match.lastMessageAt || match.createdAt)
+          match.lastMessageAt || match.createdAt || ''
         ];
       })
     ]);
@@ -668,6 +674,14 @@
     }
     if (!state.active || state.active.matchId !== match.matchId) return;
 
+    // A delivery carrying real messages may have landed while this read was in
+    // flight. That is fresher — and stronger — evidence than the empty
+    // snapshot which started the check: messages cannot arrive from a match
+    // that no longer exists. Leave the painted conversation alone, or the
+    // openers would wipe a message the listener has already delivered and may
+    // never send again.
+    if (state.rendered.length) return;
+
     const gone = Array.isArray(list) && !list.some(function (item) {
       return item.matchId === match.matchId;
     });
@@ -746,6 +760,20 @@
 
   /** Re-render the relative stamps so '4m' does not sit there all afternoon. */
   function refreshStamps() {
+    // Conversation list rows: their timestamps are deliberately absent from
+    // the list fingerprint, so this is the only thing that keeps them honest.
+    if (dom.list) {
+      $$('.match-row', dom.list).forEach(function (row) {
+        const stamp = $('.match-row-time', row);
+        if (!stamp) return;
+        const match = state.matches.find(function (item) {
+          return item.matchId === row.dataset.matchId;
+        });
+        if (!match) return;
+        stamp.textContent = ZC.util.timeAgo(match.lastMessageAt || match.createdAt) || '';
+      });
+    }
+
     if (!dom.log) return;
     $$('.msg', dom.log).forEach(function (node, index) {
       const stamp = $('.msg-time', node);
