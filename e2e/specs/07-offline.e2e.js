@@ -9,8 +9,9 @@ module.exports = {
 
   async run(t, page, ctx) {
     const h = ctx.harness;
-    // A private server, because stopping the shared one would strand the
-    // specs that run after this.
+    // A private server, because stopping the shared one would strand the specs
+    // that run after this. It is stopped twice on purpose — see below — which
+    // h.startServer() is written to allow.
     const server = await h.startServer();
 
     try {
@@ -44,6 +45,14 @@ module.exports = {
       });
       if (!t.check('the app shell is precached', cached)) return;
 
+      // Going offline, for real: every check below this line is answered by the
+      // service worker or not at all. Do not "tidy" this away in favour of the
+      // stop() in the finally — that one is cleanup, this one is the test.
+      //
+      // A page loading from cache with nothing behind it may legitimately log
+      // same-origin request failures, so this spec — and only this spec —
+      // declares that window. Every other spec still fails on one.
+      if (ctx.session) ctx.session.expectNetworkErrors(true);
       await server.stop();
 
       // Clean URLs, exactly as Hosting serves them: no .html anywhere.
@@ -76,6 +85,10 @@ module.exports = {
       }
       t.check('the cached matches page still lists its conversations offline', rows === 2, 'rows=' + rows);
     } finally {
+      // The cleanup half of the pair. The stop above is inside the try and is
+      // skipped whenever an earlier check bails out or throws, so the port would
+      // leak for the rest of the run without this; when it did run, stop() is
+      // idempotent and this call resolves against the same shutdown.
       await server.stop();
     }
   }

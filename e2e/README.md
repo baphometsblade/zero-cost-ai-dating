@@ -2,8 +2,8 @@
 
 The flows in here are DOM-driven, so no unit test can reach them: demo sign-in, the deck
 and its keyboard, the match burst, chat persistence, profile and settings, reporting a
-user, account deletion, the phone layout, and offline navigation once the service worker
-has precached.
+user (filing it, retracting it, and the block-and-unmatch branch), account deletion, the
+phone layout, and offline navigation once the service worker has precached.
 Every check runs at 390x844 and at 1280x800 unless the spec says otherwise.
 
 ## Running it

@@ -128,13 +128,29 @@ async function main() {
     return 2;
   }
 
+  // A filter can match specs and still select nothing to run, when none of them
+  // declares the requested viewport — `--viewport=desktop` against a spec that
+  // is mobile-only, say. Left alone that reports "0/0 checks passed" and exits
+  // 0, which is the one thing a test runner must never do: report green for a
+  // run that verified nothing.
+  const runnable = specs.filter(function (spec) {
+    return !args.viewport || spec.viewports.indexOf(args.viewport) !== -1;
+  });
+  if (!runnable.length) {
+    process.stderr.write(
+      'No spec runs at viewport ' + JSON.stringify(args.viewport) + '. ' +
+      specs.map(function (s) { return s.file + ' [' + s.viewports.join(', ') + ']'; }).join('; ') + '\n'
+    );
+    return 2;
+  }
+
   const results = [];
   const started = Date.now();
   const server = await harness.startServer();
   const browser = await playwright.chromium.launch();
 
   try {
-    for (const spec of specs) {
+    for (const spec of runnable) {
       const wanted = args.viewport ? spec.viewports.filter(function (v) { return v === args.viewport; }) : spec.viewports;
       for (const key of wanted) {
         const viewport = harness.VIEWPORTS[key];
@@ -147,7 +163,10 @@ async function main() {
           await spec.run(t, session.page, {
             base: server.origin,
             viewport: viewport,
-            harness: harness
+            harness: harness,
+            // Specs that cause deliberate network failures need to say so; see
+            // session.expectNetworkErrors in harness.js.
+            session: session
           });
         } catch (err) {
           t.check('spec ran to completion', false, err && err.stack ? err.stack.split('\n')[0] : err);
@@ -174,6 +193,13 @@ async function main() {
     '  ' + (results.length - failed.length) + '/' + results.length + ' checks passed in ' +
     ((Date.now() - started) / 1000).toFixed(1) + 's\n'
   );
+
+  // Belt and braces for the same false-green: whatever route got us here, a run
+  // that asserted nothing is not a passing run.
+  if (!results.length) {
+    process.stderr.write('  no checks ran — refusing to report success\n');
+    return 2;
+  }
   return failed.length ? 1 : 0;
 }
 

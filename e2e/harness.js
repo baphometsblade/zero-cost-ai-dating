@@ -135,12 +135,26 @@ async function startServer(root) {
   });
 
   const port = server.address().port;
+  // Latched so the second stop() is a no-op that still resolves. The offline
+  // spec stops its server mid-test (taking it away *is* the test) and stops it
+  // again in its finally, which is the only cleanup that runs when an earlier
+  // check bails out. Without the latch that pair raises ERR_SERVER_NOT_RUNNING.
+  let closing = null;
   return {
     origin: 'http://127.0.0.1:' + port,
-    /** Stop listening *and* drop live sockets, so the next request truly fails. */
+    /**
+     * Stop listening *and* drop live sockets, so the next request truly fails.
+     * Idempotent: calling it again returns the same promise.
+     * @returns {Promise<void>} resolves once the server has closed
+     */
     stop: function () {
-      server.closeAllConnections();
-      return new Promise(function (resolve) { server.close(function () { resolve(); }); });
+      if (closing) return closing;
+      // closeAllConnections landed in Node 18.2 and package.json allows 18.0,
+      // where an unguarded call would throw and shutdown would never finish.
+      // Without it, keep-alive sockets would just close a little later.
+      if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
+      closing = new Promise(function (resolve) { server.close(function () { resolve(); }); });
+      return closing;
     }
   };
 }
@@ -159,15 +173,27 @@ const VIEWPORTS = {
 const REJECTION_TAG = 'e2e-unhandled-rejection:';
 
 /**
- * The Firebase SDK is aborted on purpose, so the browser reports the failed
- * script loads. Those messages are the *expected* shape of demo mode and must
- * not be mistaken for an application error.
- * @param {string} text the console message
- * @returns {boolean} true when the message is CDN noise rather than a defect
+ * The Firebase SDK is aborted on purpose, so the browser reports those failed
+ * script loads. They are the expected shape of demo mode.
+ *
+ * Deliberately matched on the failing request's URL, not on the message text.
+ * A same-origin asset that fails reports "Failed to load resource:
+ * net::ERR_..." with nothing in the text to tell it apart from the CDN, so a
+ * text pattern broad enough to cover the aborted SDK also swallowed every real
+ * resource regression — and the per-spec "no console errors" check would still
+ * have passed. The URL is unambiguous.
+ * @param {Object} msg a Playwright ConsoleMessage
+ * @returns {boolean} true when the message is expected CDN noise, not a defect
  */
-function isExpectedOfflineNoise(text) {
+function isExpectedCdnNoise(msg) {
+  const text = msg.text();
   if (text.indexOf(REJECTION_TAG) === 0) return false;
-  return /gstatic\.com|net::ERR|Failed to load resource/i.test(text);
+  const location = (typeof msg.location === 'function' && msg.location()) || {};
+  const url = location.url || '';
+  // The URL is authoritative; the text is only consulted when Chromium reports
+  // no location, as it does for some worker-sourced messages.
+  if (url) return /^https?:\/\/([a-z0-9-]+\.)*gstatic\.com\//i.test(url);
+  return /gstatic\.com/i.test(text);
 }
 
 /**
@@ -194,6 +220,16 @@ async function openSession(browser, viewport) {
   });
 
   const errors = [];
+  // The offline spec takes its own server away on purpose, and a page loading
+  // from cache with nothing behind it legitimately logs same-origin resource
+  // failures. Rather than widen the filter for everyone — which is what hid
+  // real regressions before — a spec opts into that window explicitly, and
+  // closes it again afterwards.
+  const state = { expectingNetworkErrors: false };
+  const isResourceFailure = function (text) {
+    return /net::ERR|Failed to load resource/i.test(text);
+  };
+
   const page = await context.newPage();
   page.setDefaultTimeout(20000);
   // Playwright cancels dialogs by default, which would silently block any
@@ -206,11 +242,24 @@ async function openSession(browser, viewport) {
   page.on('console', function (msg) {
     if (msg.type() !== 'error') return;
     const text = msg.text();
-    if (isExpectedOfflineNoise(text)) return;
+    if (isExpectedCdnNoise(msg)) return;
+    if (state.expectingNetworkErrors && isResourceFailure(text)) return;
     errors.push('console.error @ ' + page.url() + ' :: ' + text);
   });
 
-  return { context: context, page: page, errors: errors };
+  return {
+    context: context,
+    page: page,
+    errors: errors,
+    /**
+     * Tolerate same-origin resource failures for the duration of a deliberate
+     * outage. Only the offline spec should need this; leaving it on would blind
+     * the session to exactly the regressions the error check exists to catch.
+     * @param {boolean} on whether an outage is expected right now
+     * @returns {void}
+     */
+    expectNetworkErrors: function (on) { state.expectingNetworkErrors = !!on; }
+  };
 }
 
 /* --------------------------------------------------------------------------

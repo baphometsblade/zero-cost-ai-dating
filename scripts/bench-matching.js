@@ -9,6 +9,7 @@
      node scripts/bench-matching.js                 the default ladder
      node scripts/bench-matching.js --sizes=60,500  measure those sizes
      node scripts/bench-matching.js --json          machine-readable output
+     node scripts/bench-matching.js --seed=0x1234   a different synthetic pool
 
    The candidate pool is synthesised from a seeded PRNG (never Math.random),
    so two runs on one machine measure the same work: same bios, same tags,
@@ -271,10 +272,11 @@ function makeMe() {
  * is the first N of the pool for any larger size and the ladder compares like
  * with like.
  * @param {number} count how many to generate
+ * @param {number} [seed=PRNG_SEED] PRNG seed, so a run can compare pools
  * @returns {Object[]} UserDocs
  */
-function makePool(count) {
-  const random = makeRandom(PRNG_SEED);
+function makePool(count, seed) {
+  const random = makeRandom(seed === undefined ? PRNG_SEED : seed);
   const pool = new Array(count);
   for (let i = 0; i < count; i++) pool[i] = makeCandidate(random, i);
   return pool;
@@ -454,6 +456,29 @@ function parseSizes(argv) {
 }
 
 /**
+ * Read --seed=... off the command line. A fixed seed is what makes a run
+ * reproducible, but pinning only one would measure a single synthetic pool
+ * forever: changing it re-rolls every bio, tag set and coordinate, which is
+ * how you check that a timing is a property of the engine rather than of one
+ * lucky pool.
+ * @param {string[]} argv raw process arguments (process.argv.slice(2))
+ * @returns {number} the PRNG seed to synthesise the pool with
+ * @throws {Error} when the flag is present but not a non-negative integer
+ */
+function parseSeed(argv) {
+  const flag = argv.filter(function (arg) { return arg.indexOf('--seed=') === 0; }).pop();
+  if (flag === undefined) return PRNG_SEED;
+
+  const raw = flag.slice('--seed='.length).trim();
+  // Accept 0x… so the default in this file can be pasted back in verbatim.
+  const n = /^0x[0-9a-f]+$/i.test(raw) ? Number.parseInt(raw, 16) : Number(raw);
+  if (!Number.isInteger(n) || n < 0) {
+    throw new Error('--seed wants a non-negative integer, got ' + JSON.stringify(raw));
+  }
+  return n;
+}
+
+/**
  * Entry point: measure every requested size and report.
  * @param {string[]} argv raw process arguments (process.argv.slice(2))
  * @returns {number} process exit code
@@ -461,8 +486,10 @@ function parseSizes(argv) {
 function main(argv) {
   const json = argv.indexOf('--json') !== -1;
   let sizes;
+  let seed;
   try {
     sizes = parseSizes(argv);
+    seed = parseSeed(argv);
   } catch (err) {
     console.error('[bench-matching] ' + err.message);
     return 1;
@@ -471,7 +498,7 @@ function main(argv) {
   const me = makeMe();
   // One pool, sliced: size N is always the first N candidates of the biggest
   // pool, so a row differs from the row above it only in how many there are.
-  const pool = makePool(Math.max.apply(null, sizes));
+  const pool = makePool(Math.max.apply(null, sizes), seed);
   const rows = sizes.map(function (size) { return measure(me, pool.slice(0, size)); });
 
   const machine = {
@@ -486,7 +513,7 @@ function main(argv) {
     console.log(JSON.stringify({
       engine: matching.VERSION,
       machine: machine,
-      seed: PRNG_SEED,
+      seed: seed,
       now: NOW,
       results: rows
     }, null, 2));
