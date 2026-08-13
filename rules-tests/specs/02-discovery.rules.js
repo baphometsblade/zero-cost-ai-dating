@@ -11,7 +11,7 @@ module.exports = {
   title: 'discovery/{uid} — world-readable, but only the public shape',
 
   async run(t, ctx) {
-    const { h, testing, seed, as, anon } = ctx;
+    const { h, testing, seed, as, anon, ok } = ctx;
     const { assertSucceeds, assertFails } = testing;
     const ME = 'me';
     const OTHER = 'other';
@@ -62,6 +62,17 @@ module.exports = {
     t.check('nobody can write someone else\'s projection',
       await ok(assertFails(as(OTHER).doc('discovery/' + ME).set(h.discoveryDoc(ME)))));
 
+    // Both of the above rewrite a seeded document, so they only prove the
+    // UPDATE path. These two target an id nobody has written, so they are
+    // evaluated as creates.
+    t.check('nor create one in someone else\'s name',
+      await ok(assertFails(as(OTHER).doc('discovery/unseeded').set(h.discoveryDoc('unseeded')))));
+
+    t.check('and the closed key list holds on create too, not just on edit',
+      await ok(assertFails(as('unseeded').doc('discovery/unseeded').set(
+        h.discoveryDoc('unseeded', { email: 'unseeded@example.com' })
+      ))));
+
     t.check('the embedded uid must match the document id',
       await ok(assertFails(as(ME).doc('discovery/' + ME).set(h.discoveryDoc('someone-else')))));
 
@@ -81,13 +92,3 @@ module.exports = {
       await ok(assertFails(as(ME).doc('discovery/' + OTHER).delete())));
   }
 };
-
-/** Resolve an assertSucceeds/assertFails promise to a boolean. */
-async function ok(promise) {
-  try {
-    await promise;
-    return true;
-  } catch (err) {
-    return false;
-  }
-}

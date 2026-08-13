@@ -105,6 +105,8 @@ async function main() {
           env: testEnv,
           testing: testing,
           h: harness,
+          // Shared so every spec reports a denial identically.
+          ok: harness.ok,
           // Seed documents the rules would otherwise forbid us from creating.
           seed: function (fn) { return testEnv.withSecurityRulesDisabled(fn); },
           // Firestore handles for a signed-in uid, and for a signed-out visitor.

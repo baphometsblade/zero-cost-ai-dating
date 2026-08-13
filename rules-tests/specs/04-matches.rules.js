@@ -12,7 +12,7 @@ module.exports = {
   title: 'matches/{a_b} — participants only, and only with a reciprocal like',
 
   async run(t, ctx) {
-    const { h, testing, seed, as, anon } = ctx;
+    const { h, testing, seed, as, anon, ok } = ctx;
     const { assertSucceeds, assertFails } = testing;
     const ME = 'me';
     const LIKER = 'liker';        // has liked me
@@ -25,6 +25,10 @@ module.exports = {
       // Only LIKER has aimed a like at ME.
       await db.doc('swipes/' + LIKER + '_' + ME).set(h.swipeDoc(LIKER, ME, 'like'));
       await db.doc('swipes/' + STRANGER + '_' + ME).set(h.swipeDoc(STRANGER, ME, 'pass'));
+      // THIRD has liked ME. That satisfies the reciprocal-like precondition for
+      // a THIRD/FOURTH match, so the participant check below is the ONLY thing
+      // left to deny it — otherwise the test would pass for the wrong reason.
+      await db.doc('swipes/' + THIRD + '_' + ME).set(h.swipeDoc(THIRD, ME, 'like'));
       // A match between two other people, for the outsider checks.
       await db.doc('matches/' + h.pairId(THIRD, FOURTH)).set(h.matchDoc(THIRD, FOURTH));
     });
@@ -43,12 +47,19 @@ module.exports = {
     t.check('the document id must be the sorted pair',
       await ok(assertFails(as(ME).doc('matches/not-the-pair-id').set(h.matchDoc(ME, LIKER)))));
 
+    // A valid pair id AND a satisfied reciprocal-like, so that being an
+    // outsider is the only condition left for the rules to reject. Written to
+    // a doc that does not exist yet, so it is evaluated as a create.
     t.check('you must be one of the two participants',
-      await ok(assertFails(as(ME).doc('matches/' + h.pairId(THIRD, FOURTH) + 'x').set(h.matchDoc(THIRD, FOURTH)))));
+      await ok(assertFails(as(ME).doc('matches/' + h.pairId(THIRD, 'unseeded')).set(h.matchDoc(THIRD, 'unseeded')))));
 
+    // Unsorted users force the id to differ from the sorted pair, so this has
+    // to target a fresh document: writing the sorted id would be an update and
+    // would be refused by the frozen-participants rule instead.
+    const unsorted = [ME, LIKER].sort().reverse();
     t.check('the users array must be sorted',
-      await ok(assertFails(as(ME).doc('matches/' + h.pairId(ME, LIKER)).set(
-        h.matchDoc(ME, LIKER, { users: [ME, LIKER].sort().reverse() })
+      await ok(assertFails(as(ME).doc('matches/' + unsorted.join('_')).set(
+        h.matchDoc(ME, LIKER, { id: unsorted.join('_'), users: unsorted })
       ))));
 
     /* ---- reads ---- */
@@ -87,13 +98,3 @@ module.exports = {
       await ok(assertSucceeds(as(ME).doc('matches/' + h.pairId(ME, LIKER)).delete())));
   }
 };
-
-/** Resolve an assertSucceeds/assertFails promise to a boolean. */
-async function ok(promise) {
-  try {
-    await promise;
-    return true;
-  } catch (err) {
-    return false;
-  }
-}

@@ -12,7 +12,7 @@ module.exports = {
   title: 'reports/{from_about} — bounded, author-only, unprobeable',
 
   async run(t, ctx) {
-    const { h, testing, seed, as, anon } = ctx;
+    const { h, testing, seed, as, anon, ok } = ctx;
     const { assertSucceeds, assertFails } = testing;
     const ME = 'me';
     const SUBJECT = 'subject';
@@ -35,8 +35,12 @@ module.exports = {
     t.check('the id must be exactly from_about (this is what bounds the queue)',
       await ok(assertFails(as(ME).doc('reports/random-id').set(h.reportDoc(ME, SUBJECT)))));
 
+    // An UNSEEDED id whose subject does exist, so create-time authorship is the
+    // only thing left to deny it. Aiming at the seeded other_subject document
+    // would be an update, which `allow update: if false` refuses by itself —
+    // and the check would survive the authorship rule being deleted.
     t.check('you cannot file a report in someone else\'s name',
-      await ok(assertFails(as(ME).doc('reports/' + OTHER + '_' + SUBJECT).set(h.reportDoc(OTHER, SUBJECT)))));
+      await ok(assertFails(as(ME).doc('reports/' + OTHER + '_' + ME).set(h.reportDoc(OTHER, ME)))));
 
     t.check('you cannot report a uid that does not exist',
       await ok(assertFails(as(ME).doc('reports/' + ME + '_' + GHOST).set(h.reportDoc(ME, GHOST)))));
@@ -79,6 +83,15 @@ module.exports = {
     t.check('the queue cannot be enumerated',
       await ok(assertFails(as(ME).collection('reports').get())));
 
+    t.check('a signed-out visitor cannot read a report',
+      await ok(assertFails(anon().doc('reports/' + ME + '_' + SUBJECT).get())));
+
+    t.check('a signed-out visitor cannot enumerate the queue',
+      await ok(assertFails(anon().collection('reports').get())));
+
+    t.check('nor read one with the author constraint a signed-in author may use',
+      await ok(assertFails(anon().collection('reports').where('from', '==', ME).get())));
+
     t.check('you cannot query for reports about yourself',
       await ok(assertFails(as(SUBJECT).collection('reports').where('about', '==', SUBJECT).get())));
 
@@ -90,13 +103,3 @@ module.exports = {
       await ok(assertSucceeds(as(ME).doc('reports/' + ME + '_' + SUBJECT).delete())));
   }
 };
-
-/** Resolve an assertSucceeds/assertFails promise to a boolean. */
-async function ok(promise) {
-  try {
-    await promise;
-    return true;
-  } catch (err) {
-    return false;
-  }
-}

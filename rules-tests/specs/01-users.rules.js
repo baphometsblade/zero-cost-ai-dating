@@ -10,7 +10,7 @@ module.exports = {
   title: 'users/{uid} — owner-only, and shape-validated on write',
 
   async run(t, ctx) {
-    const { h, testing, seed, as, anon } = ctx;
+    const { h, testing, seed, as, anon, ok } = ctx;
     const { assertSucceeds, assertFails } = testing;
     const ME = 'me';
     const OTHER = 'other';
@@ -76,6 +76,14 @@ module.exports = {
         await ok(assertFails(as(ME).doc('users/' + ME).set(h.userDoc(ME, over)))));
     }
 
+    // Everything above rewrites an existing document, so it proves the UPDATE
+    // path only. The rules validate creates through the same function, but a
+    // suite that never exercises it would not notice if that stopped being so.
+    t.check('the same bounds apply when creating, not just editing',
+      await ok(assertFails(as('newbie').doc('users/newbie').set(h.userDoc('newbie', {
+        profile: Object.assign({}, h.userDoc('newbie').profile, { bio: 'x'.repeat(501) })
+      })))));
+
     t.check('a valid profile edit is still allowed',
       await ok(assertSucceeds(as(ME).doc('users/' + ME).set(h.userDoc(ME, { profile: prof({ bio: 'An edited bio.' }) })))));
 
@@ -98,13 +106,3 @@ module.exports = {
     }
   }
 };
-
-/** Resolve an assertSucceeds/assertFails promise to a boolean. */
-async function ok(promise) {
-  try {
-    await promise;
-    return true;
-  } catch (err) {
-    return false;
-  }
-}

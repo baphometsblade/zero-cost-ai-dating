@@ -91,7 +91,7 @@ Open [`firestore.rules`](../firestore.rules). It is the only server-side securit
 has, so it is worth the five minutes.
 
 Everything below is also *executed* — `npm run test:rules` runs the real rules file against
-the Firestore emulator, 118 checks including the attacks each rule exists to stop. If you
+the Firestore emulator, 127 checks including the attacks each rule exists to stop. If you
 change the data model, run it. See [`rules-tests/README.md`](../rules-tests/README.md).
 
 - `users/{uid}` — readable and writable **only by the owner**. Email, birthdate, block lists,

@@ -10,11 +10,12 @@ module.exports = {
   title: 'swipes/{from_to} — authored by you, immutable, id-pinned',
 
   async run(t, ctx) {
-    const { h, testing, seed, as, anon } = ctx;
+    const { h, testing, seed, as, anon, ok } = ctx;
     const { assertSucceeds, assertFails } = testing;
     const ME = 'me';
     const OTHER = 'other';
     const THIRD = 'third';
+    const FOURTH = 'fourth';   // never seeded, so writes to it are creates
 
     await seed(async function (admin) {
       const db = admin.firestore();
@@ -29,8 +30,11 @@ module.exports = {
     t.check('the document id must be exactly from_to',
       await ok(assertFails(as(ME).doc('swipes/wrong-id').set(h.swipeDoc(ME, 'someone', 'like')))));
 
+    // Deliberately an UNSEEDED id: writing over a document that already exists
+    // is an update, which `allow update: if false` refuses on its own, so the
+    // check would stay green even if the create-time authorship rule vanished.
     t.check('you cannot record a swipe authored by someone else',
-      await ok(assertFails(as(ME).doc('swipes/' + OTHER + '_' + THIRD).set(h.swipeDoc(OTHER, THIRD, 'like')))));
+      await ok(assertFails(as(ME).doc('swipes/' + OTHER + '_' + FOURTH).set(h.swipeDoc(OTHER, FOURTH, 'like')))));
 
     t.check('you cannot swipe on yourself',
       await ok(assertFails(as(ME).doc('swipes/' + ME + '_' + ME).set(h.swipeDoc(ME, ME, 'like')))));
@@ -40,6 +44,15 @@ module.exports = {
 
     t.check('a signed-out visitor cannot record anything',
       await ok(assertFails(anon().doc('swipes/anon_x').set(h.swipeDoc('anon', 'x', 'like')))));
+
+    t.check('a signed-out visitor cannot read a swipe',
+      await ok(assertFails(anon().doc('swipes/' + OTHER + '_' + ME).get())));
+
+    t.check('a signed-out visitor cannot scrape the collection',
+      await ok(assertFails(anon().collection('swipes').get())));
+
+    t.check('nor scrape it with the same constraint a signed-in user may use',
+      await ok(assertFails(anon().collection('swipes').where('to', '==', ME).get())));
 
     /* ---- read: your own, in either direction ---- */
     t.check('you can read a swipe you made',
@@ -78,13 +91,3 @@ module.exports = {
       await ok(assertFails(as(ME).doc('swipes/' + OTHER + '_' + THIRD).delete())));
   }
 };
-
-/** Resolve an assertSucceeds/assertFails promise to a boolean. */
-async function ok(promise) {
-  try {
-    await promise;
-    return true;
-  } catch (err) {
-    return false;
-  }
-}

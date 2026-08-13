@@ -11,7 +11,7 @@ module.exports = {
   title: 'everything else — denied by default',
 
   async run(t, ctx) {
-    const { testing, seed, as, anon } = ctx;
+    const { testing, seed, as, anon, ok } = ctx;
     const { assertFails } = testing;
     const ME = 'me';
 
@@ -45,13 +45,3 @@ module.exports = {
       await ok(assertFails(anon().doc('admin/secrets').get())));
   }
 };
-
-/** Resolve an assertSucceeds/assertFails promise to a boolean. */
-async function ok(promise) {
-  try {
-    await promise;
-    return true;
-  } catch (err) {
-    return false;
-  }
-}

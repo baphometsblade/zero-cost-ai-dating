@@ -21,32 +21,16 @@ const harness = require('./harness');
 const PROJECT_ID = 'demo-zc-rules';
 
 /**
- * Locate the firebase-tools CLI entry point outside this repo's tree.
+ * Locate the firebase-tools CLI entry point outside this repo's tree. Shares
+ * harness.resolveOutside so this and the module loader search the same places.
  * @returns {string|null} absolute path to firebase.js, or null
  */
 function findCli() {
-  const pkg = harness.loadOutside('firebase-tools/package.json');
-  if (!pkg) return null;
-  // Resolve the package directory from its own package.json, then the bin.
-  const Module = require('module');
-  const roots = [];
-  if (process.env.ZC_RULES_MODULES) roots.push(process.env.ZC_RULES_MODULES);
-  (process.env.NODE_PATH || '').split(path.delimiter).filter(Boolean).forEach(function (p) { roots.push(p); });
-  let dir = harness.ROOT;
-  for (let i = 0; i < 6; i++) {
-    roots.push(path.join(dir, 'node_modules'));
-    const up = path.dirname(dir);
-    if (up === dir) break;
-    dir = up;
-  }
-  for (const root of roots) {
-    try {
-      const entry = Module.createRequire(path.join(root, 'noop.js')).resolve('firebase-tools/package.json');
-      const cli = path.join(path.dirname(entry), 'lib', 'bin', 'firebase.js');
-      if (require('fs').existsSync(cli)) return cli;
-    } catch (err) { /* try the next root */ }
-  }
-  return null;
+  // Resolve the package's own manifest, then the bin beside it.
+  const entry = harness.resolveOutside('firebase-tools/package.json');
+  if (!entry) return null;
+  const cli = path.join(path.dirname(entry), 'lib', 'bin', 'firebase.js');
+  return require('fs').existsSync(cli) ? cli : null;
 }
 
 const cli = findCli();

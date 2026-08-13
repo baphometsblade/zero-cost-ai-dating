@@ -28,12 +28,13 @@ const INSTALL_HINT =
   '  cd ' + ROOT + ' && NODE_PATH=/tmp/zc-rules/node_modules npm run test:rules';
 
 /**
- * Resolve a module that is intentionally not in this repo's dependency tree:
- * an explicit env var, then NODE_PATH, then any ancestor node_modules.
- * @param {string} name the package to load
- * @returns {Object|null} the module, or null when it cannot be found
+ * Every place a package that is deliberately outside this repo's dependency
+ * tree might live, most explicit first: an env var, then NODE_PATH, then any
+ * ancestor node_modules. Both the module loader and the CLI finder walk this
+ * same list, so the two cannot drift apart.
+ * @returns {string[]} candidate node_modules directories
  */
-function loadOutside(name) {
+function moduleRoots() {
   const roots = [];
   if (process.env.ZC_RULES_MODULES) roots.push(process.env.ZC_RULES_MODULES);
   (process.env.NODE_PATH || '').split(path.delimiter).filter(Boolean).forEach(function (p) {
@@ -46,12 +47,49 @@ function loadOutside(name) {
     if (up === dir) break;
     dir = up;
   }
-  for (const root of roots) {
+  return roots;
+}
+
+/**
+ * Resolve a path inside an outside package without loading it — used to find
+ * a CLI entry point rather than a module's exports.
+ * @param {string} request e.g. 'firebase-tools/package.json'
+ * @returns {string|null} the resolved absolute path, or null
+ */
+function resolveOutside(request) {
+  for (const root of moduleRoots()) {
     try {
-      return require(Module.createRequire(path.join(root, 'noop.js')).resolve(name));
+      return Module.createRequire(path.join(root, 'noop.js')).resolve(request);
     } catch (err) { /* try the next root */ }
   }
   return null;
+}
+
+/**
+ * Load a module that is intentionally not in this repo's dependency tree.
+ * @param {string} name the package to load
+ * @returns {Object|null} the module, or null when it cannot be found
+ */
+function loadOutside(name) {
+  const resolved = resolveOutside(name);
+  return resolved ? require(resolved) : null;
+}
+
+/**
+ * Turn an assertSucceeds/assertFails promise into the boolean t.check wants.
+ * Shared so every spec reports a denial the same way: these helpers reject to
+ * signal "the rule did not behave as asserted", and that rejection is the
+ * failure, not an error to propagate.
+ * @param {Promise} promise from assertSucceeds() or assertFails()
+ * @returns {Promise<boolean>} true when the assertion held
+ */
+async function ok(promise) {
+  try {
+    await promise;
+    return true;
+  } catch (err) {
+    return false;
+  }
 }
 
 /* --------------------------------------------------------------------------
@@ -181,7 +219,10 @@ module.exports = {
   ROOT: ROOT,
   RULES_PATH: RULES_PATH,
   INSTALL_HINT: INSTALL_HINT,
+  moduleRoots: moduleRoots,
+  resolveOutside: resolveOutside,
   loadOutside: loadOutside,
+  ok: ok,
   readRules: function () { return fs.readFileSync(RULES_PATH, 'utf8'); },
   userDoc: userDoc,
   discoveryDoc: discoveryDoc,

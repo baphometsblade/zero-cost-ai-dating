@@ -11,7 +11,7 @@ module.exports = {
   title: 'matches/{id}/messages — participants only, append-only, self-authored',
 
   async run(t, ctx) {
-    const { h, testing, seed, as, anon } = ctx;
+    const { h, testing, seed, as, anon, ok } = ctx;
     const { assertSucceeds, assertFails } = testing;
     const ME = 'me';
     const PEER = 'peer';
@@ -73,13 +73,3 @@ module.exports = {
       await ok(assertSucceeds(as(ME).doc('matches/' + mine + '/messages/seeded').delete())));
   }
 };
-
-/** Resolve an assertSucceeds/assertFails promise to a boolean. */
-async function ok(promise) {
-  try {
-    await promise;
-    return true;
-  } catch (err) {
-    return false;
-  }
-}
