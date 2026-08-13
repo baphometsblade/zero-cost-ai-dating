@@ -10,7 +10,9 @@
   },
   "scripts": {
     "test": "node --test",
+    "test:e2e": "node e2e/run.js",
     "serve": "python3 -m http.server 5000 --directory public",
+    "bench": "node scripts/bench-matching.js",
     "build:seed": "node scripts/build-seed.js",
     "check:seed": "node scripts/build-seed.js --check",
     "deploy": "firebase deploy --only hosting,firestore"

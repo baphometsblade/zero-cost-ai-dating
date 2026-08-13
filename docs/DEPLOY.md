@@ -142,7 +142,7 @@ firebase use --add          # pick your project, alias it "default"
 Then:
 
 ```bash
-npm test                    # 3 suites, no install required
+npm test                    # 4 suites, no install required
 npm run deploy              # firebase deploy --only hosting,firestore
 ```
 
