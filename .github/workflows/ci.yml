@@ -1,6 +1,6 @@
 # Continuous integration for zero-cost-ai-dating.
 #
-# Two jobs, deliberately kept apart:
+# Three jobs, deliberately kept apart:
 #
 #   verify — the project has zero runtime and zero dev dependencies, so there is nothing
 #     to install: check out the repo, confirm the generated seed bundle is still in sync
@@ -11,6 +11,11 @@
 #     runner's temp directory rather than the repo, so package.json keeps its empty
 #     dependency lists. The install is its own step: when the Playwright download fails
 #     the job fails there, on a step named for infrastructure, and never as a red test.
+#
+#   rules — firestore.rules executed against the Firestore emulator. It is the only
+#     server-side security this app has, so "we read it carefully" is not evidence.
+#     Same arrangement as e2e: emulator and testing library installed into the runner's
+#     temp directory, never into the repository.
 #
 # No secrets, no deploy step — deploys stay a deliberate local `npm run deploy`.
 name: CI
@@ -96,3 +101,48 @@ jobs:
         run: npm run test:e2e
         env:
           NODE_PATH: ${{ runner.temp }}/playwright/node_modules
+
+  rules:
+    name: Firestore rules
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # Pinned together: the emulator is fetched by this exact CLI version, so a
+    # surprise release cannot change what the rules are executed against.
+    env:
+      FIREBASE_TOOLS_VERSION: '15.26.0'
+      RULES_TESTING_VERSION: '5.0.1'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # The Firestore emulator is a Java program. ubuntu-latest ships a JDK, but
+      # pinning one keeps the job from breaking when the image's default moves.
+      - name: Set up Java for the Firestore emulator
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # Infrastructure, not a test — same arrangement as the e2e job. Installed
+      # under the runner's temp directory so `dependencies` and `devDependencies`
+      # stay empty in the repository.
+      - name: Install the emulator and rules testing library (infrastructure)
+        run: |
+          npm install --prefix "$RUNNER_TEMP/rules" \
+            "firebase-tools@$FIREBASE_TOOLS_VERSION" \
+            "@firebase/rules-unit-testing@$RULES_TESTING_VERSION"
+
+      # Boots the emulator, loads firestore.rules into it, and executes every
+      # spec. Exits 3 if the tooling is missing, which reads as infrastructure
+      # rather than as a failing rule.
+      - name: Run the Firestore rules suite
+        run: npm run test:rules
+        env:
+          NODE_PATH: ${{ runner.temp }}/rules/node_modules
