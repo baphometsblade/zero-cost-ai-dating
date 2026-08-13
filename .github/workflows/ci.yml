@@ -1,9 +1,18 @@
 # Continuous integration for zero-cost-ai-dating.
 #
-# The project has zero runtime and zero dev dependencies, so there is nothing to install:
-# CI just checks out the repo, verifies the generated seed bundle is still in sync with
-# seed/profiles.json, and runs the Node built-in test runner. No secrets, no deploy step —
-# deploys stay a deliberate local `npm run deploy`.
+# Two jobs, deliberately kept apart:
+#
+#   verify — the project has zero runtime and zero dev dependencies, so there is nothing
+#     to install: check out the repo, confirm the generated seed bundle is still in sync
+#     with seed/profiles.json, and run the Node built-in test runner. It stays that way.
+#
+#   e2e — the DOM-driven flows no unit test can reach (sign-in, the deck, matching, chat,
+#     reports, offline). Playwright is what drives them, and it is installed into the
+#     runner's temp directory rather than the repo, so package.json keeps its empty
+#     dependency lists. The install is its own step: when the Playwright download fails
+#     the job fails there, on a step named for infrastructure, and never as a red test.
+#
+# No secrets, no deploy step — deploys stay a deliberate local `npm run deploy`.
 name: CI
 
 on:
@@ -47,5 +56,43 @@ jobs:
         run: npm run check:seed
 
       # node --test discovers tests/*.test.js — matching engine, seed schema, static HTML.
+      # It does not discover e2e/specs/*.e2e.js, which is why the browser suite can live
+      # in the repo without this job ever needing a browser.
       - name: Run tests
         run: npm test
+
+  e2e:
+    name: Browser end-to-end suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # One Node version is enough here: what is under test is the code running inside
+    # Chromium, not Node's own behaviour. The verify job covers the runtime matrix.
+    env:
+      PLAYWRIGHT_VERSION: '1.56.0'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Infrastructure, not a test. Playwright is installed under the runner's temp
+      # directory and the browser is fetched with the same pinned version, so the module
+      # and the Chromium revision it expects can never disagree. Nothing lands in the
+      # repository: `dependencies` and `devDependencies` stay empty, which is the whole
+      # promise of the verify job above.
+      - name: Install Playwright and Chromium (infrastructure)
+        run: |
+          npm install --prefix "$RUNNER_TEMP/playwright" "playwright@$PLAYWRIGHT_VERSION"
+          npx --yes "playwright@$PLAYWRIGHT_VERSION" install --with-deps chromium
+
+      # e2e/run.js resolves Playwright through NODE_PATH; if it cannot find it at all it
+      # exits 3 with a one-line install hint rather than a stack trace.
+      - name: Run the end-to-end suite
+        run: npm run test:e2e
+        env:
+          NODE_PATH: ${{ runner.temp }}/playwright/node_modules

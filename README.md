@@ -159,6 +159,38 @@ Template-based and deterministic: shared interests first, then shared bio tokens
 shared city, then a personality-flavoured generic. A template with an unfilled placeholder is
 never emitted — if there is nothing specific to say, you get a good generic opener instead.
 
+### 7. What it costs to run
+
+All of it happens on the main thread while the deck loads, so it is measured rather than
+assumed. `npm run bench` synthesises a deterministic candidate pool — seeded PRNG, bios
+spliced out of the real seed corpus so lengths and vocabulary are honest, 4–9 real interest
+tags, full personality vectors, one metro area's worth of coordinates — and times both stages
+with `process.hrtime.bigint()`:
+
+```
+$ npm run bench          # 2.1 GHz Xeon vCPU, Node 22; median run, warm-up discarded
+
+  candidates   buildCorpus   rankCandidates        both  µs/candidate
+          32       1.01 ms          2.41 ms     2.98 ms          93.1
+         100       2.06 ms          6.97 ms     8.84 ms          88.4
+         500       12.0 ms          36.0 ms     43.9 ms          87.8
+        2000       42.5 ms           140 ms      182 ms          91.1
+       10000        197 ms           713 ms      939 ms          93.9
+```
+
+The pool is bit-identical between runs, but the timings are not: a shared vCPU moves them a
+few percent either way, and independent harnesses measuring the same engine landed between
+82 and 94 µs per candidate. Read the shape, not the third digit.
+
+Both stages are linear: 312× the candidates costs 315× the time, so the engine has no hidden
+cliff, only a rate — about **90 µs per candidate** end to end on that machine. The deck asks
+for 60 (`CANDIDATE_LIMIT`), which is **~5 ms**. Roughly a third of the ranking cost is
+re-deriving *your* bio vector once per candidate, which would be the first thing to hoist if
+this ever needed to be faster — at 5 ms it does not.
+
+The script takes `--sizes=60,500,…` and `--json`, so it stays useful for checking a change
+rather than only for producing this table.
+
 ---
 
 ## The zero-cost architecture
@@ -204,6 +236,8 @@ npm test          # node --test   (no dependencies, no install)
 npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.json
 ```
 
+### Unit suites
+
 Four suites, all on Node's built-in runner:
 
 | Suite | What it pins down |
@@ -213,12 +247,39 @@ Four suites, all on Node's built-in runner:
 | `tests/seed.test.js` | The shape of all 32 seeded profiles against the data model, unique uids and emails, valid interest slugs, ages consistent with birthdates, and `seed-data.js` being in sync with `seed/profiles.json`. |
 | `tests/static.test.js` | Parses every HTML page: no dead local `src`/`href`, correct script load order, no inline scripts / `style=` / `on*=` handlers (the CSP would block them), no class token that the CSS does not define, and `lang` + `title` + viewport + description on every page. |
 
-CI (`.github/workflows/ci.yml`) runs exactly those two commands on every push and pull
-request, across a Node 20 and Node 22 matrix (`fail-fast: false`, so one version failing
-still reports the other). Two majors are deliberate: pinning a single one once hid a real
-breakage, because the test runner stopped matching a positional `tests/` directory
-argument after Node 20 and `npm test` silently ran nothing on newer runtimes. There are no
-secrets and no deploy step — deploying stays a deliberate local `npm run deploy`.
+### Browser tests
+
+`npm test` covers what can be exercised without a browser: the matching engine, the demo
+store, the seed schema, the static HTML. It cannot reach the flows that only exist in a DOM — signing in, the deck and its keyboard, the
+match burst, chat that persists, reporting someone, deleting your account, and the service
+worker serving the app with the network gone. Those live in `e2e/`: 118 checks across eight
+specs, each run at 390x844 and 1280x800.
+
+Playwright drives them, and it is deliberately **not** a dependency: the promise that this
+repo installs nothing holds, so you install the browser yourself and point Node at it.
+
+```sh
+npm install --prefix /tmp/pw playwright@1.56.0
+npx --yes playwright@1.56.0 install --with-deps chromium
+
+NODE_PATH=/tmp/pw/node_modules npm run test:e2e
+```
+
+With no Playwright at all the runner exits 3 with a one-line install hint, so "no browser
+here" never reads as a failing test. See [`e2e/README.md`](e2e/README.md) for the spec
+layout and for running one flow or one viewport.
+
+### CI
+
+`.github/workflows/ci.yml` has two jobs. `verify` runs exactly `npm run check:seed` and
+`npm test` on every push and pull request, across a Node 20 and Node 22 matrix (`fail-fast: false`, so one
+version failing still reports the other) — no install, no browser, seconds. Two majors are
+deliberate: pinning a single one once hid a real breakage, because the test runner stopped
+matching a positional `tests/` directory argument after Node 20 and `npm test` silently ran
+nothing on newer runtimes. `e2e` is separate and runs the browser suite, installing
+Playwright and Chromium into the runner's temp directory — never into the repo — in a step
+of its own, so a failed download reads as infrastructure rather than as a red test. There
+are no secrets and no deploy step — deploying stays a deliberate local `npm run deploy`.
 
 ---
 
@@ -248,8 +309,14 @@ secrets and no deploy step — deploying stays a deliberate local `npm run deplo
 │       ├── app.js               # ZC.app — nav, theme, toasts, badges
 │       └── <page>.js            # one controller per page
 ├── seed/profiles.json       # source of truth for the demo cast
-├── scripts/build-seed.js    # regenerates public/js/seed-data.js
+├── scripts/
+│   ├── build-seed.js        # regenerates public/js/seed-data.js
+│   └── bench-matching.js    # times buildCorpus + rankCandidates (npm run bench)
 ├── tests/                   # node:test suites
+├── e2e/                     # browser suite (npm run test:e2e — Playwright, not a dep)
+│   ├── run.js               # the runner
+│   ├── harness.js           # Playwright lookup, static server, browser session
+│   └── specs/*.e2e.js       # one flow each
 ├── docs/                    # architecture + deployment
 ├── firebase.json            # hosting, headers, CSP
 ├── firestore.rules          # the actual security boundary
@@ -317,9 +384,16 @@ These are real, and worth knowing before you show this to anyone:
   not proxied, scanned or moderated.
 - **Discovery scans candidate pages and ranks them in the browser.** `listCandidates` walks
   the public `discovery` collection with a cursor (newest-active first, with cheap mutual
-  gender/age pre-filters) until the deck is full or a scan cap is hit. That is fine for tens
-  or low hundreds of profiles and would need a server-side pre-filter well before it was a
-  real product.
+  gender/age pre-filters) until the deck is full or a scan cap is hit, and the ranking then
+  runs on the main thread during the page load. Measured with `npm run bench` on a 2.1 GHz
+  Xeon cloud vCPU under Node 22 — a deliberately slow stand-in, since no phone was actually
+  measured — that costs ~90 µs per candidate and scales linearly: the 60-candidate deck the app actually
+  loads takes ~5 ms, 500 candidates ~44 ms, 1,000 ~87 ms, 2,000 ~180 ms, 10,000 ~0.94 s. So
+  the real ceiling is **around a thousand candidates per load** before ranking alone spends a
+  100 ms frame budget, and a few thousand before it is visibly janky — more headroom than
+  this section used to claim, and still nowhere near a real product. Past that the fix is a
+  server-side pre-filter, which the free tier cannot host: the honest limit here is the plan,
+  not the algorithm.
 - **Moderation is a queue, not a team.** Report (with a reason and optional detail), block and
   unmatch are built in. Reports land in a `reports` collection capped at one per
   (reporter, subject) pair, visible only to their own author — and can be reviewed or

@@ -416,16 +416,20 @@ The design system is two files: `style.css` (tokens, layout, forms, buttons, nav
 | Layer | Where | What it protects |
 | --- | --- | --- |
 | Pure logic | `tests/matching-engine.test.js` | The engine's filters, formulas, learning and ordering — the part that would be hardest to debug from the UI. |
+| Storage | `tests/data-store.test.js` | The demo adapter loaded for real against a `localStorage` shim: seeding, merge semantics, swipes and matches, messaging, usage limits, reports, export/import. |
 | Data | `tests/seed.test.js` | The bundled cast matches the data model, and the generated bundle matches its JSON source. |
 | Markup | `tests/static.test.js` | Dead links, script order, CSP violations, undefined classes, missing head tags. |
+| Flows | `e2e/specs/*.e2e.js` | What only exists in a DOM: sign-in, the deck and its keyboard, the match burst, chat persistence, reports, deletion, the phone layout, offline navigation. |
 
-All three run on `node --test` with no dependencies, which is what keeps CI down to a
-checkout, `npm run check:seed` and `npm test` — no install step, and it finishes in
-seconds. That short job is run twice, over a `node: ['20', '22']` matrix, because a single
-pinned version once hid a breakage: the runner stopped matching a positional `tests/`
-directory argument after Node 20, so `npm test` ran zero tests on newer runtimes while CI
-stayed green. There is no browser-automation layer: the parts that need a DOM are kept
-thin and the parts that carry the logic are kept pure, on purpose.
+All four `tests/` suites run on `node --test` with no dependencies, which is what keeps the
+`verify` job down to a checkout, `npm run check:seed` and `npm test` — no install step, and
+it finishes in seconds. That short job is run twice, over a `node: ['20', '22']` matrix,
+because a single pinned version once hid a breakage: the runner stopped matching a
+positional `tests/` directory argument after Node 20, so `npm test` ran zero tests on newer
+runtimes while CI stayed green. The browser layer is deliberately kept out of that job: the
+specs live in `e2e/`, not `tests/`, so `node --test` never discovers them, and CI drives
+them from a separate `e2e` job that installs Playwright into the runner's temp directory.
+Playwright is never a dependency of this repo — see [`e2e/README.md`](../e2e/README.md).
 
 ---
 
