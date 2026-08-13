@@ -12,18 +12,46 @@
 :root {
   color-scheme: light;
 
-  /* Brand + accent */
+  /* Brand + accent. --brand-600 is the one brand value that carries text —
+     links, the active nav link, a selected chip — so it is dark enough to
+     clear 4.5:1 on white, on --bg-sunken and on --brand-soft alike. */
   --brand-500: #e8446a;
-  --brand-600: #d2325a;
+  --brand-600: #c2244b;
   --brand-400: #ff6b8a;
   --brand-50: #fff1f4;
   --accent-500: #6c5ce7;
   --accent-400: #8b7bf0;
 
-  /* Status */
+  /* The filled-brand treatment shared by the primary button, the send button
+     and your own chat bubbles. Both stops and the ink on top are tokens so
+     each theme can pick a pair that carries its label: light fills deep and
+     writes in white, dark fills bright and writes in near-black. Neither
+     theme can do both, which is why #fff is not hard-coded on the fill. */
+  --brand-fill-from: var(--brand-600);
+  --brand-fill-to: #9c1339;
+  --on-brand: #ffffff;
+
+  /* The same treatment for the accent gradient (the "how it works" numerals
+     and the simulated-plan ribbon). The raw --accent-400/500 pair is far too
+     light to carry white text — 3.39:1 at its light stop — so the fill gets
+     its own darker stops, exactly as brand does. */
+  --accent-fill-from: #5f4fd8;
+  --accent-fill-to: #4535ae;
+  --on-accent: #ffffff;
+
+  /* Status — tuned for fills, borders and banner backgrounds. */
   --ok: #17a673;
   --warn: #d98324;
   --danger: #dc3545;
+
+  /* Ok and warn again, dark enough to be read as text or as a lone glyph on a
+     light surface — the fill values above are not. --danger needs no such
+     pair; #dc3545 already clears 4.5:1 on white. */
+  --ok-ink: #0f7f57;
+  --warn-ink: #9a5b14;
+  /* Ink for a filled --ok-ink surface: white is readable on light's deep
+     green, but not on dark's mint, which inks near-black instead. */
+  --on-ok: #ffffff;
 
   /* Soft tints for banners, selected chips and status pills */
   --brand-soft: #ffe6ec;
@@ -40,7 +68,10 @@
   --border: #e9dfdd;
   --text: #1f1a1b;
   --text-muted: #6d6164;
-  --text-faint: #9a8d90;
+  /* Faint is a third rank of emphasis, not a third rank of legibility:
+     timestamps, slider end labels and counters are read like any other copy,
+     so this clears 4.5:1 on all three neutrals (4.78:1 on the darkest). */
+  --text-faint: #6f6467;
 
   /* Translucent layers */
   --nav-bg: rgba(255, 255, 255, 0.82);
@@ -104,9 +135,26 @@
     --accent-500: #8b7bf0;
     --accent-400: #a99cf6;
 
+    /* Dark's pinks are light by design, so the filled-brand treatment keeps
+       them and inks the label in near-black; no white survives on them. */
+    --brand-fill-from: var(--brand-400);
+    --brand-fill-to: var(--brand-600);
+    --on-brand: #2a0d15;
+
+    /* Dark's purples are light for the same reason, so the accent fill keeps
+       them and inks near-black. */
+    --accent-fill-from: var(--accent-400);
+    --accent-fill-to: var(--accent-500);
+    --on-accent: #1b1440;
+
     --ok: #35c493;
     --warn: #eda44e;
     --danger: #f2707b;
+
+    /* Against a dark surface the fill values are already the readable ones. */
+    --ok-ink: var(--ok);
+    --warn-ink: var(--warn);
+    --on-ok: #06281c;
 
     --brand-soft: #3b1a24;
     --accent-soft: #241f42;
@@ -121,7 +169,7 @@
     --border: #342c30;
     --text: #f7f1f2;
     --text-muted: #b6a8ad;
-    --text-faint: #8a7d81;
+    --text-faint: #9d9094;
 
     --nav-bg: rgba(27, 23, 25, 0.86);
     --overlay: rgba(5, 3, 4, 0.68);
@@ -147,9 +195,21 @@
   --accent-500: #8b7bf0;
   --accent-400: #a99cf6;
 
+  --brand-fill-from: var(--brand-400);
+  --brand-fill-to: var(--brand-600);
+  --on-brand: #2a0d15;
+
+  --accent-fill-from: var(--accent-400);
+  --accent-fill-to: var(--accent-500);
+  --on-accent: #1b1440;
+
   --ok: #35c493;
   --warn: #eda44e;
   --danger: #f2707b;
+
+  --ok-ink: var(--ok);
+  --warn-ink: var(--warn);
+  --on-ok: #06281c;
 
   --brand-soft: #3b1a24;
   --accent-soft: #241f42;
@@ -164,7 +224,7 @@
   --border: #342c30;
   --text: #f7f1f2;
   --text-muted: #b6a8ad;
-  --text-faint: #8a7d81;
+  --text-faint: #9d9094;
 
   --nav-bg: rgba(27, 23, 25, 0.86);
   --overlay: rgba(5, 3, 4, 0.68);
@@ -560,6 +620,7 @@ h3 {
   transform: translateX(-50%);
 }
 
+/* Same count, same 11px/800 treatment as .badge-new — same fill and ink. */
 .nav-badge {
   display: inline-grid;
   place-items: center;
@@ -567,8 +628,8 @@ h3 {
   height: 20px;
   padding: 0 6px;
   border-radius: var(--radius-full);
-  background: var(--brand-500);
-  color: #fff;
+  background: var(--brand-600);
+  color: var(--on-brand);
   font-size: 11px;
   font-weight: 800;
   line-height: 1;
@@ -697,8 +758,8 @@ h3 {
 }
 
 .btn-primary {
-  background: linear-gradient(135deg, var(--brand-400), var(--brand-600));
-  color: #fff;
+  background: linear-gradient(135deg, var(--brand-fill-from), var(--brand-fill-to));
+  color: var(--on-brand);
   box-shadow: var(--shadow-brand);
 }
 
@@ -739,8 +800,8 @@ h3 {
 }
 
 .btn-success {
-  background: var(--ok);
-  color: #fff;
+  background: var(--ok-ink);
+  color: var(--on-ok);
 }
 
 .btn-success:hover:not([disabled]):not(.is-loading) {
@@ -1199,10 +1260,12 @@ legend {
   color: #3a2408;
 }
 
+/* 11px/800 is normal-size text under WCAG, so the fill has to be the brand
+   value that carries its ink rather than the mid-tone one. */
 .badge-new {
-  background: var(--brand-500);
+  background: var(--brand-600);
   border-color: transparent;
-  color: #fff;
+  color: var(--on-brand);
 }
 
 .pill {
@@ -1610,8 +1673,8 @@ legend {
   width: 36px;
   height: 36px;
   border-radius: 50%;
-  background: linear-gradient(135deg, var(--accent-400), var(--accent-500));
-  color: #fff;
+  background: linear-gradient(135deg, var(--accent-fill-from), var(--accent-fill-to));
+  color: var(--on-accent);
   font-weight: 800;
   font-size: var(--fs-sm);
 }

@@ -52,7 +52,9 @@
           <p class="text-muted" id="plan-summary">Loading your plan…</p>
 
           <h3 id="usage-heading">Today's usage</h3>
-          <div class="stack" id="usage-list" aria-labelledby="usage-heading" aria-busy="true"></div>
+          <!-- role="group" so the aria-labelledby is allowed: ARIA prohibits
+               naming a plain generic div. -->
+          <div class="stack" id="usage-list" role="group" aria-labelledby="usage-heading" aria-busy="true"></div>
           <p class="field-hint" id="usage-reset"></p>
         </div>
       </section>

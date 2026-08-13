@@ -1124,9 +1124,16 @@
     setBusy(button, true, opts.busyLabel || 'Saving…');
 
     try {
-      const updated = await ZC.store.updateUser(state.uid, buildPatch());
+      // The snapshot is taken with the patch, not after the write: nothing is
+      // disabled while a save is in flight, so anything typed during the
+      // round-trip is not in what was sent and must not be folded into the new
+      // baseline — otherwise those keystrokes count as saved, Discard goes
+      // dead and the unload guard stands down on edits nobody has stored.
+      const sent = snapshot();
+      const patch = buildPatch();
+      const updated = await ZC.store.updateUser(state.uid, patch);
       if (updated) state.doc = updated;
-      baseline = snapshot();
+      baseline = sent;
       savedText = 'Saved just now.';
       markDirty();
       renderHero();

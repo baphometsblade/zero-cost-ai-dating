@@ -297,6 +297,13 @@ These are real, and worth knowing before you show this to anyone:
   enforce them on. A determined user with devtools can bypass any of it. The rules stop data
   *corruption* and cross-user reads; they do not — and on Spark cannot — implement rate limits
   or entitlement checks.
+- **The daily usage counter can undercount across devices.** `bumpUsage` is a
+  read-modify-write, so two swipes racing from two tabs or two devices can collapse into one
+  increment on the Firestore path. The deck holds its own reservation while a write is in
+  flight, so the *limit itself* is never overrun in one session; what drifts is the stored
+  counter. Making it atomic needs a `FieldValue.increment` that also survives the midnight
+  `usage.date` roll-over, which cannot be exercised without a live project — so it is
+  documented rather than guessed at.
 - **Premium is simulated. No payment is processed.** The subscription page flips a `plan`
   field on your own user document after an explicit confirmation that says so. It exists so
   the gating logic can be exercised, not to sell anything. There is no payment provider, no
