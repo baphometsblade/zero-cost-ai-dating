@@ -215,11 +215,13 @@
       ? ZC.matching.compatibilityLabel(result.score)
       : { label: 'Match', tone: 'good' };
 
+    // No explicit role: ARIA does not allow group on <article>, and the
+    // element's own article role already reads as one composite thing and
+    // takes the aria-label naming it.
     const card = el('article', {
       class: 'swipe-card',
       dataset: { uid: result.uid || '' },
       attrs: {
-        role: 'group',
         'aria-label': name + (age === null ? '' : ', ' + age) + '. ' + score + '% match — ' + band.label + '.',
         tabindex: index === 0 ? '0' : '-1'
       }
@@ -374,6 +376,12 @@
    * @returns {void}
    */
   function renderStack() {
+    // Every swipe rebuilds the whole stack, which removes the element a
+    // keyboard user was standing on. Remember that they were inside the deck so
+    // the new top card can be handed the focus back; without this the swipe
+    // drops focus on <body> and the next Tab restarts at the top of the page.
+    const active = document.activeElement;
+    const hadFocus = !!(active && active !== document.body && stackEl.contains(active));
     clearStack();
     if (state.error) renderError();
     else if (state.loading) renderSkeleton();
@@ -385,16 +393,64 @@
     }
     updateControls();
     if (state.detailsOpen) renderDetails();
+    if (hadFocus) restoreDeckFocus();
+  }
+
+  /**
+   * Put focus back inside the freshly rebuilt stack: the live card when there
+   * is one, otherwise the first control of whatever state replaced it.
+   * @returns {void}
+   */
+  function restoreDeckFocus() {
+    // Never pull focus out of something that owns it in its own right.
+    if (state.burst) return;
+    if (detailsEl && document.activeElement && detailsEl.contains(document.activeElement)) return;
+    const target = topCard() || $('button, a[href]', stackEl);
+    if (target && typeof target.focus === 'function') target.focus();
   }
 
   /* ------------------------------------------------------------------------
      5. Controls, usage hint and the daily-limit banner
      ------------------------------------------------------------------------ */
 
+  // Spends whose store write has not landed yet. canSpend() answers from the
+  // stored counter, and that counter only learns about a swipe once the write
+  // resolves — so without this every swipe in a fast run is measured against
+  // the same pre-run count, and the daily limit can be overrun by however many
+  // writes are in flight.
+  const reserved = { likes: 0, superLikes: 0 };
+
+  /**
+   * What is left of a daily budget once the swipes still being written are
+   * counted against it.
+   * @param {'likes'|'superLikes'|'rewinds'} field usage counter
+   * @returns {number} spends left, Infinity when unlimited or unknown
+   */
+  function remainingOf(field) {
+    const budget = state.budget[field];
+    if (!budget) return Infinity;
+    const remaining = Number(budget.remaining);
+    if (!isFinite(remaining)) return Infinity;
+    return Math.max(0, remaining - (reserved[field] || 0));
+  }
+
+  /**
+   * Give a reservation back, once the store has been re-read and knows about
+   * the spend it was standing in for.
+   * @param {string|null} field usage counter, or null for a free action
+   * @returns {void}
+   */
+  function releaseReservation(field) {
+    if (!field || reserved[field] === undefined) return;
+    reserved[field] = Math.max(0, reserved[field] - 1);
+    paintBudgets();
+  }
+
   /** True when the field has a known, exhausted budget. */
   function exhausted(field) {
     const budget = state.budget[field];
-    return !!(budget && budget.allowed === false);
+    if (!budget) return false;
+    return budget.allowed === false || remainingOf(field) <= 0;
   }
 
   /** Enable exactly the buttons that can do something right now. */
@@ -416,14 +472,17 @@
       usageEl.textContent = 'Drag a card, tap a button, or use the arrow keys.';
       return;
     }
+    // Counts come through remainingOf(), so the hint drops the moment a swipe
+    // is committed rather than when its write happens to land.
     const parts = [];
     parts.push(likes.limit === Infinity
       ? 'Unlimited likes'
-      : likes.remaining + ' of ' + likes.limit + ' likes left today');
+      : remainingOf('likes') + ' of ' + likes.limit + ' likes left today');
     if (supers) {
+      const left = remainingOf('superLikes');
       parts.push(supers.limit === Infinity
         ? 'unlimited super likes'
-        : supers.remaining + ' super ' + (supers.remaining === 1 ? 'like' : 'likes') + ' left');
+        : left + ' super ' + (left === 1 ? 'like' : 'likes') + ' left');
     }
     parts.push(likes.plan === 'premium' ? 'Premium' : 'Free plan');
     usageEl.textContent = parts.join(' · ');
@@ -498,17 +557,29 @@
     return { allowed: true, remaining: Infinity, limit: Infinity, plan: state.me.plan || 'free', estimated: true };
   }
 
+  /** Repaint everything that reads the daily budgets. */
+  function paintBudgets() {
+    updateUsageHint();
+    updateLimitBanner();
+    updateControls();
+  }
+
+  // Bumped by every refresh so a slow earlier read cannot land on top of a
+  // newer one and hand back budget that has already been spent.
+  let budgetRead = 0;
+
   /**
    * Re-read every counter and repaint the hint, the banner and the buttons.
    * @returns {Promise<void>}
    */
   async function refreshBudgets() {
+    const token = budgetRead + 1;
+    budgetRead = token;
     const fields = ['likes', 'superLikes', 'rewinds'];
     const answers = await Promise.all(fields.map(function (field) { return checkBudget(field); }));
+    if (token !== budgetRead) return;
     fields.forEach(function (field, i) { state.budget[field] = answers[i]; });
-    updateUsageHint();
-    updateLimitBanner();
-    updateControls();
+    paintBudgets();
   }
 
   /* ------------------------------------------------------------------------
@@ -696,19 +767,21 @@
     const card = topCard();
     const field = SPEND_FIELD[action];
 
-    // Daily limits are checked before anything is spent or animated.
+    // Daily limits are checked before anything is spent or animated — against
+    // the stored counter *and* the swipes still being written, which the store
+    // cannot see yet.
     if (field) {
       const budget = await checkBudget(field);
       state.budget[field] = budget;
-      if (!budget.allowed) {
+      if (!budget.allowed || remainingOf(field) <= 0) {
         state.busy = false;
         resetCard(card);
-        updateUsageHint();
-        updateLimitBanner();
-        updateControls();
+        paintBudgets();
         refuse(field, budget);
         return;
       }
+      // Held until persistSwipe() has re-read the counter it belongs to.
+      reserved[field] += 1;
     }
 
     const entry = {
@@ -719,10 +792,15 @@
       matchId: null,
       pending: true
     };
+    // animateOut() moves the card inside the stack, and moving a node blurs it,
+    // so whether the keyboard was on the deck has to be read before that.
+    const keyboardOnDeck = !!(card && document.activeElement && card.contains(document.activeElement));
+
     state.queue.shift();
     state.history.push(entry);
     if (card) animateOut(card, action);
     renderStack();
+    if (keyboardOnDeck) restoreDeckFocus();
     state.busy = false;
 
     const next = state.queue[0];
@@ -755,28 +833,43 @@
    * @returns {Promise<void>}
    */
   async function persistSwipe(entry) {
+    let outcome = null;
     try {
-      const outcome = await ZC.store.recordSwipe(state.me.uid, entry.result.uid, entry.action);
-      entry.matched = !!(outcome && outcome.matched);
-      entry.matchId = (outcome && outcome.matchId) || null;
-      entry.pending = false;
-
-      if (entry.field) {
-        await ZC.store.bumpUsage(state.me.uid, entry.field, 1);
-      }
-      persistLearning(entry.result.profile, entry.action);
-      refreshBudgets();
-
-      if (entry.matched) {
-        showMatchBurst(entry.result, entry.matchId);
-        if (ZC.app && typeof ZC.app.refreshBadges === 'function') ZC.app.refreshBadges(true);
-      }
+      outcome = await ZC.store.recordSwipe(state.me.uid, entry.result.uid, entry.action);
     } catch (err) {
+      // Only this write failing means the swipe is not stored, so only this
+      // failure may take the card back.
       console.warn('[zc] The swipe could not be saved:', err);
       entry.pending = false;
+      releaseReservation(entry.field);
       restoreEntry(entry);
       toast('That swipe did not save. The card is back on top — try again.', 'error');
+      return;
     }
+
+    // Past here the swipe — and any match it created — is in storage. Nothing
+    // below may put the card back or claim the swipe was lost, because both
+    // would be untrue.
+    entry.matched = !!(outcome && outcome.matched);
+    entry.matchId = (outcome && outcome.matchId) || null;
+    entry.pending = false;
+
+    if (entry.matched) {
+      showMatchBurst(entry.result, entry.matchId);
+      if (ZC.app && typeof ZC.app.refreshBadges === 'function') ZC.app.refreshBadges(true);
+    }
+    persistLearning(entry.result.profile, entry.action);
+
+    if (entry.field) {
+      try {
+        await ZC.store.bumpUsage(state.me.uid, entry.field, 1);
+      } catch (err) {
+        console.warn('[zc] The daily count could not be updated:', err);
+        toast('Your daily count could not be updated. The swipe itself is saved.', 'warn');
+      }
+    }
+    await refreshBudgets();
+    releaseReservation(entry.field);
   }
 
   /** Undo a failed swipe locally so the deck matches what was actually stored. */
@@ -841,6 +934,7 @@
     }
 
     state.busy = true;
+    let undone = false;
     try {
       const budget = await checkBudget('rewinds');
       state.budget.rewinds = budget;
@@ -850,17 +944,38 @@
         return;
       }
 
+      // The deletion is the only write that decides what the deck holds, so the
+      // queue and the screen are brought back into step the instant it lands.
+      // Anything after it that fails can no longer leave the user liking a card
+      // they were never shown.
       await ZC.store.undoSwipe(state.me.uid, entry.result.uid);
+      undone = true;
       state.history.pop();
       state.queue.unshift(entry.result);
-      await ZC.store.bumpUsage(state.me.uid, 'rewinds', 1);
       renderStack();
       announce('Rewound. ' + nameOf(entry.result.profile) + ' is back on top of your deck.');
       toast(nameOf(entry.result.profile) + ' is back.', 'success');
+
+      // The counter is the cheap half: a rewind that goes uncounted costs
+      // nobody anything, so its failure is reported and nothing is rolled back.
+      try {
+        await ZC.store.bumpUsage(state.me.uid, 'rewinds', 1);
+      } catch (err) {
+        console.warn('[zc] The rewind count could not be updated:', err);
+        toast('Your rewind count could not be updated. The rewind itself went through.', 'warn');
+      }
       refreshBudgets();
     } catch (err) {
       console.warn('[zc] Rewind failed:', err);
-      toast('Could not rewind that swipe. Nothing has changed.', 'error');
+      if (undone) {
+        // The swipe is already deleted from storage; the deck must show that
+        // whatever else went wrong, and the message must not deny it.
+        renderStack();
+        toast('The rewind went through, but the rest of the update did not. ' +
+          nameOf(entry.result.profile) + ' is back on top.', 'warn');
+      } else {
+        toast('Could not rewind that swipe. Nothing has changed.', 'error');
+      }
     } finally {
       state.busy = false;
     }
@@ -1119,13 +1234,20 @@
       if (event.target === overlay) closeBurst();
     });
 
-    /** Tear the overlay down and give focus back to whatever opened it. */
+    /**
+     * Tear the overlay down and give focus back to whatever opened it. The
+     * swiped card is already gone by the time a match is known, so on a drag
+     * the "opener" is <body> — which is in the document and would swallow the
+     * focus. The deck is the honest destination in that case.
+     */
     function closeBurst() {
       if (state.burst !== overlay) return;
       state.burst = null;
       if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
       const card = topCard();
-      if (opener && typeof opener.focus === 'function' && document.contains(opener)) opener.focus();
+      const restorable = opener && opener !== document.body &&
+        typeof opener.focus === 'function' && document.contains(opener);
+      if (restorable) opener.focus();
       else if (card && typeof card.focus === 'function') card.focus();
     }
 

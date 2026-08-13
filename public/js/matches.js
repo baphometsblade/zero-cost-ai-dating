@@ -92,7 +92,8 @@
     sending: false,
     firstPaint: true,    // suppresses "new message" announcements on open
     refreshing: false,
-    refreshWarned: false
+    refreshWarned: false,
+    emptyCheck: null     // match id whose empty delivery is being confirmed
   };
 
   // Wide enough for both panes at once — the same breakpoint .two-pane uses.
@@ -102,6 +103,14 @@
 
   let listTimer = null;
   let stampTimer = null;
+
+  // Fingerprint of the left pane as it is currently painted. Rebuilding a row
+  // the user has already pressed down on cancels their click: mousedown lands
+  // on the old node, the rebuild detaches it, and with no common ancestor left
+  // for mouseup the browser never fires a click at all. Both the 20s poll and
+  // the window-focus refresh repaint, so without this a tap on a conversation
+  // silently does nothing every time one of them lands mid-press.
+  let listPainted = null;
 
   /* ------------------------------------------------------------------------
      3. Small helpers
@@ -325,6 +334,38 @@
   }
 
   /**
+   * Everything the strip and the rows draw, in one comparable string, so a
+   * refresh that found nothing new can leave their nodes alone.
+   *
+   * Deliberately built from raw timestamps rather than their timeAgo text: a
+   * relative stamp changes as the clock advances even when nothing about the
+   * conversation has, and a fingerprint that drifts on its own would repaint
+   * the list on almost every poll — exactly what it exists to prevent. The
+   * displayed stamps are kept honest separately, in refreshStamps().
+   * @param {Object[]} fresh matches nobody has written to yet
+   * @param {Object[]} rows every match, in the order they are listed
+   * @returns {string}
+   */
+  function listFingerprint(fresh, rows) {
+    return JSON.stringify([
+      state.active ? state.active.matchId : '',
+      fresh.map(function (match) {
+        return [match.matchId, shortNameOf(match.other), ZC.util.photoOf(match.other)];
+      }),
+      rows.map(function (match) {
+        return [
+          match.matchId,
+          nameOf(match.other),
+          ZC.util.photoOf(match.other),
+          Math.max(0, Number(match.unread) || 0),
+          typeof match.lastMessage === 'string' ? match.lastMessage : '',
+          match.lastMessageAt || match.createdAt || ''
+        ];
+      })
+    ]);
+  }
+
+  /**
    * Repaint the whole left pane from state: the new-matches strip, the
    * conversation rows, the unread badge and whichever empty state applies.
    * @returns {void}
@@ -338,6 +379,7 @@
     if (state.loading || state.error) {
       show(dom.newCard, false);
       show(dom.unreadBadge, false);
+      listPainted = null;
       return;
     }
 
@@ -349,10 +391,16 @@
       });
     show(dom.newCard, fresh.length > 0);
     if (dom.newCount) dom.newCount.textContent = String(fresh.length);
-    fill(dom.newStrip, fresh.map(buildNewMatch));
 
-    // Every match appears in the list, newest activity first.
-    fill(dom.list, state.matches.slice().sort(byActivity).map(buildRow));
+    // Every match appears in the list, newest activity first. Both node sets
+    // are replaced together, and only when something they show has changed.
+    const rows = state.matches.slice().sort(byActivity);
+    const fingerprint = listFingerprint(fresh, rows);
+    if (fingerprint !== listPainted) {
+      listPainted = fingerprint;
+      fill(dom.newStrip, fresh.map(buildNewMatch));
+      fill(dom.list, rows.map(buildRow));
+    }
 
     const unread = totalUnread();
     show(dom.unreadBadge, unread > 0);
@@ -427,7 +475,10 @@
       ]));
     }
     return [
-      el('div', { class: 'new-matches blurred', attrs: { 'aria-hidden': 'true' } }, faces),
+      // The strip scrolls sideways, and a scrollable box with no focusable
+      // children becomes a Tab stop in Chrome. This one is decoration hidden
+      // from the accessibility tree, so tabindex takes that focusability back.
+      el('div', { class: 'new-matches blurred', attrs: { 'aria-hidden': 'true', tabindex: '-1' } }, faces),
       el('div', { class: 'upsell' }, [
         el('p', {
           text: count === 1
@@ -590,6 +641,62 @@
     state.rendered.push(message);
   }
 
+  /** Paint the "nobody has written yet" state over an empty log. */
+  function showNoMessages(match) {
+    if (!dom.log) return;
+    fill(dom.log, null);
+    state.rendered = [];
+    state.lastDay = null;
+    dom.log.appendChild(buildNoMessages(match));
+    scrollToBottom();
+  }
+
+  /**
+   * A conversation with nothing in it and a conversation that no longer exists
+   * both arrive from listenMessages as an empty list, so an empty delivery is
+   * checked against a fresh match list before anything is painted. Getting this
+   * wrong wipes a visible history and replaces it with an invitation to write
+   * into a match the other person has already ended.
+   * @param {Object} match the MatchView the empty delivery belongs to
+   * @returns {Promise<void>}
+   */
+  async function confirmEmptyThread(match) {
+    if (!match || !state.me || state.emptyCheck === match.matchId) return;
+    state.emptyCheck = match.matchId;
+    let list = null;
+    try {
+      list = await ZC.store.getMatches(state.me.uid);
+    } catch (err) {
+      // A failed read is not evidence that anything was deleted.
+      console.warn('[zc] Could not confirm the conversation still exists:', err);
+    } finally {
+      state.emptyCheck = null;
+    }
+    if (!state.active || state.active.matchId !== match.matchId) return;
+
+    // A delivery carrying real messages may have landed while this read was in
+    // flight. That is fresher — and stronger — evidence than the empty
+    // snapshot which started the check: messages cannot arrive from a match
+    // that no longer exists. Leave the painted conversation alone, or the
+    // openers would wipe a message the listener has already delivered and may
+    // never send again.
+    if (state.rendered.length) return;
+
+    const gone = Array.isArray(list) && !list.some(function (item) {
+      return item.matchId === match.matchId;
+    });
+    if (!gone) {
+      // state.active carries the freshest copy of the same conversation.
+      showNoMessages(state.active);
+      return;
+    }
+    state.matches = list.slice().sort(byActivity);
+    state.corpus = null;
+    toast('That conversation has ended.', 'warn');
+    announce('That conversation has ended.');
+    closeMatch();
+  }
+
   /**
    * Paint a delivery from ZC.store.listenMessages. Messages only ever arrive
    * at the end, so when the list still starts with what is already on screen
@@ -600,6 +707,16 @@
   function renderMessages(list) {
     if (!state.active || !dom.log) return;
     const messages = Array.isArray(list) ? list : [];
+
+    // Nothing to show is the ambiguous case: leave the log exactly as it is
+    // until confirmEmptyThread() has established whether this match still
+    // exists, then let it paint the openers or close the pane.
+    if (!messages.length) {
+      state.firstPaint = false;
+      confirmEmptyThread(state.active);
+      return;
+    }
+
     const stick = state.firstPaint || isNearBottom();
 
     // Can we extend what is already rendered, or has history changed under us?
@@ -621,12 +738,8 @@
       fill(dom.log, null);
       state.rendered = [];
       state.lastDay = null;
-      if (!messages.length) {
-        dom.log.appendChild(buildNoMessages(state.active));
-      } else {
-        messages.forEach(appendMessage);
-        added = messages;
-      }
+      messages.forEach(appendMessage);
+      added = messages;
     }
 
     refreshStamps();
@@ -647,6 +760,20 @@
 
   /** Re-render the relative stamps so '4m' does not sit there all afternoon. */
   function refreshStamps() {
+    // Conversation list rows: their timestamps are deliberately absent from
+    // the list fingerprint, so this is the only thing that keeps them honest.
+    if (dom.list) {
+      $$('.match-row', dom.list).forEach(function (row) {
+        const stamp = $('.match-row-time', row);
+        if (!stamp) return;
+        const match = state.matches.find(function (item) {
+          return item.matchId === row.dataset.matchId;
+        });
+        if (!match) return;
+        stamp.textContent = ZC.util.timeAgo(match.lastMessageAt || match.createdAt) || '';
+      });
+    }
+
     if (!dom.log) return;
     $$('.msg', dom.log).forEach(function (node, index) {
       const stamp = $('.msg-time', node);
@@ -1057,26 +1184,45 @@
       : false;
     if (!ok) return;
 
+    // The unmatch goes first even when both were asked for: a block is
+    // permanent and has no undo anywhere in the app, so it must never be the
+    // half that lands on its own.
     try {
-      if (alsoBlock) {
+      await ZC.store.unmatch(match.matchId, state.me.uid);
+    } catch (err) {
+      console.warn('[zc] Could not end the match:', err);
+      toast('That did not go through. Please try again.', 'error');
+      return;
+    }
+
+    state.matches = state.matches.filter(function (item) { return item.matchId !== match.matchId; });
+    state.corpus = null;
+    closeMatch(true);
+    renderList();
+    renderLikes();
+    if (ZC.app && typeof ZC.app.refreshBadges === 'function') ZC.app.refreshBadges(true);
+
+    if (alsoBlock) {
+      try {
+        // The list is re-read rather than taken from the copy this page booted
+        // with: another tab may have blocked someone since, and the store
+        // replaces arrays wholesale instead of merging them.
+        const fresh = await ZC.store.getUser(state.me.uid);
+        if (fresh) state.me = fresh;
         const blocked = Array.isArray(state.me.blocked) ? state.me.blocked.slice() : [];
         if (blocked.indexOf(match.otherUid) === -1) blocked.push(match.otherUid);
         const updated = await ZC.store.updateUser(state.me.uid, { blocked: blocked });
         if (updated) state.me = updated;
+      } catch (err) {
+        console.warn('[zc] Could not block after unmatching:', err);
+        toast('You are no longer matched with ' + name + ', but the block did not save — they can turn up in your deck again.', 'warn');
+        announce(name + ' unmatched. The block did not save.');
+        return;
       }
-      await ZC.store.unmatch(match.matchId, state.me.uid);
-      state.matches = state.matches.filter(function (item) { return item.matchId !== match.matchId; });
-      state.corpus = null;
-      closeMatch(true);
-      renderList();
-      renderLikes();
-      if (ZC.app && typeof ZC.app.refreshBadges === 'function') ZC.app.refreshBadges(true);
-      toast(alsoBlock ? name + ' is blocked and the match is gone.' : 'You are no longer matched with ' + name + '.', 'success');
-      announce(alsoBlock ? name + ' blocked.' : name + ' unmatched.');
-    } catch (err) {
-      console.warn('[zc] Could not end the match:', err);
-      toast('That did not go through. Please try again.', 'error');
     }
+
+    toast(alsoBlock ? name + ' is blocked and the match is gone.' : 'You are no longer matched with ' + name + '.', 'success');
+    announce(alsoBlock ? name + ' blocked.' : name + ' unmatched.');
   }
 
   /**
@@ -1103,7 +1249,12 @@
     }));
     const textarea = el('textarea', {
       class: 'textarea',
-      attrs: { rows: '3', maxlength: '500', placeholder: 'Anything that helps review this (optional)' },
+      attrs: {
+        rows: '3',
+        maxlength: '500',
+        placeholder: 'Anything that helps review this (optional)',
+        'aria-label': 'More detail about the report (optional)'
+      },
       on: { input: function (event) { details = event.target.value; } }
     });
     const body = el('div', { class: 'stack stack-sm' }, [

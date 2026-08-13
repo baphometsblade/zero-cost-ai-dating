@@ -10,7 +10,7 @@
 'use strict';
 
 // Bump the version to retire every previously cached asset on next activate.
-const CACHE = 'zc-static-v1';
+const CACHE = 'zc-static-v2';
 
 // The app shell, cached up front so a first visit can go offline immediately.
 const CORE = [
