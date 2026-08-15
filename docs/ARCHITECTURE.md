@@ -420,16 +420,27 @@ The design system is two files: `style.css` (tokens, layout, forms, buttons, nav
 | Data | `tests/seed.test.js` | The bundled cast matches the data model, and the generated bundle matches its JSON source. |
 | Markup | `tests/static.test.js` | Dead links, script order, CSP violations, undefined classes, missing head tags. |
 | Flows | `e2e/specs/*.e2e.js` | What only exists in a DOM: sign-in, the deck and its keyboard, the match burst, chat persistence, reports, deletion, the phone layout, offline navigation. |
+| Trust boundary | `rules-tests/specs/*.rules.js` | `firestore.rules` executed against the emulator: who can read what, the closed discovery projection, the reciprocal-like proof, the append-only chat, the bounded report queue, and the catch-all deny. |
 
 All four `tests/` suites run on `node --test` with no dependencies, which is what keeps the
 `verify` job down to a checkout, `npm run check:seed` and `npm test` — no install step, and
 it finishes in seconds. That short job is run twice, over a `node: ['20', '22']` matrix,
 because a single pinned version once hid a breakage: the runner stopped matching a
 positional `tests/` directory argument after Node 20, so `npm test` ran zero tests on newer
-runtimes while CI stayed green. The browser layer is deliberately kept out of that job: the
-specs live in `e2e/`, not `tests/`, so `node --test` never discovers them, and CI drives
-them from a separate `e2e` job that installs Playwright into the runner's temp directory.
-Playwright is never a dependency of this repo — see [`e2e/README.md`](../e2e/README.md).
+runtimes while CI stayed green.
+
+The two layers that need real infrastructure are deliberately kept out of that job. Their
+specs live in `e2e/` and `rules-tests/`, not `tests/`, so `node --test` never discovers
+them, and CI drives each from its own job that installs what it needs — Playwright and
+Chromium, or the Firestore emulator — into the runner's temp directory. Neither is ever a
+dependency of this repo; see [`e2e/README.md`](../e2e/README.md) and
+[`rules-tests/README.md`](../rules-tests/README.md).
+
+The trust-boundary layer exists because `firestore.rules` is the only server-side security
+here, so every privacy guarantee in the README rests on it. Reviewing it is not the same as
+running it: the suite asserts the attacks each rule exists to stop — reading another
+account's document, smuggling a private field into the public projection, minting a match
+with someone who never liked you, probing whether a report about you exists.
 
 ---
 

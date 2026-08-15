@@ -252,7 +252,7 @@ Four suites, all on Node's built-in runner:
 `npm test` covers what can be exercised without a browser: the matching engine, the demo
 store, the seed schema, the static HTML. It cannot reach the flows that only exist in a DOM — signing in, the deck and its keyboard, the
 match burst, chat that persists, reporting someone, deleting your account, and the service
-worker serving the app with the network gone. Those live in `e2e/`: 118 checks across eight
+worker serving the app with the network gone. Those live in `e2e/`: 132 checks across eight
 specs, each run at 390x844 and 1280x800.
 
 Playwright drives them, and it is deliberately **not** a dependency: the promise that this
@@ -269,17 +269,38 @@ With no Playwright at all the runner exits 3 with a one-line install hint, so "n
 here" never reads as a failing test. See [`e2e/README.md`](e2e/README.md) for the spec
 layout and for running one flow or one viewport.
 
+### Security rules tests
+
+Everything this README claims about privacy — that your email and block list are not
+readable by other accounts, that nobody can mint a match with a stranger and then message
+them, that the abuse queue cannot be enumerated — is a claim about one file,
+`firestore.rules`, because there is no server to enforce anything else. Reading it
+carefully is not evidence. `rules-tests/` executes it against the Firestore emulator:
+**127 checks**, including the attacks each rule exists to stop.
+
+```sh
+npm install --prefix /tmp/zc-rules @firebase/rules-unit-testing firebase-tools
+
+NODE_PATH=/tmp/zc-rules/node_modules npm run test:rules
+```
+
+Same arrangement as the browser tests: not a dependency, needs a Java runtime for the
+emulator, and exits 3 when the tooling is missing so an environment problem never reads as
+a failing rule. See [`rules-tests/README.md`](rules-tests/README.md).
+
 ### CI
 
-`.github/workflows/ci.yml` has two jobs. `verify` runs exactly `npm run check:seed` and
+`.github/workflows/ci.yml` has three jobs. `verify` runs exactly `npm run check:seed` and
 `npm test` on every push and pull request, across a Node 20 and Node 22 matrix (`fail-fast: false`, so one
 version failing still reports the other) — no install, no browser, seconds. Two majors are
 deliberate: pinning a single one once hid a real breakage, because the test runner stopped
 matching a positional `tests/` directory argument after Node 20 and `npm test` silently ran
 nothing on newer runtimes. `e2e` is separate and runs the browser suite, installing
 Playwright and Chromium into the runner's temp directory — never into the repo — in a step
-of its own, so a failed download reads as infrastructure rather than as a red test. There
-are no secrets and no deploy step — deploying stays a deliberate local `npm run deploy`.
+of its own, so a failed download reads as infrastructure rather than as a red test.
+`rules` does the same for the Firestore emulator and executes `firestore.rules` against it.
+There are no secrets and no deploy step — deploying stays a deliberate local
+`npm run deploy`.
 
 ---
 
