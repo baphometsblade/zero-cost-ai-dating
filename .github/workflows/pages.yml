@@ -48,6 +48,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
+    # The push trigger is filtered to main, but workflow_dispatch runs against
+    # whatever ref the person dispatching picks — without this, a manual run
+    # could publish an unmerged branch and skip the CI gate the comment above
+    # relies on. Manual dispatch stays useful for re-deploying main itself.
+    if: github.ref == 'refs/heads/main'
+
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
