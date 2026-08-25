@@ -13,10 +13,13 @@ Authentication. No Cloud Functions, no Cloud Storage, no server of any kind. And
 no Firebase project at all, it still runs — the whole app falls back to `localStorage` with a
 bundled cast of 32 profiles, so you can try it in about thirty seconds.
 
-**Try it right now, no clone required:**
-**<https://baphometsblade.github.io/zero-cost-ai-dating/>** — the live demo is exactly that
-demo mode, published to GitHub Pages. Everything you do there stays in your own browser's
-`localStorage`; there is no account, no server, and nothing is uploaded anywhere.
+**A hosted demo** is published from `main` to
+**<https://baphometsblade.github.io/zero-cost-ai-dating/>** by
+[`.github/workflows/pages.yml`](.github/workflows/pages.yml) — exactly that demo mode, so
+everything you do there stays in your own browser's `localStorage`: no account, no server,
+nothing uploaded anywhere. *(GitHub Pages has to be switched on once for the repository
+before the first deploy can land — [docs/DEPLOY.md](docs/DEPLOY.md#github-pages-the-live-demo--and-why-it-is-not-this-guide)
+has the one setting.)*
 
 ---
 
@@ -40,8 +43,7 @@ thing, and its test suite asserts the behaviour rather than trusting it.
 
 ## Run it in 30 seconds
 
-The zero-second version is the [live demo](https://baphometsblade.github.io/zero-cost-ai-dating/).
-To run the same thing locally:
+Locally, with nothing installed:
 
 ```bash
 git clone https://github.com/<you>/zero-cost-ai-dating.git

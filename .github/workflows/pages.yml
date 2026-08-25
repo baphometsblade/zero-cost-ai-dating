@@ -72,8 +72,15 @@ jobs:
       - name: Run tests before publishing
         run: npm test
 
-      # enablement creates the Pages site on the first run, so turning the demo on
-      # is this file landing on main — no console clicking required.
+      # enablement asks GitHub to create the Pages site if it does not exist yet,
+      # but the Actions token is not allowed to create one ("Resource not
+      # accessible by integration"), so the site has to be switched on once by
+      # hand: Settings -> Pages -> Build and deployment -> Source: GitHub
+      # Actions. docs/DEPLOY.md spells that out. Once it exists this step finds
+      # it and does nothing, which is why the flag stays: a fork that *is*
+      # allowed to self-enable gets that for free, and everyone else sees the
+      # failure here, on a step named for configuration, rather than as a
+      # mysterious 404 on the published URL.
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
         with:

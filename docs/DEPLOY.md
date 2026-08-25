@@ -16,7 +16,18 @@ The repository also publishes itself to GitHub Pages: `.github/workflows/pages.y
 only — no Firebase project is attached, so there are no accounts and no shared database;
 every visitor gets the seeded cast in their own browser's `localStorage`.
 
-Two Pages constraints are worth knowing because they shaped the code:
+**Pages has to be switched on once, by hand, before any of that works.** The workflow asks
+for the site to be created (`configure-pages` with `enablement: true`), but the token
+Actions runs with is not permitted to create one, and the job fails with *"Create Pages site
+failed. Error: Resource not accessible by integration"* while the published URL simply 404s.
+The fix is one setting in the repository, not a change to any file here:
+
+> **Settings → Pages → Build and deployment → Source → GitHub Actions**
+
+Then re-run the workflow (**Actions → pages → Run workflow**, or push anything to `main`).
+From that point the step finds the existing site and the deploy proceeds on its own.
+
+Two further Pages constraints are worth knowing because they shaped the code:
 
 - **A project site lives under a subpath** (`/zero-cost-ai-dating/`), not the origin root.
   This is why every link in the app is relative, the manifest's `scope` is `./`, and
