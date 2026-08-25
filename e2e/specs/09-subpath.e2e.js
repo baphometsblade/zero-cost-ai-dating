@@ -106,6 +106,17 @@ module.exports = {
         if (onlyTheDocument) ctx.session.errors.splice(before);
       }
 
+      // Self-contained is not the same as useful: served for a nested miss,
+      // the page's relative links would point at /nowhere/index.html. Its
+      // inline resolver re-points them at the service worker's scope, which a
+      // prior visit registered — so from here the way back in is a real URL.
+      const backHref = await page.evaluate(function () {
+        const link = document.querySelector('a[data-resolve="index.html"]');
+        return link ? link.href : null;
+      });
+      t.check('the nested 404 re-points its links at the real site base',
+        backHref === base + 'index.html', backHref || 'no [data-resolve] link found');
+
       // Going offline, for real — same drill as the offline spec: everything
       // below is answered by the service worker or not at all, and the spec
       // declares the window in which same-origin fetch failures are expected.

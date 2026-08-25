@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <!-- The firebase.json CSP header, repeated here minus frame-ancestors (ignored in meta delivery) because GitHub Pages cannot set headers. tests/csp-sync.test.js keeps the two copies in lockstep. -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.gstatic.com https://apis.google.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firestore.googleapis.com; frame-src https://*.firebaseapp.com https://accounts.google.com; base-uri 'self'; form-action 'self'; object-src 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-hLOYNm57xAg2n/Z01Pi9qiT3MSokGFN3uN7cWS3V/AE=' https://www.gstatic.com https://apis.google.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firestore.googleapis.com; frame-src https://*.firebaseapp.com https://accounts.google.com; base-uri 'self'; form-action 'self'; object-src 'none'">
   <title>Page not found — Zero Cost AI Dating</title>
   <meta name="description" content="That page does not exist. Head back to the Zero Cost AI Dating landing page or straight into the app.">
   <meta name="color-scheme" content="light dark">
@@ -13,9 +13,11 @@
        where a relative css/style.css would resolve inside the missing
        directory and 404 in turn. So it is fully self-contained: the favicon
        is a data: URI (the same heart as favicon.svg), the styles live in the
-       one <style> element below, and no scripts or manifest are loaded. The
-       relative links in the body are best-effort — correct for a top-level
-       miss, dead for a nested one — and the copy reads fine either way. -->
+       one <style> element below, and nothing external is loaded. The relative
+       links in the body are correct for a top-level miss; for a nested one,
+       the hash-allowed script at the end of the body re-points them at the
+       service worker registration's scope — the one durable record of where
+       the app actually lives — whenever a prior visit has left one. -->
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23ff6b8a'/%3E%3Cstop offset='1' stop-color='%23c2244b'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='url(%23g)'/%3E%3Cpath fill='%23fff' d='M32 47.5c-.6 0-1.2-.2-1.7-.6C24 41.6 15 34.2 15 26.3 15 20.6 19.4 16 24.9 16c2.8 0 5.4 1.2 7.1 3.3A9.2 9.2 0 0 1 39.1 16C44.6 16 49 20.6 49 26.3c0 7.9-9 15.3-15.3 20.6-.5.4-1.1.6-1.7.6z'/%3E%3C/svg%3E">
   <style>
     /* A hand-trimmed copy of the css/style.css rules this page actually uses,
@@ -278,8 +280,8 @@
         Pick a way back in — the deck, your matches and your profile are all still where you left them.
       </p>
       <div class="row">
-        <a class="btn btn-primary" href="index.html">Back to the home page</a>
-        <a class="btn btn-secondary" href="dashboard.html">Open the app</a>
+        <a class="btn btn-primary" href="index.html" data-resolve="index.html">Back to the home page</a>
+        <a class="btn btn-secondary" href="dashboard.html" data-resolve="dashboard.html">Open the app</a>
       </div>
     </div>
   </main>
@@ -287,9 +289,32 @@
   <footer class="site-foot">
     <p>
       Zero Cost AI Dating ·
-      <a href="index.html">Home</a> ·
-      <a href="auth.html">Sign in</a>
+      <a href="index.html" data-resolve="index.html">Home</a> ·
+      <a href="auth.html" data-resolve="auth.html">Sign in</a>
     </p>
   </footer>
+
+  <!-- The one inline script in the project, allowed by the CSP hash in
+       firebase.json (and the synced meta tags): it cannot be an external file,
+       because a relative src breaks on exactly the nested URLs it exists to
+       fix. Served for /nowhere/deeper, the relative links above would resolve
+       inside the missing directory; the service worker registration's scope is
+       the app's real base, recorded by any prior visit, so re-point the links
+       from it. A first-time visitor has no registration and keeps the
+       top-level-correct relative fallback. Editing this block changes its
+       hash — recompute it in firebase.json or every browser refuses to run it,
+       and tests/static.test.js fails the same way. -->
+  <script>
+    'use strict';
+    (function () {
+      if (!('serviceWorker' in navigator) || !navigator.serviceWorker.getRegistration) return;
+      navigator.serviceWorker.getRegistration().then(function (reg) {
+        if (!reg || !reg.scope) return;
+        document.querySelectorAll('a[data-resolve]').forEach(function (link) {
+          link.setAttribute('href', reg.scope + link.getAttribute('data-resolve'));
+        });
+      }).catch(function () {});
+    })();
+  </script>
 </body>
 </html>
