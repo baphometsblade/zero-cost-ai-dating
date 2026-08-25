@@ -53,8 +53,7 @@
   ];
 
   // Links are resolved against the folder this script was served from, so the
-  // nav keeps working from a sub-directory deploy and from 404.html, which
-  // Hosting serves under whatever deep URL the visitor typed.
+  // nav keeps working from a sub-directory deploy.
   const SELF_SRC = (document.currentScript && document.currentScript.src) || '';
   const SELF_RE = /js\/app\.js(?:[?#].*)?$/;
   const BASE = SELF_RE.test(SELF_SRC) ? SELF_SRC.replace(SELF_RE, '') : '';
@@ -542,19 +541,6 @@
     });
   }
 
-  /**
-   * Re-point `[data-resolve]` links at the deployed folder. 404.html can be
-   * served under any URL, which would otherwise break its relative links.
-   * @returns {void}
-   */
-  function resolveDeferredLinks() {
-    if (!BASE) return;
-    $$('a[data-resolve]').forEach(function (link) {
-      const target = link.getAttribute('data-resolve') || link.getAttribute('href');
-      if (target) link.setAttribute('href', url(target));
-    });
-  }
-
   /* ------------------------------------------------------------------------
      8. Readiness and boot
      ------------------------------------------------------------------------ */
@@ -663,7 +649,6 @@
 
     if (ZC.ui && typeof ZC.ui.mountToastHost === 'function') ZC.ui.mountToastHost();
     wireSignOut();
-    resolveDeferredLinks();
     registerServiceWorker();
 
     const page = currentPage();

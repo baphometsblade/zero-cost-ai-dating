@@ -49,9 +49,11 @@ const CORE_SCRIPTS = [
   'js/app.js'
 ];
 
-// 404.html is served without Firebase: it only needs utils + app.
+// 404.html loads no scripts at all: it answers *nested* missing paths too,
+// where a relative js/… src would resolve inside the missing directory and
+// 404 in turn, so the page ships fully self-contained.
 const MINIMAL_PAGES = {
-  '404.html': ['js/utils.js', 'js/app.js']
+  '404.html': []
 };
 
 // Every page the ownership map promises. A missing one is a dead link waiting

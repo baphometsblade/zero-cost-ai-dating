@@ -1,0 +1,85 @@
+# The live demo, deployed to GitHub Pages.
+#
+# The app runs fully without a Firebase project — the data-store falls back to
+# localStorage with a bundled cast — which means the demo can be *hosted* for the same
+# $0 the rest of the project costs: publish public/ as a project site at
+# https://baphometsblade.github.io/zero-cost-ai-dating/ and there is nothing else to run.
+#
+# Two things about Pages shaped the code rather than this file, and are worth knowing
+# when reading it:
+#
+#   - A project site lives under a subpath, not the origin root. Every link in the app
+#     is relative for exactly this reason, the manifest's scope is './', and sw.js
+#     derives its base from its own URL instead of assuming '/'.
+#
+#   - Pages cannot set HTTP response headers. The Content-Security-Policy that Firebase
+#     Hosting sends as a header therefore also ships as a <meta> tag in every page
+#     (tests/csp-sync.test.js holds the two in lockstep); the remaining headers exist
+#     only on Firebase Hosting, which stays the recommended host for a real deployment —
+#     see docs/DEPLOY.md.
+#
+# Deploys only from main, so nothing reaches the public site without going through the
+# CI workflow on a pull request first. Firebase deploys are unaffected and stay a
+# deliberate local `npm run deploy`.
+name: pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# The deploy needs exactly what actions/deploy-pages documents: pages to publish,
+# id-token for the OIDC handshake that proves the artifact came from this workflow.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time, and never cancel a running one: a half-cancelled deploy can
+# leave the site on an artifact no commit points at.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Publish the demo to GitHub Pages
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The suite is dependency-free and runs in seconds; a shell the unit tests
+      # reject must never be published, even though main is already gated by CI.
+      - name: Run tests before publishing
+        run: npm test
+
+      # enablement creates the Pages site on the first run, so turning the demo on
+      # is this file landing on main — no console clicking required.
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      # public/ is the whole site: no build step exists anywhere in this project,
+      # and what is uploaded is byte-for-byte what the repository carries.
+      - name: Upload public/ as the Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
