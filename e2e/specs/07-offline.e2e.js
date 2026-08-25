@@ -32,11 +32,21 @@ module.exports = {
       const cached = await page.evaluate(function () {
         const wanted = ['index.html', 'matches.html', '404.html'];
         const deadline = Date.now() + 15000;
+        // Find the shell by the cache-name prefix rather than the exact
+        // version: sw.js bumps its CACHE constant whenever the shell changes,
+        // and pinning the literal here would fail this spec on every bump for
+        // reasons that have nothing to do with offline behaviour.
+        function holdsShell(name) {
+          return caches.open(name).then(function (cache) {
+            return Promise.all(wanted.map(function (file) { return cache.match(file); }));
+          }).then(function (hits) { return hits.every(Boolean); });
+        }
         function poll() {
-          return caches.open('zc-static-v2').then(function (cache) {
-            return Promise.all(wanted.map(function (name) { return cache.match(name); }));
-          }).then(function (hits) {
-            if (hits.every(Boolean)) return true;
+          return caches.keys().then(function (names) {
+            const mine = names.filter(function (name) { return name.indexOf('zc-static-') === 0; });
+            return Promise.all(mine.map(holdsShell));
+          }).then(function (flags) {
+            if (flags.some(Boolean)) return true;
             if (Date.now() > deadline) return false;
             return new Promise(function (resolve) { setTimeout(resolve, 200); }).then(poll);
           });

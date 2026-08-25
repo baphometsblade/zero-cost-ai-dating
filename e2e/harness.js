@@ -97,10 +97,19 @@ function resolveFile(root, pathname) {
  * Serve `public/` on an ephemeral port. Ephemeral because several specs run in
  * the same process and one of them deliberately kills its server mid-test.
  * @param {string} [root=PUBLIC_DIR] directory to serve
- * @returns {Promise<{origin:string, stop:function():Promise<void>}>}
+ * @param {Object} [opts]
+ * @param {string} [opts.mountPath] serve the site under this prefix instead of
+ *   the root, the way GitHub Pages serves a project site
+ *   (e.g. '/zero-cost-ai-dating'); requests outside it get the 404 treatment
+ * @returns {Promise<{origin:string, base:string, stop:function():Promise<void>}>}
  */
-async function startServer(root) {
+async function startServer(root, opts) {
   const dir = path.resolve(root || PUBLIC_DIR);
+  // '' when serving from the root, or a prefix with no trailing slash when a
+  // spec asks for the GitHub Pages shape. With '' the checks below reduce to
+  // "pathname starts with '/'", which is always true, so every existing caller
+  // sees exactly the behaviour this server has always had.
+  const mount = (opts && opts.mountPath) ? String(opts.mountPath).replace(/\/+$/, '') : '';
   const server = http.createServer(function (req, res) {
     let pathname = '/';
     try {
@@ -108,7 +117,20 @@ async function startServer(root) {
     } catch (err) {
       pathname = '/';
     }
-    const file = resolveFile(dir, pathname);
+    // Pages answers the slashless project URL with a redirect to the slash
+    // form, so the page's relative URLs resolve inside the site; mirror that
+    // rather than serving index.html under a base every relative link breaks
+    // on — a spec must not go green against a URL shape production redirects.
+    if (mount && pathname === mount) {
+      res.writeHead(301, { location: mount + '/' });
+      res.end();
+      return;
+    }
+    // Under a mount only paths below mountPath exist; anything else is a
+    // miss, exactly as Pages answers a URL outside the project. What is left
+    // after the prefix comes off resolves the same way as at the root.
+    const inSite = pathname.indexOf(mount + '/') === 0;
+    const file = inSite ? resolveFile(dir, pathname.slice(mount.length)) : null;
     const target = file || path.join(dir, '404.html');
     fs.readFile(target, function (err, body) {
       if (err) {
@@ -135,13 +157,18 @@ async function startServer(root) {
   });
 
   const port = server.address().port;
+  const origin = 'http://127.0.0.1:' + port;
   // Latched so the second stop() is a no-op that still resolves. The offline
   // spec stops its server mid-test (taking it away *is* the test) and stops it
   // again in its finally, which is the only cleanup that runs when an earlier
   // check bails out. Without the latch that pair raises ERR_SERVER_NOT_RUNNING.
   let closing = null;
   return {
-    origin: 'http://127.0.0.1:' + port,
+    origin: origin,
+    // Where the site's pages actually start: origin + '/' at the root,
+    // origin + mountPath + '/' under a mount. Specs that must not assume root
+    // hosting build every URL from this instead of from origin.
+    base: origin + mount + '/',
     /**
      * Stop listening *and* drop live sockets, so the next request truly fails.
      * Idempotent: calling it again returns the same promise.

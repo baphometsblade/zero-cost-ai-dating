@@ -10,7 +10,12 @@
 'use strict';
 
 // Bump the version to retire every previously cached asset on next activate.
-const CACHE = 'zc-static-v2';
+const CACHE = 'zc-static-v3';
+
+// The directory this worker was served from: '/' on Firebase Hosting, or a
+// project subpath like '/zero-cost-ai-dating/' on GitHub Pages. Every path
+// computed below is relative to it, so the same worker serves both hosts.
+const BASE = new URL('./', self.location).pathname;
 
 // The app shell, cached up front so a first visit can go offline immediately.
 const CORE = [
@@ -79,15 +84,20 @@ self.addEventListener('fetch', function (event) {
       }
       return response;
     }).catch(function () {
-      // Navigations are cached under their file names, but with Hosting's
-      // cleanUrls the address bar says '/', '/matches', … — map the pathname
-      // back to its page ('/' -> index.html, '/matches' -> matches.html) so
-      // offline navigation serves the right shell, never the 404 page for a
-      // page that is actually cached.
+      // Navigations are cached under their file names, but the address bar
+      // says BASE, BASE + 'matches', … — on Firebase Hosting because cleanUrls
+      // drops the .html, on GitHub Pages because the app lives under the
+      // project subpath. Strip BASE first, then map what is left back to its
+      // page ('' -> index.html, 'matches' -> matches.html) so offline
+      // navigation serves the right shell on either host, never the 404 page
+      // for a page that is actually cached.
       if (request.mode === 'navigate') {
-        const page = url.pathname === '/'
+        const rel = url.pathname.indexOf(BASE) === 0
+          ? url.pathname.slice(BASE.length)
+          : url.pathname.replace(/^\/+/, '');
+        const page = rel === ''
           ? 'index.html'
-          : url.pathname.replace(/^\//, '').replace(/\.html$/, '') + '.html';
+          : rel.replace(/\.html$/, '') + '.html';
         return caches.match(page).then(function (hit) {
           return hit || caches.match('404.html');
         });

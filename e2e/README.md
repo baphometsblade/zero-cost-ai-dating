@@ -34,6 +34,7 @@ npm run test:e2e -- --viewport=mobile  # only 390x844
 | `run.js` | the runner: loads specs, opens a context per spec and viewport, prints results, exits non-zero on any failure |
 | `harness.js` | finding Playwright, serving `public/` the way Firebase Hosting does (clean URLs), opening a browser session, and the page steps every spec shares |
 | `specs/*.e2e.js` | one flow each, in file-name order |
+| `specs/09-subpath.e2e.js` | the one spec that skips the shared server: it mounts `public/` at `/zero-cost-ai-dating`, the way GitHub Pages serves a project site, and proves navigation, the service worker and the 404 page all survive the subpath |
 
 A spec exports `{ title, viewports, run(t, page, ctx) }`. `t.check(name, ok, detail)`
 records one named expectation and keeps going; throwing aborts that spec and fails it.

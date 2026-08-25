@@ -3,14 +3,266 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- The firebase.json CSP header, repeated here minus frame-ancestors (ignored in meta delivery) because GitHub Pages cannot set headers. tests/csp-sync.test.js keeps the two copies in lockstep. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-hLOYNm57xAg2n/Z01Pi9qiT3MSokGFN3uN7cWS3V/AE=' https://www.gstatic.com https://apis.google.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firestore.googleapis.com; frame-src https://*.firebaseapp.com https://accounts.google.com; base-uri 'self'; form-action 'self'; object-src 'none'">
   <title>Page not found — Zero Cost AI Dating</title>
   <meta name="description" content="That page does not exist. Head back to the Zero Cost AI Dating landing page or straight into the app.">
   <meta name="color-scheme" content="light dark">
-  <link rel="icon" type="image/svg+xml" href="favicon.svg">
-  <link rel="manifest" href="manifest.webmanifest">
   <meta name="theme-color" content="#e8446a">
-  <link rel="stylesheet" href="css/style.css">
-  <link rel="stylesheet" href="css/components.css">
+  <!-- This page answers *any* missing URL, including nested ones like /a/b/c,
+       where a relative css/style.css would resolve inside the missing
+       directory and 404 in turn. So it is fully self-contained: the favicon
+       is a data: URI (the same heart as favicon.svg), the styles live in the
+       one <style> element below, and nothing external is loaded. The relative
+       links in the body are correct for a top-level miss; for a nested one,
+       the hash-allowed script at the end of the body re-points them at the
+       service worker registration's scope — the one durable record of where
+       the app actually lives — whenever a prior visit has left one. -->
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23ff6b8a'/%3E%3Cstop offset='1' stop-color='%23c2244b'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='url(%23g)'/%3E%3Cpath fill='%23fff' d='M32 47.5c-.6 0-1.2-.2-1.7-.6C24 41.6 15 34.2 15 26.3 15 20.6 19.4 16 24.9 16c2.8 0 5.4 1.2 7.1 3.3A9.2 9.2 0 0 1 39.1 16C44.6 16 49 20.6 49 26.3c0 7.9-9 15.3-15.3 20.6-.5.4-1.1.6-1.7.6z'/%3E%3C/svg%3E">
+  <style>
+    /* A hand-trimmed copy of the css/style.css rules this page actually uses,
+       tokens included — the values must stay in lockstep with the token block
+       at the top of that file. No script runs here, so the OS preference is
+       the only theme input and plain :root (not :root:not([data-theme]))
+       carries the dark palette. */
+    :root {
+      color-scheme: light;
+
+      --brand-600: #c2244b;
+      --brand-fill-from: var(--brand-600);
+      --brand-fill-to: #9c1339;
+      --on-brand: #ffffff;
+      --brand-soft: #ffe6ec;
+      --focus: #6c5ce7;
+
+      --bg: #fbf7f6;
+      --bg-elev: #ffffff;
+      --border: #e9dfdd;
+      --text: #1f1a1b;
+      --text-muted: #6d6164;
+      --text-faint: #6f6467;
+
+      --radius-lg: 22px;
+      --radius-full: 999px;
+
+      --space-2: 8px;
+      --space-3: 12px;
+      --space-4: 16px;
+      --space-5: 24px;
+      --space-6: 32px;
+      --space-7: 48px;
+
+      --shadow-1: 0 1px 2px rgba(31, 22, 26, 0.06), 0 2px 6px rgba(31, 22, 26, 0.05);
+      --shadow-brand: 0 8px 20px rgba(232, 68, 106, 0.28);
+
+      --font-sans: ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Inter, sans-serif;
+      --fs-xs: 0.75rem;
+      --fs-sm: 0.875rem;
+      --fs-md: 1rem;
+      --fs-xl: 1.375rem;
+      --fs-2xl: 1.75rem;
+
+      --maxw: 1120px;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        color-scheme: dark;
+
+        --brand-600: #ff819c;
+        --brand-fill-from: #ff97ae;
+        --brand-fill-to: var(--brand-600);
+        --on-brand: #2a0d15;
+        --brand-soft: #3b1a24;
+        --focus: #8b7bf0;
+
+        --bg: #121011;
+        --bg-elev: #1b1719;
+        --border: #342c30;
+        --text: #f7f1f2;
+        --text-muted: #b6a8ad;
+        --text-faint: #9d9094;
+
+        --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 6px rgba(0, 0, 0, 0.3);
+        --shadow-brand: 0 8px 22px rgba(255, 92, 128, 0.32);
+      }
+    }
+
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: var(--font-sans);
+      font-size: var(--fs-md);
+      line-height: 1.55;
+      color: var(--text);
+      background-color: var(--bg);
+      background-image:
+        radial-gradient(1000px 520px at 8% -8%, rgba(232, 68, 106, 0.09), transparent 62%),
+        radial-gradient(880px 480px at 96% 4%, rgba(108, 92, 231, 0.08), transparent 60%);
+      background-repeat: no-repeat;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    h1,
+    h2,
+    p {
+      margin: 0;
+    }
+
+    h2 {
+      font-size: var(--fs-xl);
+      line-height: 1.18;
+      letter-spacing: -0.02em;
+      font-weight: 800;
+    }
+
+    a {
+      color: var(--brand-600);
+      text-decoration: none;
+      font-weight: 600;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    :focus-visible {
+      outline: 3px solid var(--focus);
+      outline-offset: 2px;
+    }
+
+    .app-shell {
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+
+    .app-shell > main {
+      flex: 1 1 auto;
+    }
+
+    .container {
+      width: 100%;
+      max-width: var(--maxw);
+      margin-inline: auto;
+      padding-inline: var(--space-4);
+    }
+
+    .page-head {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-2);
+      padding: var(--space-5) 0 var(--space-4);
+    }
+
+    .page-title {
+      font-size: var(--fs-2xl);
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      line-height: 1.15;
+    }
+
+    .page-sub {
+      color: var(--text-muted);
+      font-size: var(--fs-sm);
+      max-width: 62ch;
+    }
+
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: var(--space-3);
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: var(--space-2);
+      min-height: 44px;
+      padding: 10px var(--space-5);
+      border: 1px solid transparent;
+      border-radius: var(--radius-full);
+      background: var(--bg-elev);
+      color: var(--text);
+      font-size: var(--fs-sm);
+      font-weight: 700;
+      line-height: 1.2;
+      text-align: center;
+      text-decoration: none;
+      cursor: pointer;
+    }
+
+    .btn:hover {
+      text-decoration: none;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--brand-fill-from), var(--brand-fill-to));
+      color: var(--on-brand);
+      box-shadow: var(--shadow-brand);
+    }
+
+    .btn-secondary {
+      background: var(--bg-elev);
+      border-color: var(--border);
+      color: var(--text);
+      box-shadow: var(--shadow-1);
+    }
+
+    .empty {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: var(--space-3);
+      padding: var(--space-7) var(--space-5);
+      border: 1.5px dashed var(--border);
+      border-radius: var(--radius-lg);
+      background: var(--bg-elev);
+      text-align: center;
+      color: var(--text-muted);
+    }
+
+    .empty h2 {
+      color: var(--text);
+    }
+
+    .empty p {
+      max-width: 44ch;
+      font-size: var(--fs-sm);
+    }
+
+    .empty-icon {
+      display: grid;
+      place-items: center;
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      background: var(--brand-soft);
+      font-size: 30px;
+      line-height: 1;
+    }
+
+    .site-foot {
+      margin-top: auto;
+      padding: var(--space-5) var(--space-4) var(--space-6);
+      border-top: 1px solid var(--border);
+      color: var(--text-faint);
+      font-size: var(--fs-xs);
+      text-align: center;
+    }
+
+    .site-foot a {
+      color: var(--text-muted);
+    }
+  </style>
 </head>
 <body class="app-shell">
   <main class="container">
@@ -42,7 +294,27 @@
     </p>
   </footer>
 
-  <script src="js/utils.js"></script>
-  <script src="js/app.js"></script>
+  <!-- The one inline script in the project, allowed by the CSP hash in
+       firebase.json (and the synced meta tags): it cannot be an external file,
+       because a relative src breaks on exactly the nested URLs it exists to
+       fix. Served for /nowhere/deeper, the relative links above would resolve
+       inside the missing directory; the service worker registration's scope is
+       the app's real base, recorded by any prior visit, so re-point the links
+       from it. A first-time visitor has no registration and keeps the
+       top-level-correct relative fallback. Editing this block changes its
+       hash — recompute it in firebase.json or every browser refuses to run it,
+       and tests/static.test.js fails the same way. -->
+  <script>
+    'use strict';
+    (function () {
+      if (!('serviceWorker' in navigator) || !navigator.serviceWorker.getRegistration) return;
+      navigator.serviceWorker.getRegistration().then(function (reg) {
+        if (!reg || !reg.scope) return;
+        document.querySelectorAll('a[data-resolve]').forEach(function (link) {
+          link.setAttribute('href', reg.scope + link.getAttribute('data-resolve'));
+        });
+      }).catch(function () {});
+    })();
+  </script>
 </body>
 </html>

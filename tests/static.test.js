@@ -49,9 +49,11 @@ const CORE_SCRIPTS = [
   'js/app.js'
 ];
 
-// 404.html is served without Firebase: it only needs utils + app.
+// 404.html loads no scripts at all: it answers *nested* missing paths too,
+// where a relative js/… src would resolve inside the missing directory and
+// 404 in turn, so the page ships fully self-contained.
 const MINIMAL_PAGES = {
-  '404.html': ['js/utils.js', 'js/app.js']
+  '404.html': []
 };
 
 // Every page the ownership map promises. A missing one is a dead link waiting
@@ -243,10 +245,13 @@ test('(b) the script block matches the load order in §2', function () {
     const srcs = scripts.map(function (tag) { return tag.attrs.src || ''; });
 
     if (Object.prototype.hasOwnProperty.call(MINIMAL_PAGES, page.name)) {
-      // 404.html has its own, shorter list.
+      // 404.html has its own, shorter list. Only external scripts are load
+      // order; whether an inline body may exist at all is check (c)'s hash
+      // rule, not a question of ordering.
       const expected = MINIMAL_PAGES[page.name];
-      if (srcs.join('|') !== expected.join('|')) {
-        problems.push(page.rel + ' loads [' + srcs.join(', ') + '] but must load exactly [' +
+      const external = srcs.filter(function (src) { return src !== ''; });
+      if (external.join('|') !== expected.join('|')) {
+        problems.push(page.rel + ' loads [' + external.join(', ') + '] but must load exactly [' +
           expected.join(', ') + ']');
       }
       return;
@@ -308,12 +313,32 @@ test('(b) the script block matches the load order in §2', function () {
 test('(c) no inline script bodies, style attributes or on* handlers', function () {
   const problems = [];
 
+  // The one exception to "no inline scripts": a body whose CSP hash the policy
+  // in firebase.json explicitly lists. That is exactly the rule the browser
+  // itself applies, so this check can never drift from what actually ships —
+  // and editing a hash-allowed script without recomputing its hash fails here
+  // for the same reason it would fail in the browser. (404.html's link
+  // resolver is the only such script; it cannot be an external file because a
+  // relative src breaks on the nested URLs it exists to fix.)
+  const crypto = require('node:crypto');
+  const csp = JSON.parse(fs.readFileSync(path.join(ROOT, 'firebase.json'), 'utf8'))
+    .hosting.headers.flatMap(function (h) { return h.headers; })
+    .find(function (h) { return h.key === 'Content-Security-Policy'; }).value;
+  const hashAllowed = function (body) {
+    const hash = crypto.createHash('sha256').update(body, 'utf8').digest('base64');
+    return csp.indexOf("'sha256-" + hash + "'") !== -1;
+  };
+
   PAGES.forEach(function (page) {
-    // Inline <script> bodies: blocked by script-src 'self'.
+    // Inline <script> bodies: blocked by script-src 'self' unless hash-listed.
     parseScripts(page.html).forEach(function (tag) {
       const line = lineAt(page.html, tag.index);
       if (!tag.attrs.src) {
-        problems.push(page.rel + ':' + line + ' has a <script> without src (inline scripts are CSP-blocked)');
+        if (!hashAllowed(tag.body)) {
+          problems.push(page.rel + ':' + line + ' has an inline <script> whose hash the CSP does not list' +
+            ' (inline scripts are CSP-blocked; if this one is intentional, add its sha256 to firebase.json' +
+            ' and the synced meta tags)');
+        }
       } else if (tag.body.trim() !== '') {
         problems.push(page.rel + ':' + line + ' has a non-empty <script> body: "' +
           tag.body.trim().slice(0, 48) + '"');

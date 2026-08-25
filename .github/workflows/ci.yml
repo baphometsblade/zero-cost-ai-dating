@@ -17,7 +17,9 @@
 #     Same arrangement as e2e: emulator and testing library installed into the runner's
 #     temp directory, never into the repository.
 #
-# No secrets, no deploy step — deploys stay a deliberate local `npm run deploy`.
+# No secrets, no deploy step — Firebase deploys stay a deliberate local `npm run
+# deploy`; the GitHub Pages demo has its own workflow (pages.yml), which only ever
+# runs after a merge to main and so only ever publishes what these jobs let through.
 name: CI
 
 on:

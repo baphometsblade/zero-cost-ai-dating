@@ -8,6 +8,32 @@ Budget about fifteen minutes, most of which is waiting for Firestore indexes to 
 
 ---
 
+## GitHub Pages (the live demo) — and why it is not this guide
+
+The repository also publishes itself to GitHub Pages: `.github/workflows/pages.yml` uploads
+`public/` on every push to `main`, which is what serves the
+[live demo](https://baphometsblade.github.io/zero-cost-ai-dating/). That deploy is demo mode
+only — no Firebase project is attached, so there are no accounts and no shared database;
+every visitor gets the seeded cast in their own browser's `localStorage`.
+
+Two Pages constraints are worth knowing because they shaped the code:
+
+- **A project site lives under a subpath** (`/zero-cost-ai-dating/`), not the origin root.
+  This is why every link in the app is relative, the manifest's `scope` is `./`, and
+  `sw.js` derives its base from its own URL instead of assuming `/`.
+- **Pages cannot set HTTP response headers.** The `Content-Security-Policy` that Firebase
+  Hosting sends as a header (from `firebase.json`) therefore also ships as a `<meta>` tag in
+  every page, and `tests/csp-sync.test.js` fails the suite if the two ever drift. The other
+  headers — `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, and the
+  `Cache-Control` tiers — cannot be expressed as meta tags and exist only on Firebase
+  Hosting.
+
+That second point is the reason the rest of this guide exists: for a real deployment with
+accounts, a shared database, and the full header set, Firebase Hosting on the Spark plan is
+the recommended host. Everything below is that path.
+
+---
+
 ## Before you start
 
 | You need | Notes |
