@@ -65,6 +65,13 @@
   const DEMO_UID = 'demo-you';
 
   /**
+   * The three daily counters, each mapped onto the plan limit it spends
+   * against. This is the only list of usage fields there is: nextUsage tests
+   * membership against it and canSpend reads the limit key out of it.
+   */
+  const LIMIT_FIELDS = { likes: 'likesPerDay', superLikes: 'superLikesPerDay', rewinds: 'rewinds' };
+
+  /**
    * The canonical UserDoc with sane defaults. Treat it as read-only — every
    * writer merges a copy of it so all agents agree on the shape.
    */
@@ -212,16 +219,59 @@
   /**
    * Coerce a usage record into `{ date, likes, superLikes, rewinds }`.
    * @param {Object} usage raw usage record
-   * @returns {Object} usage record (date defaults to today)
+   * @param {string} [today] the day a record with no usable `date` is taken to
+   *   belong to. Callers that already know the day pass it; only the ones that
+   *   are genuinely reading "now" (normalizeUser, getUsage) may leave it out
+   *   and take the clock, because a record with no date has to be called
+   *   something and today is the only honest guess a reader can make.
+   * @returns {Object} usage record
    */
-  function normalizeUsage(usage) {
+  function normalizeUsage(usage, today) {
     const u = isPlainObject(usage) ? usage : {};
+    const day = typeof today === 'string' && today ? today : todayKey();
     return {
-      date: typeof u.date === 'string' && u.date ? u.date : todayKey(),
+      date: typeof u.date === 'string' && u.date ? u.date : day,
       likes: Math.max(0, Number(u.likes) || 0),
       superLikes: Math.max(0, Number(u.superLikes) || 0),
       rewinds: Math.max(0, Number(u.rewinds) || 0)
     };
+  }
+
+  /**
+   * Decide what a usage record becomes after one bump. Pure and deterministic
+   * — no storage and no clock — so the Firestore transaction and the demo
+   * adapter can replay the same decision and always agree. `today` is the
+   * only day this function knows about, including for a record whose own
+   * `date` is missing or unusable: that record is taken to belong to `today`
+   * rather than to whatever the clock says, or the same arguments would give
+   * different answers on different days and a retried transaction could
+   * disagree with its first attempt.
+   *
+   * A stale `date` rolls over to today's zeros *before* the amount lands.
+   * That ordering is the whole reason a bare FieldValue.increment cannot do
+   * this job: increment can add 1 atomically, but it cannot also decide that
+   * yesterday's 25 should have been a 0 first.
+   *
+   * @param {Object} current the stored usage record (missing or corrupt is fine)
+   * @param {string} field counter to move: 'likes', 'superLikes' or 'rewinds';
+   *   anything else leaves the counters alone (the roll-over still applies)
+   * @param {number} [amount=1] how far to move it — a negative amount is
+   *   allowed but the counter clamps at 0
+   * @param {string} today the YYYY-MM-DD day the result belongs to
+   * @returns {{date:string, likes:number, superLikes:number, rewinds:number}} a new record
+   */
+  function nextUsage(current, field, amount, today) {
+    // Callers always know the day; the fallback only stops a careless one from
+    // writing a record dated `undefined`.
+    const day = typeof today === 'string' && today ? today : todayKey();
+    const base = normalizeUsage(current, day);
+    const usage = base.date === day
+      ? { date: day, likes: base.likes, superLikes: base.superLikes, rewinds: base.rewinds }
+      : { date: day, likes: 0, superLikes: 0, rewinds: 0 };
+    if (!Object.prototype.hasOwnProperty.call(LIMIT_FIELDS, field)) return usage;
+    const by = amount === undefined ? 1 : Number(amount) || 0;
+    usage[field] = Math.max(0, usage[field] + by);
+    return usage;
   }
 
   /** A stand-in doc for a match whose other half is missing from storage. */
@@ -898,6 +948,20 @@
       return true;
     },
 
+    async bumpUsage(uid, field, by) {
+      // One tab, one thread, one storage entry — the correctness worth having
+      // here is agreeing with the Firestore adapter, so the decision comes
+      // from the same pure function and only the `usage` field is touched.
+      const users = readUsers();
+      const stored = isPlainObject(users[uid]) ? users[uid] : null;
+      const usage = nextUsage(stored && stored.usage, field, by, todayKey());
+      // No account, nothing to write — the caller still gets today's view.
+      if (!stored) return usage;
+      stored.usage = usage;
+      writeUsers(users);
+      return usage;
+    },
+
     async reportUser(fromUid, aboutUid, reason, details) {
       const report = shapeReport(fromUid, aboutUid, reason, details);
       // Same deterministic id convention as the Firestore adapter: one report
@@ -1227,6 +1291,27 @@
   }
 
   /**
+   * The last `usage` the SDK already holds for a user, without touching the
+   * network. Only reached when a bump's transaction failed before its read
+   * landed — offline, in practice. Without it the optimistic answer would
+   * restart the day at 1 for someone who had already spent twelve likes,
+   * which is a worse lie than "the last count we saw, plus this swipe".
+   * @param {Object} ref the users/{uid} document reference
+   * @returns {Promise<Object|null>} the cached usage record, or null when the
+   *   SDK has never seen this document
+   */
+  async function cachedUsage(ref) {
+    try {
+      const snap = await ref.get({ source: 'cache' });
+      return snap.exists ? (snap.data() || {}).usage || null : null;
+    } catch (err) {
+      // Nothing cached. The caller then answers for a fresh day, which is
+      // genuinely all it knows.
+      return null;
+    }
+  }
+
+  /**
    * Fetch several public discovery profiles at once, tolerating individual
    * failures. Other people are only ever read through this projection.
    * @param {string[]} uids ids to fetch
@@ -1263,6 +1348,12 @@
     },
 
     async createUser(uid, partial) {
+      // Not a transaction, unlike updateUser: this only ever runs after
+      // getUser came back empty (see auth.js loadOrCreateDoc), and every field
+      // it writes is a fresh default — there is no earlier value for a racing
+      // write to revert. Two tabs signing in at the same instant would both
+      // write the same defaults, which is the one read-modify-write in this
+      // file that genuinely has nothing to lose.
       const stamp = nowIso();
       const user = normalizeUser(partial || {});
       user.uid = String(uid);
@@ -1276,18 +1367,42 @@
     },
 
     async updateUser(uid, patch) {
-      // Read-modify-write so nested maps behave exactly like the demo adapter
-      // (a merged set would resurrect keys that learning pruning removed).
+      // Still a read-modify-write with a whole-document set, so nested maps
+      // behave exactly like the demo adapter (a merged set would resurrect
+      // keys that learning pruning removed) — but the read and the set are one
+      // atomic unit now. They have to be: a set writes back every field it
+      // read, so anything that landed in between is silently reverted, and
+      // dashboard.js makes that the ordinary case rather than an exotic one.
+      // Every swipe leaves this write in flight across the usage transaction,
+      // and a plain get-then-set put `usage` back the way it read it and threw
+      // the increment away. Firestore replays the callback when the document
+      // moved under it, so whichever write loses the race re-reads and both
+      // survive.
+      // The projection goes in the same transaction, which is why this is not
+      // writeDiscovery(): two concurrent saves commit their user documents in
+      // one order, but two independent follow-up writes can land in the other,
+      // leaving discovery/{uid} holding the older profile while users/{uid}
+      // holds the newer one. A transaction writes both or neither, and
+      // whichever save commits second has read the first. (Transaction writes
+      // are buffered until commit, so a replayed attempt does not republish
+      // anything — the reason this used to sit outside does not hold.)
+      // The cost is that a rejected projection now fails the whole save
+      // instead of warning: both documents are validated by the same rules
+      // from the same values, so that means a real bug, and stopping is better
+      // than a public profile that silently drifts from the private one.
       const ref = db().collection('users').doc(uid);
-      const snap = await ref.get();
-      const base = snap.exists ? snap.data() || {} : { uid: uid };
-      const user = normalizeUser(deepMerge(base, patch || {}));
-      user.uid = String(uid);
-      if (!user.createdAt) user.createdAt = nowIso();
-      user.updatedAt = nowIso();
-      await ref.set(user);
-      await writeDiscovery(user);
-      return user;
+      const shadow = db().collection('discovery').doc(String(uid));
+      return db().runTransaction(async function (tx) {
+        const snap = await tx.get(ref);
+        const base = snap.exists ? snap.data() || {} : { uid: uid };
+        const merged = normalizeUser(deepMerge(base, patch || {}));
+        merged.uid = String(uid);
+        if (!merged.createdAt) merged.createdAt = nowIso();
+        merged.updatedAt = nowIso();
+        tx.set(ref, merged);
+        tx.set(shadow, projectDiscovery(merged));
+        return merged;
+      });
     },
 
     async setLastActive(uid, iso) {
@@ -1610,6 +1725,42 @@
       }
     },
 
+    async bumpUsage(uid, field, by) {
+      // Two tabs swiping at once used to collapse into one increment: both
+      // read N, both wrote N+1. A transaction closes that — Firestore replays
+      // the whole read-decide-write on contention, so the second attempt sees
+      // the first one's number. It writes `usage` and nothing else, which also
+      // keeps a swipe from rewriting the doc and re-projecting `discovery`
+      // (usage is deliberately absent from that projection).
+      const today = todayKey();
+      const ref = db().collection('users').doc(uid);
+      // Whatever the last attempt managed to read, kept for the offline answer
+      // below. `read` is tracked apart from `seen` because the two ways of
+      // having no record mean opposite things: a read that landed on a
+      // document with no usage really is a fresh day, while a read that never
+      // landed knows nothing — and answering 1 there would tell someone who
+      // had spent twelve likes today that their budget was untouched.
+      let seen = null;
+      let read = false;
+      try {
+        return await db().runTransaction(async function (tx) {
+          const snap = await tx.get(ref);
+          seen = snap.exists ? (snap.data() || {}).usage : null;
+          read = true;
+          const usage = nextUsage(seen, field, by, today);
+          tx.update(ref, { usage: usage });
+          return usage;
+        });
+      } catch (err) {
+        // Transactions need a server round-trip, so they fail offline. A
+        // counter that did not persist must never take the deck down: warn,
+        // hand back the optimistic figure, carry on.
+        console.warn('[zc.store] Could not persist usage.', err);
+        if (!read) seen = await cachedUsage(ref);
+        return nextUsage(seen, field, by, today);
+      }
+    },
+
     async reportUser(fromUid, aboutUid, reason, details) {
       const report = shapeReport(fromUid, aboutUid, reason, details);
       // Deterministic id: one report per (reporter, subject) pair, which is
@@ -1762,9 +1913,6 @@
   })();
 
   const lastTouch = {};
-
-  /** Map a usage field onto the matching plan limit. */
-  const LIMIT_FIELDS = { likes: 'likesPerDay', superLikes: 'superLikesPerDay', rewinds: 'rewinds' };
 
   function planLimits(plan) {
     const limits = (ZC.config && ZC.config.limits) || {};
@@ -1981,7 +2129,9 @@
 
     /**
      * Today's usage counters, reset automatically when the stored date is not
-     * today (the reset is persisted).
+     * today. The reset is persisted through the same atomic path a bump takes,
+     * so a roll-over and a swipe racing each other cannot overwrite one
+     * another the way two plain read-modify-writes could.
      * @param {string} uid user id
      * @returns {Promise<{date:string, likes:number, superLikes:number, rewinds:number}>}
      */
@@ -1994,17 +2144,15 @@
       if (!user) return empty;
       const usage = normalizeUsage(user.usage);
       if (usage.date === today) return usage;
-      const fresh = { date: today, likes: 0, superLikes: 0, rewinds: 0 };
-      try {
-        await adapter.updateUser(uid, { usage: fresh });
-      } catch (err) {
-        console.warn('[zc.store] Could not persist the daily usage reset.', err);
-      }
-      return fresh;
+      // No field to move: the bump is the roll-over itself, and it already
+      // swallows its own write failures.
+      return adapter.bumpUsage(uid, null, 0);
     },
 
     /**
-     * Increment one usage counter for today.
+     * Increment one usage counter for today, atomically. In Firebase mode this
+     * is a transaction, so concurrent swipes from two tabs or two devices both
+     * count; the day roll-over happens inside the same transaction.
      * @param {string} uid user id
      * @param {'likes'|'superLikes'|'rewinds'} field counter to bump
      * @param {number} [by=1] amount
@@ -2012,16 +2160,10 @@
      */
     async bumpUsage(uid, field, by) {
       await ready;
-      const usage = await store.getUsage(uid);
-      if (!uid || !Object.prototype.hasOwnProperty.call(LIMIT_FIELDS, field)) return usage;
-      const amount = by === undefined ? 1 : Number(by) || 0;
-      usage[field] = Math.max(0, usage[field] + amount);
-      try {
-        await adapter.updateUser(uid, { usage: usage });
-      } catch (err) {
-        console.warn('[zc.store] Could not persist usage.', err);
-      }
-      return usage;
+      // An unknown field still gets today's honest view (and rolls the day
+      // over if it is stale), it just never moves a counter.
+      if (!uid || !Object.prototype.hasOwnProperty.call(LIMIT_FIELDS, field)) return store.getUsage(uid);
+      return adapter.bumpUsage(uid, field, by === undefined ? 1 : Number(by) || 0);
     },
 
     /**
@@ -2153,6 +2295,15 @@
     async importDemo(json) {
       await ready;
       return adapter.importDemo(json);
+    },
+
+    /**
+     * Pure internals, exposed the way matching-engine.js exposes its own: not
+     * part of the page-facing API, but the daily-counter arithmetic is worth
+     * exercising directly rather than only through a storage round-trip.
+     */
+    _internal: {
+      nextUsage: nextUsage
     }
   };
 

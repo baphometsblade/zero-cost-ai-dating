@@ -130,6 +130,9 @@ has, so it is worth the five minutes.
 Everything below is also *executed* — `npm run test:rules` runs the real rules file against
 the Firestore emulator, 127 checks including the attacks each rule exists to stop. If you
 change the data model, run it. See [`rules-tests/README.md`](../rules-tests/README.md).
+`npm run test:emulator` adds the store suite to the same emulator boot: 31 more checks that
+drive the shipped `public/js/data-store.js` against a real Firestore, which is where the
+daily counter's transaction is proven — see [`store-tests/README.md`](../store-tests/README.md).
 
 - `users/{uid}` — readable and writable **only by the owner**. Email, birthdate, block lists,
   usage counters and learned affinities never leave the account. Writes are validated: `plan`
@@ -183,7 +186,7 @@ firebase use --add          # pick your project, alias it "default"
 Then:
 
 ```bash
-npm test                    # 4 suites, no install required
+npm test                    # 9 suites, 201 checks, no install required
 npm run deploy              # firebase deploy --only hosting,firestore
 ```
 
@@ -294,8 +297,13 @@ The Spark plan's relevant free quotas:
 | Authentication (email + Google) | Unlimited |
 
 The site is a few hundred kilobytes and a deck load costs roughly one read per candidate, so a
-small deployment sits far inside these limits. More importantly: **on Spark, exceeding a quota
-stops the operation rather than billing you.** There is no card on file and no way for this
+small deployment sits far inside these limits. Writes are the scarcer allowance, and the ones
+this app makes are deliberately small: bumping the daily usage counter is a single-field
+transaction — one write, not the two it used to cost when it rewrote the whole user document
+and re-mirrored the public projection for a field that projection cannot contain.
+
+More importantly: **on Spark, exceeding a quota stops the operation rather than billing
+you.** There is no card on file and no way for this
 project to generate a charge, because the two products that can — Functions and Storage — are
 never enabled.
 
