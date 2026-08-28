@@ -292,13 +292,20 @@ Firebase rather than `localStorage`: the real SDK, real Auth, real Firestore, an
 read back out of the emulator instead of off the page. It drives the pages **with their real
 CSP meta tag** — the emulators are reached through the page's own origin rather than by
 relaxing the policy, which is the whole reason it can exist; the Limitations section explains
-the constraint it is working around. With both emulators up the run is **156 checks, of which
-155 pass**. The one that fails is meant to: `ZC.store.updateUser` cannot create the user
-document its own fallback branch is written to create, because `normalizeUser` fills
-`lastActiveAt` with `null` and `firestore.rules` accepts that key only as a string. The check
-asserts the corrected behaviour, so it stays red until `public/js/data-store.js` or
-`firestore.rules` changes. Without an emulator the runner prints `SKIP` and records nothing,
-so `npm run test:e2e` on a bare machine is still 142/142.
+the constraint it is working around. With both emulators up the run is **156 checks**, all
+passing.
+
+It did not start that way. On its first run one check was red, and it had found a real bug:
+`ZC.store.updateUser` could not create a user document at all, because `normalizeUser` writes
+`lastActiveAt: null` for an account that has never been seen while `firestore.rules` accepted
+that key only as a string — two lines below an explicit allowance for a null `planSince`. The
+demo adapter had always upserted happily, so the two adapters had quietly disagreed, and no
+fixture in `rules-tests/` ever used a null there. The rule now accepts null, and two rules
+checks pin the shape.
+
+Without an emulator the runner prints `SKIP` and records nothing, so `npm run test:e2e` on a
+bare machine is still 142/142 — and CI runs it both ways, so the skip path and the emulator
+path are each exercised on every push.
 
 ### Security rules tests
 
