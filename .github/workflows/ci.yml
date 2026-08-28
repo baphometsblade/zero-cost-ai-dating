@@ -12,10 +12,14 @@
 #     dependency lists. The install is its own step: when the Playwright download fails
 #     the job fails there, on a step named for infrastructure, and never as a red test.
 #
-#   rules — firestore.rules executed against the Firestore emulator. It is the only
-#     server-side security this app has, so "we read it carefully" is not evidence.
-#     Same arrangement as e2e: emulator and testing library installed into the runner's
-#     temp directory, never into the repository.
+#   emulator — the two suites that need a real Firestore. firestore.rules executed
+#     against it, because it is the only server-side security this app has and "we read
+#     it carefully" is not evidence; and the shipped public/js/data-store.js driven
+#     against it, because the daily usage counter is only atomic if a transaction says
+#     so under real contention. Both run inside a single `emulators:exec`, since booting
+#     the emulator costs far more than either suite. Same arrangement as e2e: emulator
+#     and testing libraries installed into the runner's temp directory, never into the
+#     repository.
 #
 # No secrets, no deploy step — Firebase deploys stay a deliberate local `npm run
 # deploy`; the GitHub Pages demo has its own workflow (pages.yml), which only ever
@@ -104,16 +108,18 @@ jobs:
         env:
           NODE_PATH: ${{ runner.temp }}/playwright/node_modules
 
-  rules:
-    name: Firestore rules
+  emulator:
+    name: Firestore emulator (rules and store)
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     # Pinned together: the emulator is fetched by this exact CLI version, so a
-    # surprise release cannot change what the rules are executed against.
+    # surprise release cannot change what the rules are executed against, and the
+    # client SDK version decides the compat API shape the store suite drives.
     env:
       FIREBASE_TOOLS_VERSION: '15.26.0'
       RULES_TESTING_VERSION: '5.0.1'
+      FIREBASE_SDK_VERSION: '12.18.0'
 
     steps:
       - name: Check out repository
@@ -134,17 +140,19 @@ jobs:
 
       # Infrastructure, not a test — same arrangement as the e2e job. Installed
       # under the runner's temp directory so `dependencies` and `devDependencies`
-      # stay empty in the repository.
-      - name: Install the emulator and rules testing library (infrastructure)
+      # stay empty in the repository. `firebase` is the client SDK: the store
+      # suite loads the shipped data-store.js against its compat build.
+      - name: Install the emulator and testing libraries (infrastructure)
         run: |
-          npm install --prefix "$RUNNER_TEMP/rules" \
+          npm install --prefix "$RUNNER_TEMP/emulator" \
             "firebase-tools@$FIREBASE_TOOLS_VERSION" \
-            "@firebase/rules-unit-testing@$RULES_TESTING_VERSION"
+            "@firebase/rules-unit-testing@$RULES_TESTING_VERSION" \
+            "firebase@$FIREBASE_SDK_VERSION"
 
-      # Boots the emulator, loads firestore.rules into it, and executes every
-      # spec. Exits 3 if the tooling is missing, which reads as infrastructure
-      # rather than as a failing rule.
-      - name: Run the Firestore rules suite
-        run: npm run test:rules
+      # One boot, both suites: firestore.rules executed against the emulator, then
+      # the real public/js/data-store.js driven against it. Exits 3 if the tooling
+      # is missing, which reads as infrastructure rather than as a failing test.
+      - name: Run the rules and store suites
+        run: npm run test:emulator
         env:
-          NODE_PATH: ${{ runner.temp }}/rules/node_modules
+          NODE_PATH: ${{ runner.temp }}/emulator/node_modules

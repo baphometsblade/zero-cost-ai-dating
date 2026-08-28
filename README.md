@@ -248,22 +248,28 @@ npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.
 
 ### Unit suites
 
-Four suites, all on Node's built-in runner:
+Nine suites on Node's built-in runner — **201 checks**, no install, no browser, seconds:
 
 | Suite | What it pins down |
 | --- | --- |
+| `tests/auth.test.js` | The real `public/js/auth.js` on the demo backend, nothing mocked but the browser globals it reaches for: the salted credential vault (including the documented weak fallback when `crypto.subtle` is absent), sign-up and sign-in, the session record, `onChange`, and the three route guards. |
+| `tests/csp-sync.test.js` | The `<meta http-equiv>` copy of the Content-Security-Policy on every page equals the `firebase.json` header minus `frame-ancestors`, and sits before the first `<link>` and `<script>` — two copies of a policy drift apart unless something forces them together. |
 | `tests/data-store.test.js` | The demo storage adapter, loaded for real in Node against a `localStorage` shim: seeding (32 profiles, inbound likes, both conversations, idempotency, force re-seed), user create/update deep-merge semantics with wholesale `interestAffinity` replacement, swipe/match/undo idempotency, messaging with unread counters and the 1000-char cap, daily usage limits per plan, the reports lifecycle (file, list, retract, purge on account deletion), and export/import/reset round-trips. |
 | `tests/matching-engine.test.js` | Every hard filter including the mutual gender/age cases, the neutral missing-location path, score bounds, determinism, tokeniser and cosine behaviour, learning clamp/prune/cap, ranking tie-breaks, weight renormalisation, and a golden end-to-end score. |
+| `tests/pwa.test.js` | The manifest and the service worker carry no root-anchored assumptions, so the same `public/` installs and serves offline under a GitHub Pages project subpath as well as at a site root. |
 | `tests/seed.test.js` | The shape of all 32 seeded profiles against the data model, unique uids and emails, valid interest slugs, ages consistent with birthdates, and `seed-data.js` being in sync with `seed/profiles.json`. |
 | `tests/static.test.js` | Parses every HTML page: no dead local `src`/`href`, correct script load order, no inline scripts / `style=` / `on*=` handlers (the CSP would block them), no class token that the CSS does not define, and `lang` + `title` + viewport + description on every page. |
+| `tests/usage.test.js` | The daily counter's decision, `nextUsage(current, field, amount, today)`, as a pure function: same-day increment, a stale day resetting to zeros *before* the amount lands, an unknown field, a missing or corrupt record, the clamp at zero. Then the same decision through the demo adapter, so it is proven to persist and `canSpend` is proven to agree with it. |
+| `tests/utils.test.js` | The pure half of `ZC.util` — numbers, timing on a hand-rolled fake clock, dates, geo, hashing, avatars, URL parsing. The DOM half needs a live document and belongs to the browser suite. |
 
 ### Browser tests
 
 `npm test` covers what can be exercised without a browser: the matching engine, the demo
-store, the seed schema, the static HTML. It cannot reach the flows that only exist in a DOM — signing in, the deck and its keyboard, the
-match burst, chat that persists, reporting someone, deleting your account, and the service
-worker serving the app with the network gone. Those live in `e2e/`: 132 checks across eight
-specs, each run at 390x844 and 1280x800.
+store and its daily counter, the auth backend, the pure half of the utilities, the seed
+schema, the static HTML. It cannot reach the flows that only exist in a DOM — signing in,
+the deck and its keyboard, the match burst, chat that persists, reporting someone, deleting
+your account, and the service worker serving the app with the network gone. Those live in
+`e2e/`: **142 checks** across nine specs, each run at 390x844 and most of them at 1280x800 as well.
 
 Playwright drives them, and it is deliberately **not** a dependency: the promise that this
 repo installs nothing holds, so you install the browser yourself and point Node at it.
@@ -298,6 +304,38 @@ Same arrangement as the browser tests: not a dependency, needs a Java runtime fo
 emulator, and exits 3 when the tooling is missing so an environment problem never reads as
 a failing rule. See [`rules-tests/README.md`](rules-tests/README.md).
 
+### Store tests
+
+The daily usage counter is the one piece of client logic where reading the code carefully is
+as weak an argument as it was for the rules: whether two concurrent bumps collapse into one
+is a property of a real database, not of anything visible in the file. `store-tests/` loads
+the **shipped** `public/js/data-store.js` into Node — `window` aliased to `globalThis`,
+`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **27
+checks**, including 20 concurrent `bumpUsage` calls on one document storing exactly 20, the
+midnight roll-over happening inside the same transaction, a bump writing `usage` and nothing
+else, and — the check that caught this round's own regression — 30 swipes replaying the
+deck's real learning-save-then-bump ordering and storing exactly 30.
+
+```sh
+npm install --prefix /tmp/zc-emu firebase @firebase/rules-unit-testing firebase-tools
+
+NODE_PATH=/tmp/zc-emu/node_modules npm run test:store      # the store suite
+NODE_PATH=/tmp/zc-emu/node_modules npm run test:emulator   # rules, then store, one boot
+```
+
+Booting the emulator costs most of a minute, which is why both suites share
+`rules-tests/emulate.js` and a single `emulators:exec`. `npm run test:rules` still runs the
+rules suite alone, exactly as it did before.
+
+Two honest edges. Every assertion reads the **stored document**, never `bumpUsage`'s return
+value — a bump whose write failed still hands the caller the figure it computed, so a check
+that trusted the return value could pass against a store that saved nothing. And the suite
+runs with permissive rules, because the client SDK cannot mint an auth token without the Auth
+emulator; a separate check closes that gap the only way left, by replaying the exact value
+the transaction stored against the real `firestore.rules` as the document's owner. That is a
+narrower claim than "the transaction passes the rules", and `store-tests/` says so.
+See [`store-tests/README.md`](store-tests/README.md).
+
 ### CI
 
 `.github/workflows/ci.yml` has three jobs. `verify` runs exactly `npm run check:seed` and
@@ -308,9 +346,10 @@ matching a positional `tests/` directory argument after Node 20 and `npm test` s
 nothing on newer runtimes. `e2e` is separate and runs the browser suite, installing
 Playwright and Chromium into the runner's temp directory — never into the repo — in a step
 of its own, so a failed download reads as infrastructure rather than as a red test.
-`rules` does the same for the Firestore emulator and executes `firestore.rules` against it.
-There are no secrets and no deploy step — deploying stays a deliberate local
-`npm run deploy`.
+`emulator` does the same for the Firestore emulator, and runs both suites that need one —
+`firestore.rules`, then the shipped store — inside a single boot, because booting costs more
+than either suite does. There are no secrets and no deploy step — deploying stays a
+deliberate local `npm run deploy`.
 
 ---
 
@@ -348,6 +387,8 @@ There are no secrets and no deploy step — deploying stays a deliberate local
 │   ├── run.js               # the runner
 │   ├── harness.js           # Playwright lookup, static server, browser session
 │   └── specs/*.e2e.js       # one flow each
+├── rules-tests/             # firestore.rules against the emulator (npm run test:rules)
+├── store-tests/             # the shipped data-store.js against the emulator (test:store)
 ├── docs/                    # architecture + deployment
 ├── firebase.json            # hosting, headers, CSP
 ├── firestore.rules          # the actual security boundary
@@ -395,13 +436,43 @@ These are real, and worth knowing before you show this to anyone:
   enforce them on. A determined user with devtools can bypass any of it. The rules stop data
   *corruption* and cross-user reads; they do not — and on Spark cannot — implement rate limits
   or entitlement checks.
-- **The daily usage counter can undercount across devices.** `bumpUsage` is a
-  read-modify-write, so two swipes racing from two tabs or two devices can collapse into one
-  increment on the Firestore path. The deck holds its own reservation while a write is in
-  flight, so the *limit itself* is never overrun in one session; what drifts is the stored
-  counter. Making it atomic needs a `FieldValue.increment` that also survives the midnight
-  `usage.date` roll-over, which cannot be exercised without a live project — so it is
-  documented rather than guessed at.
+- **The daily usage counter is atomic online, and only online.** It used to be a
+  read-modify-write that two tabs could collapse into one increment. On the Firestore path a
+  bump is now a single `runTransaction`: the user document is read *inside* the transaction, a
+  pure function decides the new `usage` map, and `tx.update` writes that one field. Fixing the
+  bump alone turned out not to be enough, and the tests that caught it are the point of this
+  section: `updateUser` was a whole-document read-modify-write, so the deck's un-awaited
+  learning save — fired on every swipe, just before the bump — reliably overwrote the
+  increment the transaction had just committed. Making the bump atomic actually made that
+  *worse*, because a one-round-trip transaction commits early enough to lose the race. So
+  `updateUser` is now transactional too, which is the real fix: any two concurrent writes to
+  the user document used to lose data this way, not just the counter.
+  None of that is asserted from reading the code. `store-tests/` loads the **shipped**
+  `public/js/data-store.js` and drives it against the Firestore emulator, reading back the
+  stored document: 20 concurrent bumps store exactly 20 (the old shape stored **1**), 20
+  racing across midnight likewise, and 30 swipes replaying the deck's exact
+  learning-then-bump ordering store exactly 30 — that last check stored **19 of 30** and
+  **17 of 30** against this round's own first attempt, which is how the regression was found.
+  What is *not* fixed, and is worth knowing:
+  - **Offline, nothing is stored.** A transaction needs a server round-trip, so it fails with
+    no connection; the store warns, persists nothing, and returns the figure it computed —
+    from the SDK's cached copy of your document when it has one, and otherwise from a fresh
+    day. Swipe with no connection and the stored counter can still come back light. That is
+    deliberate: a counter that could not save must never take the deck down.
+  - **A swipe is not one write.** The *bump* is now a single write of a single field — it no
+    longer restamps `updatedAt` or republishes the public `discovery/{uid}` projection to
+    mirror a field that projection deliberately excludes. But the deck also saves learning on
+    every swipe, and that write does still republish the projection, so a like is four
+    document writes in total, not one.
+  - **Demo mode is not immune.** It is per-device, but not "one tab at a time": the store
+    listens for `storage` events and supports several tabs of the same browser, and the demo
+    adapter's bump is still a `localStorage` read-modify-write two of them can race. It shares
+    the same pure decision function as the Firestore path, which buys agreement between the
+    two adapters — not a distributed guarantee.
+  - **The proof is an emulator over loopback**, not a claim about production latency.
+    Contention windows are wider on a real network and the SDK's transaction retry budget is
+    finite, so sustained contention can still exhaust it and fall back to the warn path.
+  - And none of this makes the limit *enforceable*: that is still the bullet above.
 - **Premium is simulated. No payment is processed.** The subscription page flips a `plan`
   field on your own user document after an explicit confirmation that says so. It exists so
   the gating logic can be exercised, not to sell anything. There is no payment provider, no

@@ -39,7 +39,7 @@ failing rule, and reads differently on purpose.
 
 | File | What it is |
 | --- | --- |
-| `emulate.js` | Boots the emulator and runs `run.js` inside it. The `npm run test:rules` entry point. |
+| `emulate.js` | Boots the emulator once and runs the suites that need it inside it. Shared by `npm run test:rules`, `npm run test:store` and `npm run test:emulator` — the store suite lives in [`store-tests/`](../store-tests/README.md) but pays the same Java start-up, so it is worth booting only once. |
 | `run.js` | Loads `firestore.rules`, runs every spec, prints the summary. Refuses to report success if no check ran. |
 | `harness.js` | Resolves the outside packages, and holds the document fixtures the rules validate against. |
 | `specs/*.rules.js` | One spec per collection, plus the catch-all. |

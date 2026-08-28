@@ -12,6 +12,8 @@
     "test": "node --test",
     "test:e2e": "node e2e/run.js",
     "test:rules": "node rules-tests/emulate.js",
+    "test:store": "node rules-tests/emulate.js --suite=store",
+    "test:emulator": "node rules-tests/emulate.js --suite=rules,store",
     "serve": "python3 -m http.server 5000 --directory public",
     "bench": "node scripts/bench-matching.js",
     "build:seed": "node scripts/build-seed.js",
