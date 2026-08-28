@@ -384,6 +384,17 @@ module.exports = {
         !!created && created.uid === uid && created.email === email,
         created ? 'email=' + created.email + ' displayName=' + created.displayName : 'no document');
 
+      // The name is asserted separately because it is the half that broke.
+      // This check used to report `displayName=` and pass anyway: signing up
+      // adopted the same uid twice at once, and the adoption that read
+      // user.displayName before updateProfile had landed wrote an empty name
+      // over the real one. Only the email was asserted, so three runs out of
+      // three lost the name and the suite stayed green.
+      t.check('and stores the name the person typed, not an empty one',
+        !!created && created.displayName === displayName,
+        created ? 'displayName=' + JSON.stringify(created.displayName) +
+          ', expected ' + JSON.stringify(displayName) : 'no document');
+
       /* ---- the profile save, and its public projection ---- */
       await page.waitForSelector('#profile-main:not(.hidden)');
       const bio = 'Written in a browser at ' + new Date().toISOString() + '.';

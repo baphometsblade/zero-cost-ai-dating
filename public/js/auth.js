@@ -388,7 +388,46 @@
    * @param {Object} [seed] fields to write when the doc is new
    * @returns {Promise<Object>} the UserDoc
    */
-  async function adopt(account, seed) {
+  // One adoption at a time per account. Signing up adopts the same uid twice:
+  // onAuthStateChanged fires the moment the account exists and adopts with no
+  // seed, while firebaseSignUp adopts with the name the person typed. Run
+  // concurrently they are two writers on one document with last-write-wins,
+  // and the one that wins is the wrong one — onAuthStateChanged reads
+  // user.displayName before updateProfile has landed, so it creates the
+  // document with an empty name and that empty name overwrites the real one.
+  // Measured against the emulator before this chain existed: the name the user
+  // typed was missing from users/{uid} on three runs out of three.
+  //
+  // Chaining also removes the reason the second adopt ever took the update
+  // branch on a document the server did not have yet: it now sees the first
+  // adoption's write, not a half-written cache.
+  const adopting = Object.create(null);
+
+  /**
+   * Adopt an account, queued behind any adoption already running for the same
+   * uid. The queue is per-uid and self-clearing.
+   * @param {{uid:string, email?:string, displayName?:string}} account identity
+   * @param {Object} [seed] fields to write when the doc is new
+   * @returns {Promise<Object>} the UserDoc
+   */
+  function adopt(account, seed) {
+    const uid = account && account.uid;
+    if (!uid) return adoptNow(account, seed);
+    // Failures must not poison the queue, so the link the next caller waits on
+    // is always a settled-either-way promise.
+    const prior = adopting[uid] || Promise.resolve();
+    const run = prior.then(function () { return adoptNow(account, seed); });
+    const link = run.catch(function () {});
+    adopting[uid] = link;
+    link.then(function () {
+      // Only the last adoption in the queue clears it; an earlier one finishing
+      // must not drop a link someone is still waiting behind.
+      if (adopting[uid] === link) delete adopting[uid];
+    });
+    return run;
+  }
+
+  async function adoptNow(account, seed) {
     const fields = {
       email: (seed && seed.email) || account.email || '',
       displayName: (seed && seed.displayName) || account.displayName || ''
