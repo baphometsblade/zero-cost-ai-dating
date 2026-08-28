@@ -107,8 +107,10 @@ value would go green against a store that persisted nothing.
 - **Offline is out of reach here.** A failed transaction warns and returns the optimistic
   figure, and nothing persists. That path is exercised only by its nearest neighbour — a
   bump for a uid with no user document — not by real connectivity loss.
-- **Nothing here says anything about demo mode**, which is per-device by nature: one
-  `localStorage`, one tab at a time. `tests/data-store.test.js` covers it.
+- **Nothing here says anything about demo mode.** It is per-device, but not single-threaded:
+  the store listens for `storage` events, so several tabs of one browser share the same
+  `localStorage`, and the demo adapter's bump is still a read-modify-write two of them can
+  race. `tests/data-store.test.js` covers what it does guarantee.
 
 ## Layout
 

@@ -1378,8 +1378,21 @@
       // the increment away. Firestore replays the callback when the document
       // moved under it, so whichever write loses the race re-reads and both
       // survive.
+      // The projection goes in the same transaction, which is why this is not
+      // writeDiscovery(): two concurrent saves commit their user documents in
+      // one order, but two independent follow-up writes can land in the other,
+      // leaving discovery/{uid} holding the older profile while users/{uid}
+      // holds the newer one. A transaction writes both or neither, and
+      // whichever save commits second has read the first. (Transaction writes
+      // are buffered until commit, so a replayed attempt does not republish
+      // anything — the reason this used to sit outside does not hold.)
+      // The cost is that a rejected projection now fails the whole save
+      // instead of warning: both documents are validated by the same rules
+      // from the same values, so that means a real bug, and stopping is better
+      // than a public profile that silently drifts from the private one.
       const ref = db().collection('users').doc(uid);
-      const user = await db().runTransaction(async function (tx) {
+      const shadow = db().collection('discovery').doc(String(uid));
+      return db().runTransaction(async function (tx) {
         const snap = await tx.get(ref);
         const base = snap.exists ? snap.data() || {} : { uid: uid };
         const merged = normalizeUser(deepMerge(base, patch || {}));
@@ -1387,12 +1400,9 @@
         if (!merged.createdAt) merged.createdAt = nowIso();
         merged.updatedAt = nowIso();
         tx.set(ref, merged);
+        tx.set(shadow, projectDiscovery(merged));
         return merged;
       });
-      // Deliberately outside the transaction: discovery/{uid} is a different
-      // document, and a retried callback would republish it once per attempt.
-      await writeDiscovery(user);
-      return user;
     },
 
     async setLastActive(uid, iso) {

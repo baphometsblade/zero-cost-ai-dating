@@ -130,7 +130,7 @@ has, so it is worth the five minutes.
 Everything below is also *executed* — `npm run test:rules` runs the real rules file against
 the Firestore emulator, 127 checks including the attacks each rule exists to stop. If you
 change the data model, run it. See [`rules-tests/README.md`](../rules-tests/README.md).
-`npm run test:emulator` adds the store suite to the same emulator boot: 27 more checks that
+`npm run test:emulator` adds the store suite to the same emulator boot: 31 more checks that
 drive the shipped `public/js/data-store.js` against a real Firestore, which is where the
 daily counter's transaction is proven — see [`store-tests/README.md`](../store-tests/README.md).
 
@@ -186,7 +186,7 @@ firebase use --add          # pick your project, alias it "default"
 Then:
 
 ```bash
-npm test                    # 9 suites, 200 checks, no install required
+npm test                    # 9 suites, 201 checks, no install required
 npm run deploy              # firebase deploy --only hosting,firestore
 ```
 
