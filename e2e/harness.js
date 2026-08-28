@@ -4,7 +4,9 @@
    The pieces every spec needs and none of them should own: locating a
    Playwright that is deliberately not a dependency of this repo, serving
    public/ the way Firebase Hosting does, and opening a browser session that
-   behaves like a real visitor with no Firebase SDK available.
+   behaves like a real visitor — either with no Firebase SDK available (demo
+   mode, which is what nine specs out of ten want) or with the real SDK
+   pointed at a local emulator through the page's own origin.
    ========================================================================== */
 'use strict';
 
@@ -93,6 +95,104 @@ function resolveFile(root, pathname) {
   return isFile(asPage) ? asPage : null;
 }
 
+/* Per-connection headers. They describe the hop they arrived on, so passing
+   them to the next hop is a lie; Node writes its own. */
+const HOP_BY_HOP = ['connection', 'keep-alive', 'proxy-connection', 'transfer-encoding', 'upgrade'];
+
+/* One socket per proxied request, never pooled. Node's global agent keeps
+   sockets alive and hands them round, and this proxy has to be able to hang up
+   on a Firestore long-poll that outlived its page — with pooling, that hang-up
+   took an unrelated in-flight request's socket with it and the page saw a 502. */
+const PROXY_AGENT = new http.Agent({ keepAlive: false, maxSockets: 64 });
+
+/* How long a proxied answer may stay open before it is closed cleanly.
+   Firestore's Listen and Write channels are long-lived by design, and a
+   browser allows only six connections per origin over HTTP/1.1. In production
+   that never bites: Firestore is a different origin and speaks HTTP/2. Folded
+   onto the page's own origin — which is the whole trick that keeps the shipped
+   CSP intact — six of them is the entire budget, and channels left behind by a
+   page that has been navigated away from spend it: measured, the site reached
+   six open channels and then every request, including a plain fetch of
+   index.html, waited forever. Ending them on a timer recycles the connections,
+   and a WebChannel reopens a backchannel that ends, which is what it does
+   behind any real proxy. */
+const MAX_PROXY_ANSWER_MS = 5000;
+
+/**
+ * Normalise one `opts.proxy` value into an address.
+ * @param {number|string} value a port, or 'host:port'
+ * @returns {{host:string, port:number}|null} null when it is neither
+ */
+function toAddress(value) {
+  if (typeof value === 'number') return { host: '127.0.0.1', port: value };
+  const raw = String(value || '');
+  const at = raw.lastIndexOf(':');
+  const port = Number(at === -1 ? raw : raw.slice(at + 1));
+  if (!port) return null;
+  return { host: (at === -1 ? '' : raw.slice(0, at)) || '127.0.0.1', port: port };
+}
+
+/**
+ * Hand one request on to an emulator and stream the answer straight back.
+ *
+ * Streamed, never buffered: Firestore's Listen and Write channels are
+ * long-lived responses whose chunks have to reach the page as they arrive, and
+ * collecting the body first would turn a live listener into a hang.
+ * @param {Object} req the incoming request
+ * @param {Object} res the response to write
+ * @param {{host:string, port:number}} target where the emulator listens
+ * @param {Set} live upstream requests to destroy when the server stops
+ * @returns {void}
+ */
+function forward(req, res, target, live) {
+  const headers = {};
+  Object.keys(req.headers).forEach(function (name) {
+    if (HOP_BY_HOP.indexOf(name) === -1) headers[name] = req.headers[name];
+  });
+  // The emulator routes on Host for some of its endpoints, and it must see its
+  // own address rather than the page's.
+  headers.host = target.host + ':' + target.port;
+
+  const upstream = http.request({
+    host: target.host, port: target.port, method: req.method, path: req.url,
+    headers: headers, agent: PROXY_AGENT
+  }, function (answer) {
+    const out = {};
+    Object.keys(answer.headers).forEach(function (name) {
+      if (HOP_BY_HOP.indexOf(name) === -1) out[name] = answer.headers[name];
+    });
+    res.writeHead(answer.statusCode, out);
+    // End cleanly rather than cutting the socket: a finished chunked answer is
+    // an empty poll to the client, where a truncated one is a transport error.
+    const cap = setTimeout(function () { res.end(); upstream.destroy(); }, MAX_PROXY_ANSWER_MS);
+    answer.on('end', function () { clearTimeout(cap); });
+    answer.on('close', function () { clearTimeout(cap); });
+    answer.pipe(res);
+  });
+  live.add(upstream);
+  const done = function () { live.delete(upstream); };
+  upstream.on('close', done);
+  upstream.on('error', function (err) {
+    done();
+    // A dead emulator has to read as a failed request, not as a silently empty
+    // one: 502 with the reason is what a spec can put in a check's detail.
+    // Once the answer has started there is no status left to change, and the
+    // reason would land inside the body as corruption, so it just ends.
+    if (res.headersSent) {
+      res.end();
+      return;
+    }
+    res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('e2e proxy could not reach ' + target.host + ':' + target.port + ' — ' + err.message);
+  });
+  // A page that goes away mid-poll leaves a long-poll GET open at the other
+  // end; without this the process would not exit. Only when the answer never
+  // finished — hanging up on a completed exchange is how sockets get pulled
+  // out from under the next request.
+  res.on('close', function () { if (!res.writableEnded) upstream.destroy(); });
+  req.pipe(upstream);
+}
+
 /**
  * Serve `public/` on an ephemeral port. Ephemeral because several specs run in
  * the same process and one of them deliberately kills its server mid-test.
@@ -101,10 +201,21 @@ function resolveFile(root, pathname) {
  * @param {string} [opts.mountPath] serve the site under this prefix instead of
  *   the root, the way GitHub Pages serves a project site
  *   (e.g. '/zero-cost-ai-dating'); requests outside it get the 404 treatment
+ * @param {Object} [opts.proxy] path prefix -> emulator port (or 'host:port').
+ *   Anything whose path starts with a prefix is forwarded there instead of
+ *   being looked up on disk. This is what lets a page talk to the Firestore
+ *   and Auth emulators without leaving its own origin, and so without the
+ *   shipped `connect-src 'self'` having to be relaxed for the tests.
  * @returns {Promise<{origin:string, base:string, stop:function():Promise<void>}>}
  */
 async function startServer(root, opts) {
   const dir = path.resolve(root || PUBLIC_DIR);
+  // Longest prefix first, so '/emulator/v1/' can sit in front of '/v1/'.
+  const routes = Object.keys((opts && opts.proxy) || {})
+    .sort(function (a, b) { return b.length - a.length; })
+    .map(function (prefix) { return { prefix: prefix, target: toAddress(opts.proxy[prefix]) }; })
+    .filter(function (route) { return !!route.target; });
+  const live = new Set();
   // '' when serving from the root, or a prefix with no trailing slash when a
   // spec asks for the GitHub Pages shape. With '' the checks below reduce to
   // "pathname starts with '/'", which is always true, so every existing caller
@@ -116,6 +227,13 @@ async function startServer(root, opts) {
       pathname = decodeURIComponent(new URL(req.url, 'http://127.0.0.1').pathname);
     } catch (err) {
       pathname = '/';
+    }
+    // Emulator traffic first: it is addressed by path, and none of those paths
+    // exist under public/ anyway.
+    const route = routes.find(function (candidate) { return pathname.indexOf(candidate.prefix) === 0; });
+    if (route) {
+      forward(req, res, route.target, live);
+      return;
     }
     // Pages answers the slashless project URL with a redirect to the slash
     // form, so the page's relative URLs resolve inside the site; mirror that
@@ -180,6 +298,11 @@ async function startServer(root, opts) {
       // where an unguarded call would throw and shutdown would never finish.
       // Without it, keep-alive sockets would just close a little later.
       if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
+      // Proxied requests live on a second socket this server does not own. A
+      // Firestore listen channel would keep that one open long after the page
+      // is gone, and server.close() waits for it.
+      live.forEach(function (upstream) { upstream.destroy(); });
+      live.clear();
       closing = new Promise(function (resolve) { server.close(function () { resolve(); }); });
       return closing;
     }
@@ -198,6 +321,22 @@ const VIEWPORTS = {
 // Unhandled rejections are re-emitted as console errors so a single listener
 // catches them, including the ones raised on pages we later navigate away from.
 const REJECTION_TAG = 'e2e-unhandled-rejection:';
+
+const CDN_PATTERN = '**://www.gstatic.com/**';
+
+// Where a copy of the CDN's Firebase bundles lives, for a machine that cannot
+// reach www.gstatic.com. The files are the CDN's own, fetched once by hand:
+//
+//   mkdir -p /tmp/zc-fbsdk && cd /tmp/zc-fbsdk
+//   for f in app auth firestore; do
+//     curl -O https://www.gstatic.com/firebasejs/10.12.2/firebase-$f-compat.js
+//   done
+//
+// Serving them back for the same URLs is a stand-in for the CDN, not for the
+// page: the pages, their script tags and their CSP are exactly what ships, and
+// the browser runs the same SDK bytes it would have downloaded. Unset, the
+// browser goes to the real CDN.
+const SDK_MIRROR = process.env.E2E_FIREBASE_SDK || '';
 
 /**
  * The Firebase SDK is aborted on purpose, so the browser reports those failed
@@ -224,20 +363,85 @@ function isExpectedCdnNoise(msg) {
 }
 
 /**
+ * Point the app's Firebase SDK at the emulators the page's own server is
+ * forwarding to. Runs before any page script, so it is in place by the time
+ * firebase-config.js decides which mode the app is in.
+ *
+ * Two halves. The stored config override is the same one Settings writes, so
+ * firebase-config.js takes its real path and lands on mode 'firebase'. The
+ * property on `window.firebase` catches the compat bundle defining itself and
+ * wraps initializeApp, because useEmulator has to be called on handles that do
+ * not exist until the app is created — and firebase-config.js creates the app
+ * and reads auth() and firestore() off it in one breath.
+ *
+ * The emulator address is the page's own origin, deliberately: `connect-src
+ * 'self'` in the shipped CSP allows exactly that and nothing else.
+ * @param {Object} config the firebase config to install
+ * @returns {void}
+ */
+function installEmulatorWiring(config) {
+  try {
+    window.localStorage.setItem('zc.firebaseConfig', JSON.stringify(config));
+  } catch (err) {
+    // No storage means no override, and the checks that follow will say so.
+  }
+  var sdk;
+  Object.defineProperty(window, 'firebase', {
+    configurable: true,
+    get: function () { return sdk; },
+    set: function (value) {
+      sdk = value;
+      if (!value || typeof value.initializeApp !== 'function' || value.zcEmulatorWrapped) return;
+      value.zcEmulatorWrapped = true;
+      var initializeApp = value.initializeApp;
+      value.initializeApp = function () {
+        var app = initializeApp.apply(this, arguments);
+        var port = Number(window.location.port) ||
+          (window.location.protocol === 'https:' ? 443 : 80);
+        value.firestore(app).useEmulator(window.location.hostname, port);
+        value.auth(app).useEmulator(window.location.origin, { disableWarnings: true });
+        return app;
+      };
+    }
+  });
+}
+
+/**
  * Open an isolated browser context at one viewport, wired so that anything the
  * page logs as an error ends up in `errors`.
  * @param {Object} browser a Playwright Browser
  * @param {Object} viewport one of VIEWPORTS
+ * @param {Object} [opts]
+ * @param {Object} [opts.firebase] run this session in firebase mode instead of
+ *   demo mode: `{ config }` is installed as the stored Firebase config and the
+ *   SDK is pointed at the emulators through the page's own origin. The CDN is
+ *   then let through, because the real SDK has to load.
  * @returns {Promise<{context:Object, page:Object, errors:string[]}>}
  */
-async function openSession(browser, viewport) {
+async function openSession(browser, viewport, opts) {
+  const firebase = (opts && opts.firebase) || null;
   const context = await browser.newContext({
     viewport: { width: viewport.width, height: viewport.height }
   });
 
-  // Blocking the Firebase CDN is what puts the app into demo mode, which is
-  // the only mode a test can drive without a real project behind it.
-  await context.route('**://www.gstatic.com/**', function (route) { return route.abort(); });
+  if (!firebase) {
+    // Blocking the Firebase CDN is what puts the app into demo mode, which is
+    // the only mode a test can drive without a project or an emulator behind it.
+    await context.route(CDN_PATTERN, function (route) { return route.abort(); });
+  } else {
+    if (SDK_MIRROR) {
+      await context.route(CDN_PATTERN, function (route) {
+        const file = path.join(SDK_MIRROR, path.basename(new URL(route.request().url()).pathname));
+        if (!isFile(file)) return route.continue();
+        return route.fulfill({
+          status: 200,
+          contentType: 'text/javascript; charset=utf-8',
+          body: fs.readFileSync(file)
+        });
+      });
+    }
+    await context.addInitScript(installEmulatorWiring, firebase.config);
+  }
 
   await context.addInitScript(function () {
     window.addEventListener('unhandledrejection', function (event) {
@@ -269,9 +473,17 @@ async function openSession(browser, viewport) {
   page.on('console', function (msg) {
     if (msg.type() !== 'error') return;
     const text = msg.text();
-    if (isExpectedCdnNoise(msg)) return;
+    // Only a session that aborted the CDN may write its failures off as
+    // expected. When the SDK is supposed to load, a gstatic error is the
+    // whole story and has to be reported.
+    if (!firebase && isExpectedCdnNoise(msg)) return;
     if (state.expectingNetworkErrors && isResourceFailure(text)) return;
-    errors.push('console.error @ ' + page.url() + ' :: ' + text);
+    // Chromium points a failed-resource message at the resource, not at the
+    // page. Recording that is what lets a spec tell one "Failed to load
+    // resource" apart from another — "status 400" alone names nothing.
+    const location = (typeof msg.location === 'function' && msg.location()) || {};
+    const where = location.url && location.url !== page.url() ? location.url : page.url();
+    errors.push('console.error @ ' + where + ' :: ' + text);
   });
 
   return {

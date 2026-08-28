@@ -37,7 +37,8 @@ Two further Pages constraints are worth knowing because they shaped the code:
   every page, and `tests/csp-sync.test.js` fails the suite if the two ever drift. The other
   headers — `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, and the
   `Cache-Control` tiers — cannot be expressed as meta tags and exist only on Firebase
-  Hosting.
+  Hosting. A policy in the markup applies wherever the file is served, your own machine
+  included, which is why a browser cannot reach a local emulator without help — section 12.
 
 That second point is the reason the rest of this guide exists: for a real deployment with
 accounts, a shared database, and the full header set, Firebase Hosting on the Spark plan is
@@ -128,7 +129,7 @@ Open [`firestore.rules`](../firestore.rules). It is the only server-side securit
 has, so it is worth the five minutes.
 
 Everything below is also *executed* — `npm run test:rules` runs the real rules file against
-the Firestore emulator, 127 checks including the attacks each rule exists to stop. If you
+the Firestore emulator, 129 checks including the attacks each rule exists to stop. If you
 change the data model, run it. See [`rules-tests/README.md`](../rules-tests/README.md).
 `npm run test:emulator` adds the store suite to the same emulator boot: 31 more checks that
 drive the shipped `public/js/data-store.js` against a real Firestore, which is where the
@@ -311,12 +312,78 @@ If you ever do upgrade to Blaze for unrelated reasons, set a budget alert first.
 
 ---
 
-## 12. Troubleshooting
+## 12. Developing against the emulators in a browser
+
+`npm run test:rules` and `npm run test:emulator` already drive the Firestore emulator, but
+from Node, where no Content-Security-Policy applies. Pointing a **browser** at a local
+emulator is the case that bites, and it is worth knowing before you lose an afternoon to it.
+
+The usual recipe is two lines after the app is created:
+
+```js
+firebase.firestore().useEmulator('127.0.0.1', 8080);
+firebase.auth().useEmulator('http://127.0.0.1:9099');
+```
+
+Serve `public/` with `npm run serve`, open it, and try to sign up. The page does not move, and
+devtools says:
+
+```
+Refused to connect to 'http://127.0.0.1:9099/identitytoolkit.googleapis.com/v1/accounts:signUp?key=…'
+because it violates the following Content Security Policy directive: "connect-src 'self'
+https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com
+https://identitytoolkit.googleapis.com https://securetoken.googleapis.com
+https://firestore.googleapis.com".
+```
+
+then the same for Firestore on `http://127.0.0.1:8080/`. Nothing is broken and nothing is
+misconfigured.
+
+**Why.** An origin is scheme + host + **port**. The page is served from port 5000 and the
+emulator listens on 8080, so those are different origins: `connect-src 'self'` does not reach
+the emulator, and none of the `googleapis.com` entries match a loopback address either. The
+policy is doing exactly what it was written to do.
+
+**Why there is no server setting to unset.** The policy also ships as a `<meta>` tag in every
+page — the GitHub Pages section at the top of this guide explains why it has to — so it
+travels with the file. Your local server never sends it; the markup carries it. That is the
+trade-off of a policy GitHub Pages can honour at all, and it lands on anyone doing local
+emulator development, not only on this repo's test suite.
+
+Two ways through. Neither is a fix, and this guide is not claiming one:
+
+**Relax `connect-src` while you develop — then put it back.** Add the emulator origins to the
+meta tag in the pages you are working on:
+
+```html
+connect-src 'self' http://127.0.0.1:8080 http://127.0.0.1:9099 https://*.googleapis.com …
+```
+
+Sign-up then completes and the console is clean. This is a local edit, never a commit: while
+the two copies disagree, `npm test` fails *every page carries exactly one CSP meta equal to
+the header minus frame-ancestors* (`tests/csp-sync.test.js`), which is the reminder to revert.
+Be clear about what that guard does **not** catch — relax the header in `firebase.json` to
+match and the suite goes quiet again, all 201 checks passing, and the weakened policy deploys
+to everyone. Change the meta copy only, and change it back.
+
+**Or stop crossing the origin.** Serve the emulator's paths *from the page's own origin* and
+every request is `'self'`, with the shipped policy untouched. That is what the browser suite
+does: `startServer` in `e2e/harness.js` takes a `proxy` option that forwards Firestore's
+`/v1/` and `/google.firestore.…` paths and Auth's `identitytoolkit`/`securetoken` paths to the
+emulators, which is the only reason `e2e/specs/10-firebase.e2e.js` can drive the real Firebase
+path in a browser against the pages exactly as they ship. The cost is a dev server that can
+proxy, and `npm run serve` is `python3 -m http.server`, which cannot — so this is not a
+two-line change to your own workflow. It is, though, the route that never touches the policy.
+
+---
+
+## 13. Troubleshooting
 
 | Symptom | Cause and fix |
 | --- | --- |
 | Console says `Demo mode` after deploying | The config never took. Check `BAKED_CONFIG` in `firebase-config.js` for leftover `your-…` values, or clear a stale `localStorage['zc.firebaseConfig']` with Settings → *Reset to demo mode*. |
 | `Refused to load … Content Security Policy` | Something added an inline `<script>`, a `style="…"` attribute, or a third-party script. Run `npm test`; `tests/static.test.js` names the file and line. |
+| `Refused to connect … Content Security Policy` pointing at `127.0.0.1` | You are aiming a browser at a local emulator. A different port is a different origin, so `connect-src 'self'` does not cover it. Section 12 has both ways round it. |
 | `auth/unauthorized-domain` on Google sign-in | Add the domain under Authentication → Settings → Authorized domains. |
 | `auth/operation-not-allowed` | The provider is not enabled in the console (step 3). |
 | Discover errors with `failed-precondition` and a console link | A composite index is still building, or was never deployed. Run `firebase deploy --only firestore:indexes` and wait. |
@@ -326,7 +393,7 @@ If you ever do upgrade to Blaze for unrelated reasons, set a budget alert first.
 
 ---
 
-## 13. Rolling back and tearing down
+## 14. Rolling back and tearing down
 
 - **Hosting rollback:** Hosting → *Release history* → the ⋮ menu on any previous release →
   *Rollback*. Instant, free, and it does not touch data.

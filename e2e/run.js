@@ -145,19 +145,35 @@ async function main() {
   }
 
   const results = [];
+  const skipped = [];
   const started = Date.now();
   const server = await harness.startServer();
   const browser = await playwright.chromium.launch();
 
   try {
     for (const spec of runnable) {
+      // A spec may need something this machine has not got — the Firebase
+      // suite needs the emulators running. Saying so out loud and recording
+      // nothing is the only honest answer: a check that "passes" because it
+      // never ran is the false green this runner exists to prevent.
+      if (typeof spec.available === 'function') {
+        const verdict = await spec.available();
+        if (!verdict || !verdict.ok) {
+          const why = (verdict && verdict.why) || 'no reason given';
+          process.stdout.write('\n--- ' + spec.title + '\n  SKIP  ' + why + '\n');
+          skipped.push(spec.title + ' — ' + why);
+          continue;
+        }
+      }
       const wanted = args.viewport ? spec.viewports.filter(function (v) { return v === args.viewport; }) : spec.viewports;
       for (const key of wanted) {
         const viewport = harness.VIEWPORTS[key];
         const label = spec.title + ' [' + viewport.label + ']';
         process.stdout.write('\n--- ' + label + '\n');
 
-        const session = await harness.openSession(browser, viewport);
+        // spec.session is how a spec asks for a context that is not the
+        // default "real visitor, no Firebase SDK" one.
+        const session = await harness.openSession(browser, viewport, spec.session);
         const t = createRecorder(results, label);
         try {
           await spec.run(t, session.page, {
@@ -189,6 +205,7 @@ async function main() {
   const failed = results.filter(function (r) { return !r.ok; });
   process.stdout.write('\n=== summary\n');
   failed.forEach(function (r) { process.stdout.write('  FAIL  ' + r.label + ' — ' + r.name + '\n'); });
+  skipped.forEach(function (line) { process.stdout.write('  SKIP  ' + line + '\n'); });
   process.stdout.write(
     '  ' + (results.length - failed.length) + '/' + results.length + ' checks passed in ' +
     ((Date.now() - started) / 1000).toFixed(1) + 's\n'

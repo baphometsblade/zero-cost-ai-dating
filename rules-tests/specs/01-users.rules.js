@@ -84,6 +84,21 @@ module.exports = {
         profile: Object.assign({}, h.userDoc('newbie').profile, { bio: 'x'.repeat(501) })
       })))));
 
+    // The store writes lastActiveAt: null for an account that has never been
+    // seen — the same way it writes planSince: null — and every fixture here
+    // used a string, so 127 checks said nothing about the shape the store
+    // actually produces. A browser driving the real SDK found it: the whole
+    // create was denied, and the deny read as "permission", not "shape".
+    t.check('a never-active account may store lastActiveAt as null',
+      await ok(assertSucceeds(as('never-active').doc('users/never-active').set(
+        h.userDoc('never-active', { lastActiveAt: null })
+      ))));
+
+    t.check('but a non-string, non-null lastActiveAt is still refused',
+      await ok(assertFails(as('bad-active').doc('users/bad-active').set(
+        h.userDoc('bad-active', { lastActiveAt: 1767225600000 })
+      ))));
+
     t.check('a valid profile edit is still allowed',
       await ok(assertSucceeds(as(ME).doc('users/' + ME).set(h.userDoc(ME, { profile: prof({ bio: 'An edited bio.' }) })))));
 

@@ -130,7 +130,11 @@ service cloud.firestore {
           && (!('profileComplete' in d) || d.profileComplete is bool)
           && d.createdAt is string
           && (!('updatedAt' in d) || d.updatedAt is string)
-          && (!('lastActiveAt' in d) || d.lastActiveAt is string)
+          // null is how the store spells "never active", exactly as it spells an
+          // unset planSince above. Requiring a string here rejected any user
+          // document created through updateUser's upsert path — the shape the
+          // store has always written, and the demo adapter accepts.
+          && (!('lastActiveAt' in d) || d.lastActiveAt == null || d.lastActiveAt is string)
           && profileOk(d.profile)
           && prefsOk(d.preferences)
           && bookkeepingOk(d);
