@@ -381,13 +381,6 @@
     }
   }
 
-  /**
-   * Adopt an account as the signed-in user: load its doc, publish it and note
-   * that the person is around.
-   * @param {{uid:string, email?:string, displayName?:string}} account identity
-   * @param {Object} [seed] fields to write when the doc is new
-   * @returns {Promise<Object>} the UserDoc
-   */
   // One adoption at a time per account. Signing up adopts the same uid twice:
   // onAuthStateChanged fires the moment the account exists and adopts with no
   // seed, while firebaseSignUp adopts with the name the person typed. Run
@@ -427,6 +420,14 @@
     return run;
   }
 
+  /**
+   * Adopt an account as the signed-in user: load its doc, publish it and note
+   * that the person is around. Always called through adopt(), never directly,
+   * so that two adoptions of one account cannot overlap.
+   * @param {{uid:string, email?:string, displayName?:string}} account identity
+   * @param {Object} [seed] fields to write when the doc is new
+   * @returns {Promise<Object>} the UserDoc
+   */
   async function adoptNow(account, seed) {
     const fields = {
       email: (seed && seed.email) || account.email || '',
@@ -478,6 +479,35 @@
    * @returns {Promise<Object>} the UserDoc
    */
   async function firebaseSignUp(email, password, displayName) {
+    // onAuthStateChanged fires the instant the account exists, and it adopts
+    // with whatever the auth record says — which is nothing yet, because
+    // updateProfile has not run. Queuing the adoptions stops them fighting,
+    // but the first one still creates the document with an empty name and the
+    // second one has to come back and repair it: three writes, and a window of
+    // roughly 300ms where users/{uid} and its projection carry no name at all.
+    // Leaving the name here first means that adoption creates the document
+    // correctly, the repair never has to happen, and a sign-up costs one write.
+    pendingSeed.email = email;
+    pendingSeed.displayName = displayName || '';
+    try {
+      return await signUpWithSeed(email, password, displayName);
+    } finally {
+      pendingSeed.email = '';
+      pendingSeed.displayName = '';
+    }
+  }
+
+  /** The identity a sign-up already knows, for the adoption that races it. */
+  const pendingSeed = { email: '', displayName: '' };
+
+  /**
+   * The body of firebaseSignUp, with pendingSeed already published.
+   * @param {string} email account email
+   * @param {string} password plain-text password
+   * @param {string} [displayName] optional display name
+   * @returns {Promise<Object>} the UserDoc
+   */
+  async function signUpWithSeed(email, password, displayName) {
     const credential = await fbAuth().createUserWithEmailAndPassword(email, password);
     const user = credential.user;
     if (displayName && user && typeof user.updateProfile === 'function') {
@@ -995,7 +1025,13 @@
   async function onFirebaseUser(user) {
     try {
       if (user && user.uid) {
-        await adopt(accountFromFirebase(user));
+        // Use the sign-up's own seed when one is in flight: this callback runs
+        // before updateProfile lands, so the auth record's displayName is
+        // still empty and creating the document from it would be wrong.
+        const seed = pendingSeed.displayName || pendingSeed.email
+          ? { email: pendingSeed.email, displayName: pendingSeed.displayName }
+          : undefined;
+        await adopt(accountFromFirebase(user), seed);
       } else {
         setSignedOut();
       }

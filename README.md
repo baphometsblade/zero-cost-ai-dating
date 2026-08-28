@@ -292,7 +292,7 @@ Firebase rather than `localStorage`: the real SDK, real Auth, real Firestore, an
 read back out of the emulator instead of off the page. It drives the pages **with their real
 CSP meta tag** — the emulators are reached through the page's own origin rather than by
 relaxing the policy, which is the whole reason it can exist; the Limitations section explains
-the constraint it is working around. With both emulators up the run is **157 checks**, all
+the constraint it is working around. With both emulators up the run is **158 checks**, all
 passing.
 
 It did not start that way. On its first run one check was red, and it had found a real bug:

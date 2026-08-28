@@ -495,7 +495,30 @@ module.exports = {
       // document first is the same state, on purpose, every time.
       // Whether the race bit this run is worth saying, and taking those lines
       // out first keeps the detail below about the probe alone.
-      const raced = drain(ctx.session.errors, 'documents:commit', 403);
+      // Two writers fighting over users/{uid} show up as 403 (the rules
+      // refusing the racing write) or 409 ABORTED (a transaction losing its
+      // base version). Read this as a GUARD, not as the proof that adoption is
+      // serialised: reverting the serialisation leaves it green on a single
+      // cold run, because the two adoptions then interleave in the order that
+      // loses the name quietly rather than the order that collides loudly.
+      // Eight sign-ups on the unserialised code produced one 409; one sign-up
+      // produced none. The check above — the stored name — is the
+      // deterministic detector, and it fails 3 runs out of 3. This one catches
+      // the loud form if it ever comes back.
+      //
+      // 400 is deliberately NOT included, and not because it is inconvenient:
+      // one arrives on every sign-up, and it arrives identically on the commit
+      // before adoption was serialised (measured, twice each way). It is
+      // setLastActive touching users/{uid} through a plain update(), which
+      // data-store.js catches on purpose — "activity is a nicety, never an
+      // error path". Pre-existing and out of this PR's scope; folding it in
+      // here would only hide it behind a fix for something else.
+      const raced = drain(ctx.session.errors, 'documents:commit', 403)
+        .concat(drain(ctx.session.errors, 'documents:commit', 409));
+      drain(ctx.session.errors, 'documents:commit', 400);
+      t.check('signing up does not race its own account document',
+        raced.length === 0,
+        raced.length ? raced.length + ' rejected commit(s): ' + raced[0] : 'no rejected commits');
 
       await emulator(FIRESTORE, 'DELETE', DOCS + '/users/' + uid);
       const recreate = await page.evaluate(function (id) {
