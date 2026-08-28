@@ -269,7 +269,9 @@ store and its daily counter, the auth backend, the pure half of the utilities, t
 schema, the static HTML. It cannot reach the flows that only exist in a DOM — signing in,
 the deck and its keyboard, the match burst, chat that persists, reporting someone, deleting
 your account, and the service worker serving the app with the network gone. Those live in
-`e2e/`: **142 checks** across nine specs, each run at 390x844 and most of them at 1280x800 as well.
+`e2e/`: **142 checks** across nine specs, each run at 390x844 and most of them at 1280x800 as
+well — plus a tenth spec that needs the Firebase emulators and skips, by name and reason, when
+they are not running.
 
 Playwright drives them, and it is deliberately **not** a dependency: the promise that this
 repo installs nothing holds, so you install the browser yourself and point Node at it.
@@ -285,6 +287,26 @@ With no Playwright at all the runner exits 3 with a one-line install hint, so "n
 here" never reads as a failing test. See [`e2e/README.md`](e2e/README.md) for the spec
 layout and for running one flow or one viewport.
 
+The tenth spec, `e2e/specs/10-firebase.e2e.js`, is the only one that runs the app against
+Firebase rather than `localStorage`: the real SDK, real Auth, real Firestore, and every result
+read back out of the emulator instead of off the page. It drives the pages **with their real
+CSP meta tag** — the emulators are reached through the page's own origin rather than by
+relaxing the policy, which is the whole reason it can exist; the Limitations section explains
+the constraint it is working around. With both emulators up the run is **156 checks**, all
+passing.
+
+It did not start that way. On its first run one check was red, and it had found a real bug:
+`ZC.store.updateUser` could not create a user document at all, because `normalizeUser` writes
+`lastActiveAt: null` for an account that has never been seen while `firestore.rules` accepted
+that key only as a string — two lines below an explicit allowance for a null `planSince`. The
+demo adapter had always upserted happily, so the two adapters had quietly disagreed, and no
+fixture in `rules-tests/` ever used a null there. The rule now accepts null, and two rules
+checks pin the shape.
+
+Without an emulator the runner prints `SKIP` and records nothing, so `npm run test:e2e` on a
+bare machine is still 142/142 — and CI runs it both ways, so the skip path and the emulator
+path are each exercised on every push.
+
 ### Security rules tests
 
 Everything this README claims about privacy — that your email and block list are not
@@ -292,7 +314,7 @@ readable by other accounts, that nobody can mint a match with a stranger and the
 them, that the abuse queue cannot be enumerated — is a claim about one file,
 `firestore.rules`, because there is no server to enforce anything else. Reading it
 carefully is not evidence. `rules-tests/` executes it against the Firestore emulator:
-**127 checks**, including the attacks each rule exists to stop.
+**129 checks**, including the attacks each rule exists to stop.
 
 ```sh
 npm install --prefix /tmp/zc-rules @firebase/rules-unit-testing firebase-tools
@@ -414,7 +436,9 @@ deliberate local `npm run deploy`.
   `script-src 'self' https://www.gstatic.com https://apis.google.com`, `object-src 'none'`,
   `frame-ancestors 'none'` and friends. Consequently there is not one inline `<script>` or
   `style="…"` attribute in the codebase — styles that must be dynamic are set through the
-  CSSOM — and `tests/static.test.js` fails the build if one appears.
+  CSSOM — and `tests/static.test.js` fails the build if one appears. Every page also carries
+  the policy as a `<meta>` tag, because GitHub Pages cannot set headers; that copy is what
+  makes it strict on a laptop too, and it has a cost — see Limitations.
 - **No `innerHTML` with user data.** Every bio, name, message and location label is inserted
   with `textContent` (via `ZC.util.el({ text })`). Photo URLs are restricted to `https://`.
 - **The Firebase web API key is not a secret.** It identifies your project; it does not
@@ -502,6 +526,20 @@ These are real, and worth knowing before you show this to anyone:
   retracted from Settings — and to the project owner, who reviews the queue in the Firebase
   console or with admin credentials. Nothing triages that queue automatically, and there is
   no in-app tooling for the owner to act on it.
+- **The CSP ships in the markup, and that costs you local emulator development.** GitHub
+  Pages cannot set response headers, so the `Content-Security-Policy` Firebase Hosting sends
+  from `firebase.json` also travels as a `<meta>` tag in every page. A policy in the markup
+  applies wherever the file is served — your own machine included — and an emulator on
+  another port is a different origin, which `connect-src 'self'` does not cover. So a browser
+  on `localhost:5000` will not talk to the Firestore or Auth emulator: sign-up simply does
+  not move off the page, and the console says `Refused to connect to
+  'http://127.0.0.1:8080/' because it violates the following Content Security Policy
+  directive: "connect-src 'self' …"`. There is no server setting to unset, because no server
+  is sending it. The two ways round — relax the meta copy while you work and put it back, or
+  serve the emulator's paths from the page's own origin, which is what the browser suite does
+  — are written up in
+  [docs/DEPLOY.md](docs/DEPLOY.md#12-developing-against-the-emulators-in-a-browser). Neither
+  is a fix; the constraint is the price of a policy GitHub Pages can honour at all.
 - **The "AI" is classical ML, deliberately.** TF‑IDF, cosine similarity, weighted vector
   distance and a per-tag affinity table. It is explainable and free precisely because it is not
   a neural model, and it will not understand a bio the way a language model would.

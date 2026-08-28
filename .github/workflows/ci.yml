@@ -103,10 +103,39 @@ jobs:
 
       # e2e/run.js resolves Playwright through NODE_PATH; if it cannot find it at all it
       # exits 3 with a one-line install hint rather than a stack trace.
+      #
+      # Deliberately with no emulator running: this is the run every contributor gets
+      # with nothing installed, so it also proves the Firebase spec skips cleanly
+      # instead of failing — or, worse, passing without having connected to anything.
       - name: Run the end-to-end suite
         run: npm run test:e2e
         env:
           NODE_PATH: ${{ runner.temp }}/playwright/node_modules
+
+      # The Firebase spec is the only browser coverage of the path that talks to a real
+      # Firestore, and it skips itself when no emulator answers — so without these last
+      # two steps it would skip here forever and the checks would run on nobody's
+      # machine but the author's. Java and the CLI are infrastructure, same arrangement
+      # as everywhere else: the runner's temp directory, never the repository.
+      - name: Set up Java for the Firestore emulator
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # emulators:exec boots Firestore (8080) and Auth (9099) on their default ports —
+      # which is what e2e/specs/10-firebase.e2e.js looks for — loads the real
+      # firestore.rules from firebase.json, and tears them down afterwards. The browser
+      # reaches them through the page's own origin, so the shipped CSP is untouched.
+      - name: Run the Firebase spec against the emulators
+        run: |
+          npm install --prefix "$RUNNER_TEMP/emulator" "firebase-tools@$FIREBASE_TOOLS_VERSION"
+          "$RUNNER_TEMP/emulator/node_modules/.bin/firebase" emulators:exec \
+            --only firestore,auth --project demo-zc-browser \
+            "node e2e/run.js firebase"
+        env:
+          NODE_PATH: ${{ runner.temp }}/playwright/node_modules
+          FIREBASE_TOOLS_VERSION: '15.26.0'
 
   emulator:
     name: Firestore emulator (rules and store)
