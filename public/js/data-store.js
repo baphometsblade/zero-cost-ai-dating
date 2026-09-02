@@ -1905,10 +1905,23 @@
         console.warn('[zc.store] Could not purge filed reports.', err);
       }
 
-      // The public projection, then the private document.
-      await db().collection('discovery').doc(uid).delete().catch(function (err) {
-        console.warn('[zc.store] Could not delete the discovery profile.', err);
-      });
+      // The public projection, then the private document — and in that order,
+      // with nothing swallowed between them.
+      //
+      // discovery/{uid} is the world-readable half of an account: display
+      // name, photo, the profile fields the deck needs. It used to be deleted
+      // inside a .catch that warned and carried on, so a rejected delete still
+      // reached the line below, removed the private document, and returned
+      // true. That is the worst outcome this function has: the person is told
+      // their account is gone, the document they could have retried from is
+      // the one that went, and what survives is the copy every signed-in user
+      // can read.
+      //
+      // Failing here instead leaves the account whole and the error visible,
+      // which is a state somebody can act on. store-tests/specs/07-deletion
+      // proves the purge reaches everything; this makes a purge that could not
+      // say so.
+      await db().collection('discovery').doc(uid).delete();
       await db().collection('users').doc(uid).delete();
       return true;
     },

@@ -66,7 +66,7 @@ function createRecorder(sink, label) {
  * its write fails, so only the stored document is evidence.
  * @param {Object} env a RulesTestEnvironment
  * @param {Object} mod the modular firebase/firestore module
- * @returns {{get:Function, set:Function, del:Function}} document helpers
+ * @returns {{get:Function, set:Function, del:Function, list:Function}} helpers
  */
 function adminAccess(env, mod) {
   return {
@@ -87,6 +87,22 @@ function adminAccess(env, mod) {
       await env.withSecurityRulesDisabled(async function (c) {
         await mod.deleteDoc(mod.doc(c.firestore(), collection, id));
       });
+    },
+    /**
+     * Everything in a collection, ids included. A spec that has to prove an
+     * absence needs to enumerate rather than guess which ids to ask for: the
+     * whole risk in "did the purge get everything" is the document nobody
+     * thought to look for.
+     * @param {string} collection collection path, subcollections included
+     * @returns {Promise<Array<{id:string, data:Object}>>}
+     */
+    async list(collection) {
+      let out = [];
+      await env.withSecurityRulesDisabled(async function (c) {
+        const snap = await mod.getDocs(mod.collection(c.firestore(), collection));
+        out = snap.docs.map(function (doc) { return { id: doc.id, data: doc.data() }; });
+      });
+      return out;
     }
   };
 }

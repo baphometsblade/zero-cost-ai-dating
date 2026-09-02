@@ -132,6 +132,7 @@ One spec per property. `tests/docs.test.js` fails if a spec exists without a row
 | `specs/04-rules-accept.store.js` | the value the transaction stores is one `firestore.rules` accepts — the two suites agreeing about the same document |
 | `specs/05-swipe-race.store.js` | a document save in flight cannot eat the counter, or be eaten by it |
 | `specs/06-projection-order.store.js` | a racing save cannot leave the public `discovery/{uid}` projection behind the private document |
+| `specs/07-deletion.store.js` | deleting an account leaves nothing of it behind — every collection enumerated, not just the ids the test knows about, plus the match's message subcollection; a report *about* the account is the documented exception and stays in the queue |
 
 Each spec starts from a cleared database, but the store itself is loaded once per process
 (the IIFE returns early on a second load, and `require` caches), so specs use their own

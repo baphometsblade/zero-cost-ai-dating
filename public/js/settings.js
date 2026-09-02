@@ -1008,9 +1008,17 @@
           dom.deleteInput);
         toast('Data deleted, but the sign-in remains. Sign in again to finish.', 'warn', 8000);
       } else {
+        // Deliberately not "nothing was changed". The purge is a traversal of
+        // several collections with no transaction around it — there cannot be
+        // one, on the free tier, from a browser — so a failure part-way leaves
+        // the account part-way removed. Saying otherwise would be comforting
+        // and wrong. Retrying is safe and is the way to finish: deleting a
+        // document that has already gone succeeds, so a second run picks up
+        // exactly where the first stopped.
         setFieldError(dom.deleteField, dom.deleteError,
-          'Deletion did not finish. Nothing else was changed — please try again.', dom.deleteInput);
-        toast('Could not delete the account.', 'error');
+          'Deletion did not finish, and it is not all-or-nothing — some of your data may already be gone. ' +
+          'Your sign-in is untouched, so run “Delete account” again to remove the rest.', dom.deleteInput);
+        toast('Deletion did not finish. Run it again to remove the rest.', 'error', 8000);
       }
     }
   }
