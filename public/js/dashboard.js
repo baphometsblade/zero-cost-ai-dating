@@ -810,7 +810,7 @@
 
     // Storage, usage and learning happen behind the animation. The deck is
     // already usable again by the time any of this resolves.
-    persistSwipe(entry);
+    queueSwipeBookkeeping(entry);
   }
 
   /** Explain a refused action without ever blaming the user's browser. */
@@ -832,6 +832,31 @@
    * @param {Object} entry the history entry created by commit()
    * @returns {Promise<void>}
    */
+  // One swipe's bookkeeping at a time. persistSwipe is deliberately not
+  // awaited — the deck must never wait on a counter — but that means swipe N's
+  // writes can still be in flight when swipe N+1 opens its usage transaction,
+  // and the two would be back to moving the document version under each other.
+  // Sequencing the calls costs the deck nothing (it never waited anyway) and
+  // makes the ordering the same one the user performed, so a learning map can
+  // never be overwritten by the older one that a previous swipe computed.
+  //
+  // Four rapid keyboard likes, 60ms apart, produced zero rejected commits both
+  // before and after this chain, so it is a guard against a window rather than
+  // a fix for a measured failure — the measured one was inside a single swipe
+  // and is fixed above. Said plainly because the difference matters.
+  let bookkeeping = Promise.resolve();
+
+  /**
+   * Run one swipe's bookkeeping after any still running.
+   * @param {Object} entry the queue entry being persisted
+   * @returns {void}
+   */
+  function queueSwipeBookkeeping(entry) {
+    bookkeeping = bookkeeping
+      .catch(function () {})
+      .then(function () { return persistSwipe(entry); });
+  }
+
   async function persistSwipe(entry) {
     let outcome = null;
     try {
