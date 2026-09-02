@@ -26,9 +26,9 @@ Against a real Firestore emulator, driving the real `public/js/data-store.js`:
   `discovery/{uid}` projection is not republished. That second write used to happen on
   every single bump, mirroring a field that is deliberately excluded from the projection
   and could never appear in it. On a free tier whose whole thesis is staying inside a
-  quota, it is worth a test. Note the scope: this is a saving on the *bump*. A swipe also
-  saves learning, which goes through `updateUser` and does still republish the projection,
-  so a like remains four document writes in total.
+  quota, it is worth a test. Note the scope: this is a saving on the *bump*. A whole swipe
+  is three writes — the swipe, the counter, the affinity map — since the learning save
+  stopped going through `updateUser` and became a plain field write.
 - **A swipe does not lose its increment to the deck's own learning save.** This is the
   check that caught this round's first attempt. `dashboard.js` fires an un-awaited
   `updateUser({learning})` immediately before the bump, and `updateUser` was a

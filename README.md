@@ -483,11 +483,13 @@ These are real, and worth knowing before you show this to anyone:
     from the SDK's cached copy of your document when it has one, and otherwise from a fresh
     day. Swipe with no connection and the stored counter can still come back light. That is
     deliberate: a counter that could not save must never take the deck down.
-  - **A swipe is not one write.** The *bump* is now a single write of a single field — it no
+  - **A swipe is not one write.** The *bump* is a single write of a single field — it no
     longer restamps `updatedAt` or republishes the public `discovery/{uid}` projection to
-    mirror a field that projection deliberately excludes. But the deck also saves learning on
-    every swipe, and that write does still republish the projection, so a like is four
-    document writes in total, not one.
+    mirror a field that projection deliberately excludes. The deck also records the swipe
+    itself and saves the learning map, so a like is **three** document writes: the swipe, the
+    counter, and the affinity map. It was four until the learning save stopped going through
+    `updateUser`, which republished the projection for a field the projection has never
+    carried.
   - **Demo mode is not immune.** It is per-device, but not "one tab at a time": the store
     listens for `storage` events and supports several tabs of the same browser, and the demo
     adapter's bump is still a `localStorage` read-modify-write two of them can race. It shares

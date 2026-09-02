@@ -1419,7 +1419,16 @@
         await db().collection('users').doc(uid).update({ lastActiveAt: iso });
         // The projection carries lastActiveAt too — it drives ranking's
         // activity signal, so it has to stay as fresh as the private doc.
-        await db().collection('discovery').doc(uid).update({ lastActiveAt: iso }).catch(function () {});
+        // Its own failure is tolerated for the same reason the outer one is,
+        // but it says so: this write failing is the half nobody would notice.
+        // The private document is still correct, so nothing here looks wrong
+        // to the person themselves — meanwhile every other deck keeps scoring
+        // them on a stale timestamp and quietly ranking them lower. An empty
+        // catch made that indistinguishable from success.
+        await db().collection('discovery').doc(uid).update({ lastActiveAt: iso })
+          .catch(function (err) {
+            console.warn('[zc.store] Could not refresh lastActiveAt on the public projection.', err);
+          });
         return true;
       } catch (err) {
         // Missing doc or offline — activity is a nicety, never an error path.
