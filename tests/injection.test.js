@@ -65,19 +65,39 @@ function shippedScripts() {
  * does not resurrect it.
  *
  * Crude on purpose: it does not parse JavaScript, it blanks the three things
- * that hide a false positive. Anything it gets wrong fails loudly as an extra
- * match rather than quietly as a missed one.
+ * that hide a false positive.
+ *
+ * Comments go before strings, which looks like the dangerous order — stripping
+ * `// ` out of `'rate // limit'` leaves an unterminated quote, and a quote that
+ * ran away could blank the real code after it and hide a sink. It cannot,
+ * because the two quote patterns exclude newlines: a broken literal dies at the
+ * end of its own line and takes nothing with it. That is load-bearing rather
+ * than incidental, so it is checked — a sink planted on the line after exactly
+ * that string is still reported.
  *
  * @param {string} source a JavaScript file
- * @returns {string} the same length-ish text with comments and literals blanked
+ * @returns {string} the same text with comments and single-line literals blanked
  */
 function code(source) {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')          // block comments
-    .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')      // line comments, sparing http://
+  return withoutComments(source)
     .replace(/'(?:[^'\\\n]|\\.)*'/g, "''")      // single-quoted strings
     .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')      // double-quoted
     .replace(/`(?:[^`\\]|\\.)*`/g, '``');       // templates
+}
+
+/**
+ * Comments only, literals left alone. One sink has to be looked for *inside*
+ * a string — a `javascript:` URL is only ever a string — so blanking strings
+ * would erase the very thing being searched for. Blanking comments first still
+ * spares a line like `// never build a javascript:void(0) href`, which is
+ * documentation and not a defect.
+ * @param {string} source a JavaScript file
+ * @returns {string} the same text with comments blanked
+ */
+function withoutComments(source) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')          // block comments
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');     // line comments, sparing http://
 }
 
 /**
@@ -105,11 +125,12 @@ test('no shipped script can turn a string into markup or into code', function ()
 
   const found = [];
   files.forEach(function (file) {
-    // The javascript:-URL pattern has to see string literals, so it is matched
-    // against the raw source; every other sink is matched against code only.
+    // The javascript:-URL pattern has to see string literals, so it gets the
+    // comment-stripped source; every other sink is matched against code only.
     const stripped = code(file.source);
+    const literalsIntact = withoutComments(file.source);
     SINKS.forEach(function (sink) {
-      const haystack = sink.name === 'javascript: URL' ? file.source : stripped;
+      const haystack = sink.name === 'javascript: URL' ? literalsIntact : stripped;
       const lines = haystack.split('\n');
       lines.forEach(function (line, index) {
         if (sink.pattern.test(line)) {
