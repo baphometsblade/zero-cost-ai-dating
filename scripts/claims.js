@@ -61,7 +61,7 @@ const CLAIMS = {
     note: 'firestore.rules executed against the emulator'
   },
   store: {
-    total: 31,
+    total: 37,
     how: 'npm run test:store',
     note: 'the shipped data-store.js driven against the emulator'
   }
