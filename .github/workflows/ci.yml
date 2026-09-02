@@ -72,6 +72,14 @@ jobs:
       - name: Run tests
         run: npm test
 
+      # The one number no test inside the run can see: `npm test`'s own total, which the
+      # README quotes. This runs the suite again in a child process and reads the count
+      # back out of its TAP summary — under a second, and the only way the claim can be
+      # checked at all. See scripts/claims.js for why the totals are enforced from both
+      # ends; the other three suites check their own.
+      - name: Check the unit total matches what the README claims
+        run: npm run check:claims
+
   e2e:
     name: Browser end-to-end suite
     runs-on: ubuntu-latest
@@ -127,12 +135,18 @@ jobs:
       # which is what e2e/specs/10-firebase.e2e.js looks for — loads the real
       # firestore.rules from firebase.json, and tears them down afterwards. The browser
       # reaches them through the page's own origin, so the shipped CSP is untouched.
-      - name: Run the Firebase spec against the emulators
+      #
+      # The whole suite rather than the Firebase spec alone, for one reason: this is the
+      # only run in which every spec executes, so it is the only run that can hold the
+      # README's emulator-inclusive total to account. A filtered run counts less by
+      # design and the runner does not check it. Costs about a minute; the alternative is
+      # a number in the README that nothing verifies. See scripts/claims.js.
+      - name: Run the whole suite against the emulators
         run: |
           npm install --prefix "$RUNNER_TEMP/emulator" "firebase-tools@$FIREBASE_TOOLS_VERSION"
           "$RUNNER_TEMP/emulator/node_modules/.bin/firebase" emulators:exec \
             --only firestore,auth --project demo-zc-browser \
-            "node e2e/run.js firebase"
+            "node e2e/run.js"
         env:
           NODE_PATH: ${{ runner.temp }}/playwright/node_modules
           FIREBASE_TOOLS_VERSION: '15.26.0'

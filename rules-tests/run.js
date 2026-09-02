@@ -15,6 +15,7 @@
 const fs = require('fs');
 const path = require('path');
 const harness = require('./harness');
+const claims = require('../scripts/claims');
 
 const SPEC_DIR = path.join(__dirname, 'specs');
 const PROJECT_ID = 'demo-zc-rules';
@@ -134,6 +135,16 @@ async function main() {
   if (!results.length) {
     process.stderr.write('  no checks ran — refusing to report success\n');
     return 2;
+  }
+
+  // And the same total check: an unfiltered green run has to count what this
+  // project claims it counts. See scripts/claims.js.
+  if (!filters.length && !failed.length) {
+    const problem = claims.disagreement('rules', results.length);
+    if (problem) {
+      process.stderr.write('\n  ' + problem + '\n');
+      return 1;
+    }
   }
   return failed.length ? 1 : 0;
 }

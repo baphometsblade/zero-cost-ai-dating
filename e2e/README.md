@@ -92,9 +92,23 @@ from.
 | --- | --- |
 | `run.js` | the runner: loads specs, opens a context per spec and viewport, prints results, exits non-zero on any failure |
 | `harness.js` | finding Playwright, serving `public/` the way Firebase Hosting does (clean URLs), optionally forwarding the emulators' paths through that same origin, opening a browser session, and the page steps every spec shares |
-| `specs/*.e2e.js` | one flow each, in file-name order |
+
+One flow per spec, run in file-name order. `tests/docs.test.js` fails if a spec exists
+without a row here, so this list cannot quietly fall behind `specs/`.
+
+| Spec | The flow it drives |
+| --- | --- |
+| `specs/01-deck.e2e.js` | signing in, the deck rendering with scores and the reasons behind them, and the full keyboard path through it |
+| `specs/02-match-burst.e2e.js` | right-swiping somebody who already liked you: the burst, and the icebreakers it offers |
+| `specs/03-matches.e2e.js` | the matches list, opening a conversation, sending a message, and finding it still there after a reload |
+| `specs/04-profile-settings.e2e.js` | editing your profile and changing your settings, including the fields the deck then filters on |
+| `specs/05-reports.e2e.js` | reporting somebody, retracting the report, and the block that outlives it |
+| `specs/06-layout.e2e.js` | the deck fitting the viewport — measured, not eyeballed, at every size the suite runs |
+| `specs/07-offline.e2e.js` | the service worker precaching, then serving the app with the network gone |
+| `specs/08-delete-account.e2e.js` | deleting your account, and what is left behind afterwards (nothing that names you) |
 | `specs/09-subpath.e2e.js` | the one spec that skips the shared server: it mounts `public/` at `/zero-cost-ai-dating`, the way GitHub Pages serves a project site, and proves navigation, the service worker and the 404 page all survive the subpath |
 | `specs/10-firebase.e2e.js` | the one spec that runs in firebase mode, against the emulators, and reads every result back out of Firestore |
+| `specs/11-subscription.e2e.js` | the premium simulation: that the page says plainly it takes no money and asks for no card, that declining the confirmation changes nothing, and that accepting it actually moves the entitlement the deck reads |
 
 A spec exports `{ title, viewports, run(t, page, ctx) }`. `t.check(name, ok, detail)`
 records one named expectation and keeps going; throwing aborts that spec and fails it.

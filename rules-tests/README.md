@@ -42,7 +42,19 @@ failing rule, and reads differently on purpose.
 | `emulate.js` | Boots the emulator once and runs the suites that need it inside it. Shared by `npm run test:rules`, `npm run test:store` and `npm run test:emulator` — the store suite lives in [`store-tests/`](../store-tests/README.md) but pays the same Java start-up, so it is worth booting only once. |
 | `run.js` | Loads `firestore.rules`, runs every spec, prints the summary. Refuses to report success if no check ran. |
 | `harness.js` | Resolves the outside packages, and holds the document fixtures the rules validate against. |
-| `specs/*.rules.js` | One spec per collection, plus the catch-all. |
+
+One spec per collection, plus the catch-all. `tests/docs.test.js` fails if a spec exists
+without a row here.
+
+| Spec | The rule it executes |
+| --- | --- |
+| `specs/01-users.rules.js` | `users/{uid}` — owner-only, and shape-validated on write |
+| `specs/02-discovery.rules.js` | `discovery/{uid}` — world-readable, but only the public shape |
+| `specs/03-swipes.rules.js` | `swipes/{from_to}` — authored by you, immutable, id-pinned |
+| `specs/04-matches.rules.js` | `matches/{a_b}` — participants only, and only with a reciprocal like |
+| `specs/05-messages.rules.js` | `matches/{id}/messages` — participants only, append-only, self-authored |
+| `specs/06-reports.rules.js` | `reports/{from_about}` — bounded, author-only, unprobeable |
+| `specs/07-default-deny.rules.js` | everything else — denied by default |
 
 Each spec starts from an empty database, so one spec's fixtures can never satisfy
 another's preconditions and mask a missing rule.

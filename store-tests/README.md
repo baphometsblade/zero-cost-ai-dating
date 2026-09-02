@@ -121,7 +121,17 @@ value would go green against a store that persisted nothing.
 | `run.js` | Runs every spec, prints the summary. Refuses to report success if no check ran. |
 | `context.js` | Loads the shipped `public/js/data-store.js` into Node against an emulator-backed compat Firestore. |
 | `harness.js` | The install hint, the project ids, and the open ruleset. Package resolution is imported from `rules-tests/harness.js` so the two suites cannot disagree about where `NODE_PATH` points. |
-| `specs/*.store.js` | One spec per property: concurrency, roll-over, what a bump writes, and rules acceptance. |
+
+One spec per property. `tests/docs.test.js` fails if a spec exists without a row here.
+
+| Spec | The property it establishes |
+| --- | --- |
+| `specs/01-concurrency.store.js` | concurrent bumps land exactly once each — 20 at a time on one document store 20 |
+| `specs/02-rollover.store.js` | the day roll-over happens inside the transaction, so a bump at midnight cannot resurrect yesterday |
+| `specs/03-writes.store.js` | a bump writes the `usage` field and nothing else, so it can never clobber a profile edit |
+| `specs/04-rules-accept.store.js` | the value the transaction stores is one `firestore.rules` accepts — the two suites agreeing about the same document |
+| `specs/05-swipe-race.store.js` | a document save in flight cannot eat the counter, or be eaten by it |
+| `specs/06-projection-order.store.js` | a racing save cannot leave the public `discovery/{uid}` projection behind the private document |
 
 Each spec starts from a cleared database, but the store itself is loaded once per process
 (the IIFE returns early on a second load, and `require` caches), so specs use their own
