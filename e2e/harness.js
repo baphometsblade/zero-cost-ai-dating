@@ -567,7 +567,12 @@ async function closeBurst(page) {
  */
 async function clickModalAction(page, label) {
   await page.waitForSelector('.modal-backdrop .modal-foot');
-  await page.locator('.modal-foot button', { hasText: new RegExp('^' + label + '$') }).first().click();
+  // The label is anchored so "Block" cannot match "Block and unmatch", but it
+  // is a button caption, not a pattern: "Switch it on (no payment)" was being
+  // read as a regex group and matched nothing at all, which surfaces as a
+  // 20-second click timeout rather than as anything mentioning regexes.
+  const exact = new RegExp('^' + label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$');
+  await page.locator('.modal-foot button', { hasText: exact }).first().click();
 }
 
 module.exports = {
