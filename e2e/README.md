@@ -109,6 +109,7 @@ without a row here, so this list cannot quietly fall behind `specs/`.
 | `specs/09-subpath.e2e.js` | the one spec that skips the shared server: it mounts `public/` at `/zero-cost-ai-dating`, the way GitHub Pages serves a project site, and proves navigation, the service worker and the 404 page all survive the subpath |
 | `specs/10-firebase.e2e.js` | the one spec that runs in firebase mode, against the emulators, and reads every result back out of Firestore |
 | `specs/11-subscription.e2e.js` | the premium simulation: that the page says plainly it takes no money and asks for no card, that declining the confirmation changes nothing, and that accepting it actually moves the entitlement the deck reads |
+| `specs/12-accessibility.e2e.js` | the promises the docs make about keyboards and motion, executed: landmarks and accessible names on every page, `prefers-reduced-motion` actually stilling the deck, the modal's focus trap in both directions with Escape and focus restored, and the two pane swaps that strand a keyboard user if focus is not moved deliberately |
 
 A spec exports `{ title, viewports, run(t, page, ctx) }`. `t.check(name, ok, detail)`
 records one named expectation and keeps going; throwing aborts that spec and fails it.
