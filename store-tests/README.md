@@ -28,7 +28,8 @@ Against a real Firestore emulator, driving the real `public/js/data-store.js`:
   and could never appear in it. On a free tier whose whole thesis is staying inside a
   quota, it is worth a test. Note the scope: this is a saving on the *bump*. A whole swipe
   is three writes — the swipe, the counter, the affinity map — since the learning save
-  stopped going through `updateUser` and became a plain field write.
+  stopped going through `updateUser` and became a plain field write. A mutual like is four:
+  it also creates the match.
 - **A swipe does not lose its increment to the deck's own learning save.** This is the
   check that caught this round's first attempt. `dashboard.js` fires an un-awaited
   `updateUser({learning})` immediately before the bump, and `updateUser` was a

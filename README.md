@@ -486,10 +486,11 @@ These are real, and worth knowing before you show this to anyone:
   - **A swipe is not one write.** The *bump* is a single write of a single field — it no
     longer restamps `updatedAt` or republishes the public `discovery/{uid}` projection to
     mirror a field that projection deliberately excludes. The deck also records the swipe
-    itself and saves the learning map, so a like is **three** document writes: the swipe, the
-    counter, and the affinity map. It was four until the learning save stopped going through
-    `updateUser`, which republished the projection for a field the projection has never
-    carried.
+    itself and saves the learning map, so an ordinary like is **three** document writes: the
+    swipe, the counter, and the affinity map — **four when it is mutual**, because that is
+    when the match document gets created. It was one more than that until the learning save
+    stopped going through `updateUser`, which republished the projection for a field the
+    projection has never carried.
   - **Demo mode is not immune.** It is per-device, but not "one tab at a time": the store
     listens for `storage` events and supports several tabs of the same browser, and the demo
     adapter's bump is still a `localStorage` read-modify-write two of them can race. It shares
