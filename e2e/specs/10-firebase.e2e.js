@@ -194,9 +194,13 @@ function drain(errors, resource, status) {
 // Names no bundled seed profile has, so a card carrying one can only have come
 // from Firestore. public/js/seed-data.js is still loaded by every page — the
 // deck rendering one of these is the difference between the two sources.
+//
+// Three, not two: the run swipes twice — see the rejected-commit check — and
+// one has to be left on the deck for the sign-back-in check at the end.
 const CANDIDATES = [
   { uid: 'e2e-firestore-fern', name: 'Fern of the Emulator', age: 30, gender: 'woman' },
-  { uid: 'e2e-firestore-remy', name: 'Remy of the Emulator', age: 34, gender: 'man' }
+  { uid: 'e2e-firestore-remy', name: 'Remy of the Emulator', age: 34, gender: 'man' },
+  { uid: 'e2e-firestore-sol', name: 'Sol of the Emulator', age: 28, gender: 'nonbinary' }
 ];
 
 /**
@@ -443,6 +447,24 @@ module.exports = {
         !!swipe && swipe.from === uid && swipe.to === seeded[0].uid && swipe.action === 'like',
         swipe ? swipe.from + ' -> ' + swipe.to + ' (' + swipe.action + ')' : 'no document');
 
+      // A second like straight after the first, with no pause. This is not
+      // padding: pressDeckKey comes back as soon as the stack re-renders,
+      // which is long before persistSwipe has finished writing, so this one
+      // lands while the first like's bookkeeping is still in flight — the
+      // ordinary way a person swipes, and the shape that makes the
+      // rejected-commit check near the end of this spec deterministic. With a
+      // single like it caught the defect in one run out of three; with two it
+      // caught it in three out of three.
+      const alsoTop = await h.topCardName(page);
+      const alsoSeeded = CANDIDATES.filter(function (who) { return alsoTop && alsoTop.indexOf(who.name) !== -1; });
+      await h.pressDeckKey(page, 'ArrowRight', alsoTop);
+      const swipeAgain = alsoSeeded.length === 1
+        ? await awaitDoc('swipes/' + uid + '_' + alsoSeeded[0].uid)
+        : null;
+      t.check('and a second like on its heels is stored just the same',
+        !!swipeAgain && swipeAgain.action === 'like',
+        swipeAgain ? swipeAgain.from + ' -> ' + swipeAgain.to : 'top card was ' + alsoTop);
+
       /* ---- out, and back in ---- */
       await page.goto(base + '/settings.html', { waitUntil: 'domcontentloaded' });
       await page.click('[data-signout]');
@@ -465,11 +487,15 @@ module.exports = {
       t.check('signing in again restores the same account', back === uid, 'uid=' + back);
 
       // And the deck it comes back to is still Firestore's: the account it
-      // signed back into has one swipe on record, so the candidate it already
-      // liked must not be offered again.
+      // signed back into has two swipes on record, so neither candidate it
+      // already liked may be offered again.
       const again = await h.topCardName(page);
-      t.check('the swiped candidate does not come back after signing in again',
-        !!again && again.indexOf(seeded[0].name) === -1, 'top card: ' + again);
+      const returned = CANDIDATES.filter(function (who) {
+        return again && again.indexOf(who.name) !== -1 &&
+          (who.uid === seeded[0].uid || (alsoSeeded.length === 1 && who.uid === alsoSeeded[0].uid));
+      });
+      t.check('neither swiped candidate comes back after signing in again',
+        !!again && returned.length === 0, 'top card: ' + again);
 
       /* ---- the finding ---- */
 
@@ -506,19 +532,31 @@ module.exports = {
       // deterministic detector, and it fails 3 runs out of 3. This one catches
       // the loud form if it ever comes back.
       //
-      // 400 is deliberately NOT included, and not because it is inconvenient:
-      // one arrives on every sign-up, and it arrives identically on the commit
-      // before adoption was serialised (measured, twice each way). It is
-      // setLastActive touching users/{uid} through a plain update(), which
-      // data-store.js catches on purpose — "activity is a nicety, never an
-      // error path". Pre-existing and out of this PR's scope; folding it in
-      // here would only hide it behind a fix for something else.
+      // 400 used to be thrown away here, written off as setLastActive touching
+      // users/{uid} on every sign-up and out of scope. Both halves were wrong,
+      // so it is asserted now instead of excused. A 400 on documents:commit is
+      // FAILED_PRECONDITION — a transaction committing against a version that
+      // moved under it — and documents:commit is the only write RPC the SDK
+      // sends outside its WebChannel stream, so a plain update() cannot produce
+      // one at all. setLastActive is a plain update(), and on four instrumented
+      // sign-ups out of four it landed 200 against a document that was already
+      // there. What did produce it was the *like*: persistSwipe started
+      // bumpUsage's usage transaction and persistLearning's whole-document
+      // updateUser transaction on the same users/{uid} in one tick, and
+      // whichever committed second lost. The learning save waits for the bump
+      // now instead of racing it, and it is a field write rather than a second
+      // transaction, so nothing of this page's own is ever in flight against
+      // users/{uid} while the counter commits. A 400 here again means
+      // something has started racing itself once more.
       const raced = drain(ctx.session.errors, 'documents:commit', 403)
         .concat(drain(ctx.session.errors, 'documents:commit', 409));
-      drain(ctx.session.errors, 'documents:commit', 400);
+      const stale = drain(ctx.session.errors, 'documents:commit', 400);
       t.check('signing up does not race its own account document',
         raced.length === 0,
         raced.length ? raced.length + ' rejected commit(s): ' + raced[0] : 'no rejected commits');
+      t.check('and nothing up to here lost a transaction to a write of its own',
+        stale.length === 0,
+        stale.length ? stale.length + ' stale commit(s): ' + stale[0] : 'no rejected commits');
 
       await emulator(FIRESTORE, 'DELETE', DOCS + '/users/' + uid);
       const recreate = await page.evaluate(function (id) {
@@ -531,18 +569,13 @@ module.exports = {
         recreate.ok === true,
         recreate.message + ' · sign-up hit the same denial ' + raced.length + ' time(s) this run');
 
-      // Both shapes of console error left in this session are reported by
-      // checks above; leaving them in would have the runner's closing check
-      // report the same findings a second time, and the sign-up race would
-      // make it do so at random. Everything else still reaches that check.
+      // The 403 the probe above provokes is reported by its own check; leaving
+      // it in would have the runner's closing check report the same finding a
+      // second time, and the sign-up race would make it do so at random.
+      // Everything else still reaches that check — including a 400, which is
+      // no longer drained anywhere: nothing in this spec may lose a
+      // transaction to a write the same page made.
       drain(ctx.session.errors, 'documents:commit', 403);
-      // FAILED_PRECONDITION on a commit is Firestore telling the SDK that the
-      // document moved under a transaction; it re-reads and replays, which is
-      // the behaviour store-tests/ exists to prove and which every check above
-      // depends on having worked. It is still a console error in a browser —
-      // worth knowing that a page talking to Firestore cannot promise a
-      // spotless console under contention.
-      drain(ctx.session.errors, 'documents:commit', 400);
     } finally {
       await server.stop();
     }

@@ -721,6 +721,15 @@
       return writeUsers(users);
     },
 
+    async setLearning(uid, learning) {
+      const users = readUsers();
+      if (!users[uid]) return false;
+      // Replaced, never merged: pruning a slug out of the affinity map is a
+      // real edit, and a merge would put it straight back.
+      users[uid].learning = cloneDeep(learning || {});
+      return writeUsers(users);
+    },
+
     async listCandidates(uid, options) {
       const limit = Math.max(1, Number((options || {}).limit) || DEFAULT_CANDIDATE_LIMIT);
       const users = readUsers();
@@ -1419,6 +1428,25 @@
       }
     },
 
+    async setLearning(uid, learning) {
+      // A field write, deliberately not updateUser. The caller arrives holding
+      // the finished map — ZC.matching.updateLearning built it from the copy
+      // in memory — so there is nothing to read back and therefore no
+      // read-modify-write to protect. Sending it through updateUser cost a
+      // transaction, and a swipe already runs one: bumpUsage. Two transactions
+      // on one users/{uid} in the same tick cannot both commit against the
+      // version they read, and the loser came back FAILED_PRECONDITION — a
+      // rejected commit and a browser console error on every single like,
+      // measured on two swipes out of two. The SDK replayed it and the data
+      // was always right, which is why this went unnoticed for so long; it was
+      // never free. One write, no read, no precondition, nothing to lose.
+      //
+      // `learning` is not part of projectDiscovery, so unlike a profile save
+      // this has no public half to keep in step.
+      await db().collection('users').doc(uid).update({ learning: learning || {} });
+      return true;
+    },
+
     async listCandidates(uid, options) {
       const limit = Math.max(1, Number((options || {}).limit) || DEFAULT_CANDIDATE_LIMIT);
       const pageSize = Math.min(200, Math.max(60, limit * 2));
@@ -1979,6 +2007,22 @@
       if (lastTouch[uid] && now - lastTouch[uid] < TOUCH_THROTTLE_MS) return false;
       lastTouch[uid] = now;
       return adapter.setLastActive(uid, new Date(now).toISOString());
+    },
+
+    /**
+     * Store the adaptive-learning map a swipe just produced. The map replaces
+     * whatever is stored; it is never merged, because pruning a slug out of it
+     * is a deliberate edit. Use this rather than updateUser for learning: the
+     * value is already final, so it needs no transaction, and a swipe's usage
+     * bump does need one.
+     * @param {string} uid user id
+     * @param {Object} learning the map from ZC.matching.updateLearning
+     * @returns {Promise<boolean>} true when a write happened
+     */
+    async saveLearning(uid, learning) {
+      await ready;
+      if (!uid) return false;
+      return adapter.setLearning(uid, learning || {});
     },
 
     /**
