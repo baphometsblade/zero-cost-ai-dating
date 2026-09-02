@@ -54,12 +54,15 @@ const AA_NORMAL = 4.5;
  * green forever — the exact false pass the rest of this project refuses. A
  * short list that a person has to extend when they add a filled button is the
  * honest trade.
+ *
+ * `.btn-primary` is absent on purpose: its fill is a linear-gradient between
+ * two tokens, so there is no single background colour for `--on-brand` to be
+ * measured against. Adding it here would mean inventing one.
  */
 const FLAT_PAIRS = [
-  { rule: '.btn-primary', fill: null, ink: '--on-brand', why: 'gradient fill — see below' },
   { rule: '.btn-danger', fill: '--danger', ink: '--on-danger' },
   { rule: '.btn-success', fill: '--ok-ink', ink: '--on-ok' }
-].filter(function (pair) { return pair.fill !== null; });
+];
 
 /**
  * Pull one theme's custom properties out of a block of CSS.
@@ -169,7 +172,7 @@ test('the palette defines every ink a flat fill needs, in every theme', function
 
 test('text on a flat status fill clears WCAG AA in light and in both darks', function () {
   const all = themes();
-  const light = themes().light;
+  const light = all.light;
   const failures = [];
   const measured = [];
 
