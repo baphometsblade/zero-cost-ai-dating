@@ -52,13 +52,17 @@ jobs:
         node: ['20', '22']
 
     steps:
-      # Fetch the sources under test.
+      # Fetch the sources under test. Action majors are kept current rather than
+      # pinned to whatever worked once: GitHub retires the Node runtime an action
+      # major targets, and a workflow left behind starts as a warning on every run
+      # and ends as a failure. There is no lockfile here to hold them back, since
+      # this project installs nothing.
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Node 20 LTS and the next LTS line; package.json requires >= 18.
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
 
@@ -92,10 +96,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '20'
 
@@ -126,7 +130,7 @@ jobs:
       # machine but the author's. Java and the CLI are infrastructure, same arrangement
       # as everywhere else: the runner's temp directory, never the repository.
       - name: Set up Java for the Firestore emulator
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '21'
@@ -166,17 +170,17 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '20'
 
       # The Firestore emulator is a Java program. ubuntu-latest ships a JDK, but
       # pinning one keeps the job from breaking when the image's default moves.
       - name: Set up Java for the Firestore emulator
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '21'
