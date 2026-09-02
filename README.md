@@ -248,7 +248,7 @@ npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.
 
 ### Unit suites
 
-Eleven suites on Node's built-in runner — **210 checks**, no install, no browser, seconds:
+Twelve suites on Node's built-in runner — **212 checks**, no install, no browser, seconds:
 
 | Suite | What it pins down |
 | --- | --- |
@@ -257,6 +257,7 @@ Eleven suites on Node's built-in runner — **210 checks**, no install, no brows
 | `tests/contrast.test.js` | Reads the three palette blocks out of `style.css` and holds the flat fill/ink pairs — and body text on each neutral surface — to WCAG AA in light and in both darks. Deliberately narrow: gradients, glass over photos and `color-mix` have no second flat colour to measure against, so they are left out and said so rather than measured badly. It found white text on dark's `--danger` at 2.85:1, on the button that deletes your account. |
 | `tests/data-store.test.js` | The demo storage adapter, loaded for real in Node against a `localStorage` shim: seeding (32 profiles, inbound likes, both conversations, idempotency, force re-seed), user create/update deep-merge semantics with wholesale `interestAffinity` replacement, swipe/match/undo idempotency, messaging with unread counters and the 1000-char cap, daily usage limits per plan, the reports lifecycle (file, list, retract, purge on account deletion), and export/import/reset round-trips. |
 | `tests/docs.test.js` | The claims this README makes about itself: that every `**N checks**` total is one `scripts/claims.js` stands behind, that every path and `npm run` incantation in the docs resolves, and that no spec exists without a line describing it. Documentation is the one part of this project that fails silently; this is the cheapest check there is, so it runs on every push. |
+| `tests/injection.test.js` | No shipped script can hand a browser a string to parse as markup or run as code — `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, `srcdoc`, `eval`, `new Function`, string-bodied timers, `javascript:` URLs — with comments and string literals blanked first, so a sink named in prose is not mistaken for one in use. In a dating app almost every string on screen was typed by somebody else. |
 | `tests/matching-engine.test.js` | Every hard filter including the mutual gender/age cases, the neutral missing-location path, score bounds, determinism, tokeniser and cosine behaviour, learning clamp/prune/cap, ranking tie-breaks, weight renormalisation, and a golden end-to-end score. |
 | `tests/pwa.test.js` | The manifest and the service worker carry no root-anchored assumptions, so the same `public/` installs and serves offline under a GitHub Pages project subpath as well as at a site root. |
 | `tests/seed.test.js` | The shape of all 32 seeded profiles against the data model, unique uids and emails, valid interest slugs, ages consistent with birthdates, and `seed-data.js` being in sync with `seed/profiles.json`. |
@@ -471,8 +472,14 @@ deliberate local `npm run deploy`.
   CSSOM — and `tests/static.test.js` fails the build if one appears. Every page also carries
   the policy as a `<meta>` tag, because GitHub Pages cannot set headers; that copy is what
   makes it strict on a laptop too, and it has a cost — see Limitations.
-- **No `innerHTML` with user data.** Every bio, name, message and location label is inserted
-  with `textContent` (via `ZC.util.el({ text })`). Photo URLs are restricted to `https://`.
+- **No way to turn a string into markup at all.** Every bio, name, message and location label
+  is inserted with `textContent` (via `ZC.util.el({ text })`), and there is no longer any
+  escape hatch to forget: `el`'s old `html` prop — the project's one `innerHTML` assignment,
+  documented as "trusted markup only" and never once used — has been removed, and
+  `tests/injection.test.js` fails the build if it or any relative (`outerHTML`,
+  `insertAdjacentHTML`, `document.write`, `srcdoc`, `eval`, `new Function`, a string-bodied
+  timer, a `javascript:` URL) appears in a shipped script. The CSP is the second line of
+  defence here, not the first. Photo URLs are restricted to `https://`.
 - **The Firebase web API key is not a secret.** It identifies your project; it does not
   authorise anything. Access control lives in the rules file, which is why that file is worth
   reading before you deploy.
