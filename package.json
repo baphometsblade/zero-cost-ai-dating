@@ -18,6 +18,7 @@
     "bench": "node scripts/bench-matching.js",
     "build:seed": "node scripts/build-seed.js",
     "check:seed": "node scripts/build-seed.js --check",
+    "check:claims": "node scripts/check-claims.js",
     "deploy": "firebase deploy --only hosting,firestore"
   },
   "keywords": [

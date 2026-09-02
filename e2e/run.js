@@ -16,6 +16,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const harness = require('./harness');
+const claims = require('../scripts/claims');
 
 const SPEC_DIR = path.join(__dirname, 'specs');
 
@@ -146,6 +147,7 @@ async function main() {
 
   const results = [];
   const skipped = [];
+  const skippedFiles = [];
   const started = Date.now();
   const server = await harness.startServer();
   const browser = await playwright.chromium.launch();
@@ -162,6 +164,7 @@ async function main() {
           const why = (verdict && verdict.why) || 'no reason given';
           process.stdout.write('\n--- ' + spec.title + '\n  SKIP  ' + why + '\n');
           skipped.push(spec.title + ' — ' + why);
+          skippedFiles.push(spec.file);
           continue;
         }
       }
@@ -216,6 +219,26 @@ async function main() {
   if (!results.length) {
     process.stderr.write('  no checks ran — refusing to report success\n');
     return 2;
+  }
+
+  // And the weaker false-green above it: a run that asserted *fewer things than
+  // it used to*, and passed all of them. Only a complete run can say anything
+  // about the total — a filter or a viewport restriction counts less by design
+  // — and which total depends on whether the emulators were there for the
+  // Firebase spec. See scripts/claims.js.
+  if (!args.viewport && !args.filters.length && !failed.length) {
+    // Two totals are claimed, and exactly two situations are recognised: every
+    // spec ran, or the Firebase one alone was skipped for want of emulators.
+    // Anything else skipping is a shape nobody has claimed a number for, and
+    // guessing one would be the false confidence this check exists to remove.
+    const onlyFirebaseSkipped = skippedFiles.length === 1 &&
+      skippedFiles[0].indexOf('firebase') !== -1;
+    const key = skippedFiles.length === 0 ? 'e2eFirebase' : (onlyFirebaseSkipped ? 'e2e' : null);
+    const problem = key ? claims.disagreement(key, results.length) : null;
+    if (problem) {
+      process.stderr.write('\n  ' + problem + '\n');
+      return 1;
+    }
   }
   return failed.length ? 1 : 0;
 }

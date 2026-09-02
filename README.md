@@ -248,13 +248,14 @@ npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.
 
 ### Unit suites
 
-Nine suites on Node's built-in runner — **201 checks**, no install, no browser, seconds:
+Ten suites on Node's built-in runner — **206 checks**, no install, no browser, seconds:
 
 | Suite | What it pins down |
 | --- | --- |
 | `tests/auth.test.js` | The real `public/js/auth.js` on the demo backend, nothing mocked but the browser globals it reaches for: the salted credential vault (including the documented weak fallback when `crypto.subtle` is absent), sign-up and sign-in, the session record, `onChange`, and the three route guards. |
 | `tests/csp-sync.test.js` | The `<meta http-equiv>` copy of the Content-Security-Policy on every page equals the `firebase.json` header minus `frame-ancestors`, and sits before the first `<link>` and `<script>` — two copies of a policy drift apart unless something forces them together. |
 | `tests/data-store.test.js` | The demo storage adapter, loaded for real in Node against a `localStorage` shim: seeding (32 profiles, inbound likes, both conversations, idempotency, force re-seed), user create/update deep-merge semantics with wholesale `interestAffinity` replacement, swipe/match/undo idempotency, messaging with unread counters and the 1000-char cap, daily usage limits per plan, the reports lifecycle (file, list, retract, purge on account deletion), and export/import/reset round-trips. |
+| `tests/docs.test.js` | The claims this README makes about itself: that every `**N checks**` total is one `scripts/claims.js` stands behind, that every path and `npm run` incantation in the docs resolves, and that no spec exists without a line describing it. Documentation is the one part of this project that fails silently; this is the cheapest check there is, so it runs on every push. |
 | `tests/matching-engine.test.js` | Every hard filter including the mutual gender/age cases, the neutral missing-location path, score bounds, determinism, tokeniser and cosine behaviour, learning clamp/prune/cap, ranking tie-breaks, weight renormalisation, and a golden end-to-end score. |
 | `tests/pwa.test.js` | The manifest and the service worker carry no root-anchored assumptions, so the same `public/` installs and serves offline under a GitHub Pages project subpath as well as at a site root. |
 | `tests/seed.test.js` | The shape of all 32 seeded profiles against the data model, unique uids and emails, valid interest slugs, ages consistent with birthdates, and `seed-data.js` being in sync with `seed/profiles.json`. |
@@ -358,6 +359,31 @@ the transaction stored against the real `firestore.rules` as the document's owne
 narrower claim than "the transaction passes the rules", and `store-tests/` says so.
 See [`store-tests/README.md`](store-tests/README.md).
 
+### The numbers in this README
+
+Every "**N checks**" above is a claim about a run, and until recently it was the one kind of
+claim this project made that nothing executed. It went stale three times: a spec count that
+stayed at nine after a tenth arrived, a "155/156 passing" that outlived the run it described,
+and a "three writes" that was four for a mutual like. Each was caught by somebody reading
+carefully, which is precisely the standard the rest of the repository refuses to accept.
+
+The totals now live in [`scripts/claims.js`](scripts/claims.js), once, and are held to
+account from both directions:
+
+- `tests/docs.test.js` asserts the README quotes those numbers and no others, that every path
+  and `npm run` incantation in the documentation resolves, and that no spec file exists
+  without a line describing it. It reads files only — no browser, no emulator — so it runs in
+  `npm test` on every push.
+- each runner compares its own summary against the same file at the end of a **complete**
+  run, and fails if they disagree. A filtered run counts less by design and is not checked.
+- `npm run check:claims` covers the one total no test inside the run can see: `npm test`'s
+  own. It runs the suite in a child process and reads the count out of the TAP summary.
+
+So a suite that grows fails its own run until `scripts/claims.js` is updated, and updating
+that file fails `npm test` until this README agrees. There is no order in which the two can
+quietly drift apart. What is still not checked is prose — a sentence that has become untrue
+while keeping its number — and `scripts/claims.js` says so rather than implying otherwise.
+
 ### CI
 
 `.github/workflows/ci.yml` has three jobs. `verify` runs exactly `npm run check:seed` and
@@ -370,7 +396,10 @@ Playwright and Chromium into the runner's temp directory — never into the repo
 of its own, so a failed download reads as infrastructure rather than as a red test.
 `emulator` does the same for the Firestore emulator, and runs both suites that need one —
 `firestore.rules`, then the shipped store — inside a single boot, because booting costs more
-than either suite does. There are no secrets and no deploy step — deploying stays a
+than either suite does. The `e2e` job runs the browser suite twice: once bare, which is what
+a contributor with nothing installed gets and which proves the Firebase spec skips rather
+than silently passing, and once inside `emulators:exec`, which is the only run in which every
+spec executes and therefore the only one that can hold the 182-check total to account. There are no secrets and no deploy step — deploying stays a
 deliberate local `npm run deploy`.
 
 ---
@@ -403,7 +432,9 @@ deliberate local `npm run deploy`.
 ├── seed/profiles.json       # source of truth for the demo cast
 ├── scripts/
 │   ├── build-seed.js        # regenerates public/js/seed-data.js
-│   └── bench-matching.js    # times buildCorpus + rankCandidates (npm run bench)
+│   ├── bench-matching.js    # times buildCorpus + rankCandidates (npm run bench)
+│   ├── claims.js            # the check totals this README quotes, in one place
+│   └── check-claims.js      # holds `npm test`'s own total to that file (check:claims)
 ├── tests/                   # node:test suites
 ├── e2e/                     # browser suite (npm run test:e2e — Playwright, not a dep)
 │   ├── run.js               # the runner
