@@ -248,12 +248,13 @@ npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.
 
 ### Unit suites
 
-Ten suites on Node's built-in runner — **207 checks**, no install, no browser, seconds:
+Eleven suites on Node's built-in runner — **210 checks**, no install, no browser, seconds:
 
 | Suite | What it pins down |
 | --- | --- |
 | `tests/auth.test.js` | The real `public/js/auth.js` on the demo backend, nothing mocked but the browser globals it reaches for: the salted credential vault (including the documented weak fallback when `crypto.subtle` is absent), sign-up and sign-in, the session record, `onChange`, and the three route guards. |
 | `tests/csp-sync.test.js` | The `<meta http-equiv>` copy of the Content-Security-Policy on every page equals the `firebase.json` header minus `frame-ancestors`, and sits before the first `<link>` and `<script>` — two copies of a policy drift apart unless something forces them together. |
+| `tests/contrast.test.js` | Reads the three palette blocks out of `style.css` and holds the flat fill/ink pairs — and body text on each neutral surface — to WCAG AA in light and in both darks. Deliberately narrow: gradients, glass over photos and `color-mix` have no second flat colour to measure against, so they are left out and said so rather than measured badly. It found white text on dark's `--danger` at 2.85:1, on the button that deletes your account. |
 | `tests/data-store.test.js` | The demo storage adapter, loaded for real in Node against a `localStorage` shim: seeding (32 profiles, inbound likes, both conversations, idempotency, force re-seed), user create/update deep-merge semantics with wholesale `interestAffinity` replacement, swipe/match/undo idempotency, messaging with unread counters and the 1000-char cap, daily usage limits per plan, the reports lifecycle (file, list, retract, purge on account deletion), and export/import/reset round-trips. |
 | `tests/docs.test.js` | The claims this README makes about itself: that every `**N checks**` total is one `scripts/claims.js` stands behind, that every path and `npm run` incantation in the docs resolves, and that no spec exists without a line describing it. Documentation is the one part of this project that fails silently; this is the cheapest check there is, so it runs on every push. |
 | `tests/matching-engine.test.js` | Every hard filter including the mutual gender/age cases, the neutral missing-location path, score bounds, determinism, tokeniser and cosine behaviour, learning clamp/prune/cap, ranking tie-breaks, weight renormalisation, and a golden end-to-end score. |

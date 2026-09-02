@@ -46,12 +46,18 @@
 
   /* Ok and warn again, dark enough to be read as text or as a lone glyph on a
      light surface — the fill values above are not. --danger needs no such
-     pair; #dc3545 already clears 4.5:1 on white. */
+     pair: #dc3545 already clears 4.5:1 on white as text. */
   --ok-ink: #0f7f57;
   --warn-ink: #9a5b14;
   /* Ink for a filled --ok-ink surface: white is readable on light's deep
      green, but not on dark's mint, which inks near-black instead. */
   --on-ok: #ffffff;
+  /* The same pair for --danger, which answers the inverse question to the one
+     above: not "is danger readable as text" but "what is readable on top of a
+     danger fill". Light's #dc3545 takes white at 4.53:1. Dark's #f2707b is a
+     pale pink and takes white at 2.85:1 — a fail, on the one button in this
+     app that deletes an account. tests/contrast.test.js holds both to 4.5:1. */
+  --on-danger: #ffffff;
 
   /* Soft tints for banners, selected chips and status pills */
   --brand-soft: #ffe6ec;
@@ -155,6 +161,7 @@
     --ok-ink: var(--ok);
     --warn-ink: var(--warn);
     --on-ok: #06281c;
+    --on-danger: #2a0d15;
 
     --brand-soft: #3b1a24;
     --accent-soft: #241f42;
@@ -210,6 +217,7 @@
   --ok-ink: var(--ok);
   --warn-ink: var(--warn);
   --on-ok: #06281c;
+  --on-danger: #2a0d15;
 
   --brand-soft: #3b1a24;
   --accent-soft: #241f42;
@@ -792,7 +800,7 @@ h3 {
 
 .btn-danger {
   background: var(--danger);
-  color: #fff;
+  color: var(--on-danger);
 }
 
 .btn-danger:hover:not([disabled]):not(.is-loading) {

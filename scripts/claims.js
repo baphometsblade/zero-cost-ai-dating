@@ -41,7 +41,7 @@
  */
 const CLAIMS = {
   unit: {
-    total: 207,
+    total: 210,
     how: 'npm test',
     note: 'Node\'s built-in runner, no install'
   },
@@ -68,7 +68,7 @@ const CLAIMS = {
 };
 
 /** How many files `tests/` holds, which the README describes in words. */
-const UNIT_SUITE_FILES = 10;
+const UNIT_SUITE_FILES = 11;
 
 /**
  * Compare a finished run's count against what this project claims, and phrase
