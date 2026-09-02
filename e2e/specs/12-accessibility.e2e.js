@@ -70,21 +70,59 @@ module.exports = {
       await page.waitForSelector('main, [role="main"]', { timeout: 5000 }).catch(function () {});
       const report = await page.evaluate(function () {
         const out = { main: document.querySelectorAll('main, [role="main"]').length, h1: document.querySelectorAll('h1').length, unnamed: [] };
+
+        /* What a screen reader would end up announcing, near enough.
+           Deliberately not the full accname algorithm — no generated content,
+           no <legend>, no placeholder fallback, no recursion into referenced
+           subtrees — and it is worth being plain about that rather than
+           implying this spec implements the specification. It is the set of
+           sources this app actually uses, in the order the platform tries
+           them, and it resolves aria-labelledby instead of merely noticing the
+           attribute: a reference to an id that does not exist, or to an empty
+           element, names nothing at all, and an earlier version of this check
+           accepted exactly that as a name. */
+        function accessibleName(node) {
+          const ref = node.getAttribute('aria-labelledby');
+          if (ref) {
+            const text = ref.split(/\s+/).map(function (id) {
+              const target = document.getElementById(id);
+              return target ? (target.textContent || '').trim() : '';
+            }).filter(Boolean).join(' ').trim();
+            if (text) return text;
+          }
+          const label = (node.getAttribute('aria-label') || '').trim();
+          if (label) return label;
+          if (node.labels && node.labels.length) {
+            const own = Array.prototype.map.call(node.labels, function (l) {
+              return (l.textContent || '').trim();
+            }).filter(Boolean).join(' ').trim();
+            if (own) return own;
+          }
+          const text = (node.textContent || '').trim();
+          if (text) return text;
+          return (node.getAttribute('title') || '').trim();
+        }
+
         // A control nobody can name is a control a screen reader announces as
         // "button". Only visible ones: the pages keep panels in the DOM.
         document.querySelectorAll('button, a[href]').forEach(function (node) {
           if (node.offsetParent === null) return;
-          const label = (node.textContent || '').trim() || node.getAttribute('aria-label') || node.getAttribute('title') || '';
-          if (!label) out.unnamed.push((node.tagName + '.' + node.className).slice(0, 40));
+          if (!accessibleName(node)) out.unnamed.push((node.tagName + '.' + node.className).slice(0, 40));
         });
         document.querySelectorAll('input, select, textarea').forEach(function (node) {
           if (node.type === 'hidden' || node.offsetParent === null) return;
-          const label = (node.labels && node.labels.length && (node.labels[0].textContent || '').trim()) ||
-            node.getAttribute('aria-label') || node.getAttribute('aria-labelledby') || node.getAttribute('title') || '';
-          if (!label) out.unnamed.push((node.tagName + '#' + (node.id || node.name)).slice(0, 40));
+          if (!accessibleName(node)) out.unnamed.push((node.tagName + '#' + (node.id || node.name)).slice(0, 40));
         });
+
         // An <img> with no alt attribute at all is announced by its filename;
         // alt="" is the correct way to say "decorative" and passes.
+        //
+        // Every image, visible or not — unlike the controls above, and on
+        // purpose. An image in a panel that has not been shown yet is not
+        // exempt from needing alt text; it is the one most likely to be
+        // forgotten, because nobody looking at the page can see it is missing.
+        // There are none on any page today, so the strictness costs nothing
+        // and holds the line for the panel somebody adds later.
         document.querySelectorAll('img').forEach(function (img) {
           if (img.getAttribute('alt') === null) out.unnamed.push('img[no alt] ' + img.src.slice(-24));
         });
@@ -98,7 +136,7 @@ module.exports = {
 
     t.check('every page has exactly one main landmark and one h1',
       structural.length === 0, structural.join('; ') || 'all ' + PAGES.length + ' pages');
-    t.check('every visible control, field and image has an accessible name',
+    t.check('every visible control and field is named, and every image has alt text',
       unnamed.length === 0, unnamed.slice(0, 4).join('; ') || 'nothing unnamed across ' + PAGES.length + ' pages');
 
     /* ---- prefers-reduced-motion ---- */
@@ -192,14 +230,21 @@ module.exports = {
     await page.goto(ctx.base + '/dashboard.html', { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#deck-stack .swipe-card');
 
-    const live = await page.evaluate(function () {
-      return Array.prototype.map.call(
-        document.querySelectorAll('[aria-live], [role="status"], [role="alert"]'),
-        function (node) { return node.id || node.className; }
-      );
+    // Counting live regions anywhere on the page would pass on the toast host
+    // alone, while the deck itself said nothing. This is the deck's own status
+    // output, and the check below proves it actually carries the deck's state.
+    const status = await page.evaluate(function () {
+      const node = document.getElementById('deck-status');
+      if (!node) return null;
+      return {
+        live: node.getAttribute('aria-live'),
+        role: node.getAttribute('role'),
+        text: (node.textContent || '').trim()
+      };
     });
-    t.check('the deck has live regions, so what changes without a page load is spoken',
-      live.length >= 2, JSON.stringify(live));
+    t.check('the deck has a live status region that says what it is showing',
+      !!status && status.role === 'status' && status.live === 'polite' && status.text.length > 0,
+      JSON.stringify(status));
 
     const card = await page.evaluate(function () {
       const node = document.querySelector('#deck-stack .swipe-card');
@@ -222,6 +267,15 @@ module.exports = {
     t.check('passing a card by keyboard leaves focus on the next one, not on the document',
       after.isBody === false && after.name !== before.name,
       JSON.stringify(before.name) + ' → ' + JSON.stringify(after.name));
+
+    // A region that is live but never written to announces nothing. This is
+    // the half that makes the one above worth having: the deck changed under
+    // the user with no page load, and the region says so.
+    const spoken = await page.evaluate(function () {
+      return ((document.getElementById('deck-status') || {}).textContent || '').trim();
+    });
+    t.check('and the swipe is spoken, so the region is written to and not merely present',
+      spoken.length > 0 && spoken !== status.text, JSON.stringify(spoken.slice(0, 60)));
 
     /* ---- the pane swap that was stranding people ---- */
 
