@@ -858,8 +858,14 @@
       showMatchBurst(entry.result, entry.matchId);
       if (ZC.app && typeof ZC.app.refreshBadges === 'function') ZC.app.refreshBadges(true);
     }
-    persistLearning(entry.result.profile, entry.action);
-
+    // The counter first, on its own. Bumping it has to be a transaction — two
+    // tabs swiping at once must both count — and a transaction commits against
+    // the version it read. Any other write to users/{uid} landing in between
+    // moves that version, and the emulator answers FAILED_PRECONDITION: a 400
+    // on documents:commit and a console error, on every single like, measured
+    // two swipes out of two. The SDK replays and the data is right, which is
+    // why it went unnoticed; it was never free. So nothing else of ours may be
+    // in flight against that document while this runs.
     if (entry.field) {
       try {
         await ZC.store.bumpUsage(state.me.uid, entry.field, 1);
@@ -868,6 +874,9 @@
         toast('Your daily count could not be updated. The swipe itself is saved.', 'warn');
       }
     }
+    // Then the learning map, after the bump rather than across it. The deck is
+    // still not waiting: commit() left persistSwipe unawaited long ago.
+    await persistLearning(entry.result.profile, entry.action);
     await refreshBudgets();
     releaseReservation(entry.field);
   }
@@ -882,24 +891,30 @@
   }
 
   /**
-   * Fold a swipe into the adaptive model and save it in the background.
-   * The UI never waits on this — the affinity map only changes future ranking.
+   * Fold a swipe into the adaptive model and save it. Awaited by persistSwipe
+   * so the write cannot overlap the usage bump, never by the deck — the
+   * affinity map only changes future ranking.
    * @param {Object} candidateDoc the swiped UserDoc
    * @param {'like'|'pass'|'super'} action what happened
-   * @returns {void}
+   * @returns {Promise<void>} settles when the save has landed, or given up
    */
   function persistLearning(candidateDoc, action) {
-    if (!ZC.matching || typeof ZC.matching.updateLearning !== 'function') return;
+    if (!ZC.matching || typeof ZC.matching.updateLearning !== 'function') return Promise.resolve();
     let learning;
     try {
       learning = ZC.matching.updateLearning(state.me.learning, candidateDoc, action);
     } catch (err) {
       console.warn('[zc] Learning update skipped:', err);
-      return;
+      return Promise.resolve();
     }
     state.me.learning = learning;
-    Promise.resolve()
-      .then(function () { return ZC.store.updateUser(state.me.uid, { learning: learning }); })
+    // saveLearning, not updateUser: the map is already final, so there is
+    // nothing to read back and no read-modify-write to protect. updateUser
+    // would spend a transaction and rewrite the whole document plus its
+    // discovery projection — three writes a swipe, for a field that is not in
+    // the projection at all.
+    return Promise.resolve()
+      .then(function () { return ZC.store.saveLearning(state.me.uid, learning); })
       .catch(function (err) {
         // Losing one swipe's worth of personalisation is not worth a dialog.
         console.warn('[zc] Learning could not be saved:', err);
