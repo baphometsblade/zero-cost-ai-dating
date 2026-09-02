@@ -40,11 +40,20 @@
   /**
    * Build an element.
    * Supported props: `class` (string|string[]), `text` (safe text content),
-   * `html` (TRUSTED markup only — never pass user or seed strings here),
    * `attrs` ({name: value}), `on` ({event: handler}), `style` ({prop: value},
    * applied via CSSOM so the shipped CSP stays happy), `dataset` ({key: value}).
    * Any other scalar prop is set as an attribute, so el('input', {type:'email'})
    * does the obvious thing.
+   *
+   * There is deliberately no `html` prop. There used to be one — `node.innerHTML
+   * = String(p.html)`, documented as "TRUSTED markup only" — and nothing in this
+   * repository ever passed it. That is the worst shape a sink can have: the one
+   * line in the project that can inject markup, sitting in the helper every page
+   * builds every node with, kept alive by a comment asking future readers to be
+   * careful. A rule nobody can break is better than a rule everybody is asked to
+   * remember, so the line is gone and tests/injection.test.js fails the build if
+   * it or any relative comes back. `html` stays in DOM_PROP_KEYS below so that
+   * passing it is inert rather than becoming a stray attribute.
    * @param {string} tag tag name
    * @param {Object} [props={}] see above
    * @param {(Node|string|number|Array)} [children=[]] appended in order
@@ -57,8 +66,6 @@
     if (p.class) node.className = Array.isArray(p.class) ? p.class.filter(Boolean).join(' ') : String(p.class);
     if (p.className) node.className = String(p.className);
     if (p.text !== undefined && p.text !== null) node.textContent = String(p.text);
-    // Trusted markup only. Every user-authored string must come in via `text`.
-    if (p.html !== undefined && p.html !== null) node.innerHTML = String(p.html);
 
     if (p.attrs) {
       Object.keys(p.attrs).forEach(function (name) {
