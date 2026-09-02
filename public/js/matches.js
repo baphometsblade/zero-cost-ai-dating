@@ -328,7 +328,7 @@
     row.addEventListener('click', function (event) {
       if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
       event.preventDefault();
-      openMatch(match.matchId);
+      openMatch(match.matchId, true);
     });
     return el('li', {}, [row]);
   }
@@ -936,12 +936,53 @@
   }
 
   /**
-   * Open a conversation: swap the panes, subscribe to its messages, clear the
-   * unread counter and hand focus to the composer.
-   * @param {string} matchId the match to open
+   * Put focus inside the conversation that was just opened, so the pane swap
+   * is not a dead end. The composer is the target because it is what somebody
+   * opening a conversation came to do, and because the live region has already
+   * announced whose conversation it is — the context is not lost by landing on
+   * the input rather than the header.
+   *
+   * This used to be one line at the end of openMatch(), guarded by isWide().
+   * Both halves of that guard were the wrong way round. It fired on a phone
+   * never — and a phone is where the list is *replaced* by the conversation,
+   * so focus was left on a row that is no longer on screen, or on <body> once
+   * the repaint removed it. And on a desktop it fired always, including when
+   * the page was merely restoring `?m=` from the address bar, which drops the
+   * caret into a text field because of a link somebody followed.
+   *
+   * @param {boolean} [fromUser] true when a person activated a row; a
+   *   conversation restored from the URL is left alone deliberately
    * @returns {void}
    */
-  function openMatch(matchId) {
+  function focusConversation(fromUser) {
+    if (!fromUser) return;
+    if (dom.input && typeof dom.input.focus === 'function') dom.input.focus();
+  }
+
+  /**
+   * Open a conversation: swap the panes, subscribe to its messages, clear the
+   * unread counter and, when a person asked for it, hand focus to the composer.
+   *
+   * That last part is not decoration. Opening a conversation repaints the left
+   * pane, which destroys the row the click came from — so without this, focus
+   * falls to <body> and a keyboard user is silently returned to the top of the
+   * document, several tab stops from the conversation they just opened. On a
+   * phone it is worse: the list is replaced by the conversation, so the pane
+   * they are now looking at is the one place their focus is not. closeMatch()
+   * has always put focus back on the row it came from; this is the other half
+   * of that pair, and the JSDoc here described it long before the code did.
+   *
+   * Only on a real gesture. The same function restores a conversation named by
+   * `?m=` on load, and stealing focus into a text field because of a URL is a
+   * different bug: it opens the on-screen keyboard nobody asked for and moves
+   * the page out from under whoever followed the link.
+   *
+   * @param {string} matchId the match to open
+   * @param {boolean} [fromUser] true when a person activated a row, rather than
+   *   the page restoring a conversation from the address bar
+   * @returns {void}
+   */
+  function openMatch(matchId, fromUser) {
     const match = state.matches.filter(function (item) { return item.matchId === matchId; })[0];
     if (!match) {
       toast('That conversation is not available any more.', 'warn');
@@ -950,6 +991,7 @@
     }
     if (state.active && state.active.matchId === matchId) {
       applyPanes();
+      focusConversation(fromUser);
       return;
     }
 
@@ -982,8 +1024,8 @@
 
     markRead();
     announce('Conversation with ' + nameOf(match.other) + ' opened.');
+    focusConversation(fromUser);
     startStampTicker();
-    if (dom.input && isWide()) dom.input.focus();
   }
 
   /**
