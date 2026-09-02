@@ -19,6 +19,12 @@
 /** Phrases the disclosure must actually contain, not merely gesture at. */
 const DISCLOSURE = ['no payment', 'no card', 'simulation'];
 
+/* The same three promises as they appear in the confirmation dialog, which says
+   "a simulated upgrade" rather than "a simulation" — so the last one is matched
+   on its stem. All three are required: a dialog that keeps one of them and
+   quietly drops the others is exactly the softening this spec exists to catch. */
+const DIALOG_DISCLOSURE = ['no payment', 'no card', 'simulat'];
+
 module.exports = {
   title: 'The premium simulation: honest about it, and correct about it',
   viewports: ['mobile', 'desktop'],
@@ -41,12 +47,19 @@ module.exports = {
     // check that would fail first if the simulation ever grew a real checkout
     // without the docs catching up.
     const paymentFields = await page.evaluate(function () {
-      const suspect = /card|cvv|cvc|expiry|billing|iban|account.?number/i;
+      const suspect = /card|cvv|cvc|expiry|billing|iban|account.?number|payment|\bcc[-_ ]?(?:name|number|exp|csc)\b/i;
       return Array.prototype.filter.call(
         document.querySelectorAll('input, select, textarea'),
         function (el) {
-          return suspect.test((el.name || '') + ' ' + (el.id || '') + ' ' +
-            (el.placeholder || '') + ' ' + (el.getAttribute('autocomplete') || ''));
+          // The visible label counts too: a checkout field is just as much a
+          // checkout field when its name is `field3` and only the text beside
+          // it says "Card number".
+          const labels = Array.prototype.map.call(el.labels || [], function (label) {
+            return label.textContent || '';
+          }).join(' ');
+          return suspect.test((el.type || '') + ' ' + (el.name || '') + ' ' +
+            (el.id || '') + ' ' + (el.placeholder || '') + ' ' +
+            (el.getAttribute('autocomplete') || '') + ' ' + labels);
         }
       ).length;
     });
@@ -69,9 +82,11 @@ module.exports = {
     await page.click('#premium-cta');
     await page.waitForSelector('.modal-backdrop .modal-body');
     const dialog = ((await page.locator('.modal-backdrop .modal-body').textContent()) || '').toLowerCase();
+    const dropped = DIALOG_DISCLOSURE.filter(function (phrase) { return dialog.indexOf(phrase) === -1; });
     t.check('the confirmation repeats the disclosure rather than assuming it was read',
-      dialog.indexOf('no payment') !== -1 || dialog.indexOf('simulat') !== -1,
-      JSON.stringify(dialog.trim().slice(0, 80)));
+      dropped.length === 0,
+      dropped.length ? 'missing from the dialog: ' + dropped.join(', ')
+        : JSON.stringify(dialog.trim().slice(0, 80)));
 
     await h.clickModalAction(page, 'Not now');
     await page.waitForSelector('.modal-backdrop', { state: 'detached' });

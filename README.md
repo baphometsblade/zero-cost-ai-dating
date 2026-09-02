@@ -269,9 +269,9 @@ store and its daily counter, the auth backend, the pure half of the utilities, t
 schema, the static HTML. It cannot reach the flows that only exist in a DOM — signing in,
 the deck and its keyboard, the match burst, chat that persists, reporting someone, deleting
 your account, and the service worker serving the app with the network gone. Those live in
-`e2e/`: **164 checks** across ten specs, each run at 390x844 and most of them at 1280x800 as
-well — plus a tenth spec that needs the Firebase emulators and skips, by name and reason, when
-they are not running.
+`e2e/`: **164 checks** across the ten specs that need nothing installed but a browser, each
+run at 390x844 and most of them at 1280x800 as well — plus an eleventh, `10-firebase.e2e.js`,
+which needs the Firebase emulators and skips, by name and reason, when they are not running.
 
 Playwright drives them, and it is deliberately **not** a dependency: the promise that this
 repo installs nothing holds, so you install the browser yourself and point Node at it.
@@ -287,7 +287,7 @@ With no Playwright at all the runner exits 3 with a one-line install hint, so "n
 here" never reads as a failing test. See [`e2e/README.md`](e2e/README.md) for the spec
 layout and for running one flow or one viewport.
 
-The tenth spec, `e2e/specs/10-firebase.e2e.js`, is the only one that runs the app against
+That eleventh spec, `e2e/specs/10-firebase.e2e.js`, is the only one that runs the app against
 Firebase rather than `localStorage`: the real SDK, real Auth, real Firestore, and every result
 read back out of the emulator instead of off the page. It drives the pages **with their real
 CSP meta tag** — the emulators are reached through the page's own origin rather than by
