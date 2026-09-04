@@ -35,6 +35,35 @@ const EDITOR = fs.readFileSync(path.join(ROOT, 'public/js/profile.js'), 'utf8');
 const RULES = fs.readFileSync(path.join(ROOT, 'firestore.rules'), 'utf8');
 
 /**
+ * `firestore.rules` with its comments blanked, keeping line structure.
+ *
+ * The coverage check below asks whether a key is mentioned anywhere in its
+ * validator, and a comment is not a validator. Deleting a rule and leaving
+ * `// TODO: validate 'personality' here.` behind is the likeliest shape a real
+ * edit takes, and against the raw text that reads as covered — verified, not
+ * assumed: the check passed with the validator gone and the comment in place.
+ *
+ * `tests/injection.test.js` blanks comments for the same reason, so a sink named
+ * in prose is not mistaken for one in use. This file has no block comments and
+ * no string literal containing `//`, both asserted below, so a line-comment strip
+ * is sound here and would stop being sound quietly otherwise.
+ */
+const RULES_CODE = (function () {
+  assert.equal(RULES.indexOf('/*'), -1,
+    'firestore.rules has gained a block comment; this strip only handles line ' +
+    'comments and would leave prose in the text the coverage check scans');
+  return RULES.split('\n').map(function (line) {
+    // Quote-aware, so a `//` inside a string literal is code and stays.
+    let quoted = false;
+    for (let i = 0; i < line.length; i += 1) {
+      if (line[i] === "'") quoted = !quoted;
+      else if (!quoted && line[i] === '/' && line[i + 1] === '/') return line.slice(0, i);
+    }
+    return line;
+  }).join('\n');
+}());
+
+/**
  * A numeric `const NAME = 123;` from the profile editor.
  * @param {string} name the constant's name
  * @returns {number} its value
@@ -151,8 +180,10 @@ test('every key a closed allowlist admits is one something validates', function 
   // pass and several since, and was found by this check — which is the argument
   // for asking the question mechanically rather than carefully.
   const bodies = new Map();
-  for (const m of RULES.matchAll(/function\s+(\w+)\s*\(([^)]*)\)\s*\{([\s\S]*?)\n\s*\}/g)) {
+  const at = new Map();
+  for (const m of RULES_CODE.matchAll(/function\s+(\w+)\s*\(([^)]*)\)\s*\{([\s\S]*?)\n\s*\}/g)) {
     bodies.set(m[1], m[3]);
+    at.set(m[1], m.index);
   }
   assert.ok(bodies.size >= 15, 'found only ' + bodies.size + ' rules functions — the pattern has ' +
     'probably stopped matching, which would make this test vacuous');
@@ -173,6 +204,13 @@ test('every key a closed allowlist admits is one something validates', function 
       for (const call of body.matchAll(new RegExp('\\b(\\w+)\\(' + receiver + '\\)', 'g'))) {
         if (bodies.has(call[1])) covering += bodies.get(call[1]);
       }
+      // ...and the `allow` statements of the match block this validator lives in,
+      // which is where a constraint that cannot be written as a field test goes:
+      // `userDocOk` says nothing about `uid` because `allow create` pins it to the
+      // document id (`request.resource.data.uid == uid`) and `allow update` freezes
+      // it. The allow lines only, never the sibling functions — a key validated in
+      // some other function of the same block is not validated in this one.
+      covering += allowsAround(at.get(name));
 
       keys.forEach(function (key) {
         const named = covering.indexOf("'" + key + "'") !== -1;
@@ -184,6 +222,41 @@ test('every key a closed allowlist admits is one something validates', function 
 
   assert.ok(listsChecked >= 6, 'found only ' + listsChecked + ' closed key lists — ' +
     'the pattern is no longer finding them');
+
+  /**
+   * The `allow` statements of the innermost `match` block containing an offset.
+   * @param {number} offset a position inside RULES_CODE
+   * @returns {string} those statements, concatenated
+   */
+  function allowsAround(offset) {
+    let best = null;
+    // Anchored on the block-opening brace at end of line: a path segment like
+    // `/users/{uid}` carries braces of its own, and scanning from the first one
+    // closes the "block" at the end of the path parameter — which silently found
+    // no allow statements at all rather than failing.
+    for (const open of RULES_CODE.matchAll(/^[ \t]*match\s+[^\n]*\{[ \t]*$/gm)) {
+      const start = open.index;
+      if (start > offset) break;
+      const end = closeOf(start + open[0].lastIndexOf('{'));
+      if (end > offset && (best === null || start > best[0])) best = [start, end];
+    }
+    if (!best) return '';
+    const block = RULES_CODE.slice(best[0], best[1]);
+    return [...block.matchAll(/\ballow\s[^;]*;/g)].map(function (m) { return m[0]; }).join('\n');
+  }
+
+  /** The offset just past the `}` closing the brace at `open`. */
+  function closeOf(open) {
+    let depth = 0;
+    for (let i = open; i < RULES_CODE.length; i += 1) {
+      if (RULES_CODE[i] === '{') depth += 1;
+      else if (RULES_CODE[i] === '}') {
+        depth -= 1;
+        if (depth === 0) return i;
+      }
+    }
+    return RULES_CODE.length;
+  }
   assert.deepEqual(unexamined, [],
     'these keys are on a closed allowlist and nothing in the validator looks at them:\n  ' +
     unexamined.join('\n  ') + '\nA key the rules admit and never examine is a field of any ' +
