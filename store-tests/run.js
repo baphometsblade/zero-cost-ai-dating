@@ -89,14 +89,6 @@ function adminAccess(env, mod) {
       });
     },
     /**
-     * Everything in a collection, ids included. A spec that has to prove an
-     * absence needs to enumerate rather than guess which ids to ask for: the
-     * whole risk in "did the purge get everything" is the document nobody
-     * thought to look for.
-     * @param {string} collection collection path, subcollections included
-     * @returns {Promise<Array<{id:string, data:Object}>>}
-     */
-    /**
      * Write many documents in batches. One withSecurityRulesDisabled context
      * per call rather than per document, because a spec that has to exceed a
      * production limit needs to write a few hundred documents and doing that
@@ -118,6 +110,14 @@ function adminAccess(env, mod) {
         }
       });
     },
+    /**
+     * Everything in a collection, ids included. A spec that has to prove an
+     * absence needs to enumerate rather than guess which ids to ask for: the
+     * whole risk in "did the purge get everything" is the document nobody
+     * thought to look for.
+     * @param {string} collection collection path, subcollections included
+     * @returns {Promise<Array<{id:string, data:Object}>>}
+     */
     async list(collection) {
       let out = [];
       await env.withSecurityRulesDisabled(async function (c) {

@@ -69,17 +69,22 @@ module.exports = {
 
     const delivered = await new Promise(function (resolve) {
       let stop = null;
+      let timer = null;
       let settled = false;
       const done = function (value) {
         if (settled) return;
         settled = true;
         if (typeof stop === 'function') stop();
+        // Cleared on the happy path too: a pending timer keeps the event loop
+        // alive, so leaving it would stall every passing run for the full
+        // fifteen seconds after the work was already done.
+        if (timer !== null) clearTimeout(timer);
         resolve(value);
       };
       stop = k.store.listenMessages(matchId, function (list) { done(list); });
       // A listener that never fires must fail as a timeout with a name, not
       // hang the suite until the runner is killed.
-      setTimeout(function () { done(null); }, 15000);
+      timer = setTimeout(function () { done(null); }, 15000);
     });
     k.ctx.drainWarnings();
 
