@@ -143,7 +143,16 @@ module.exports = {
   loadOutside: rules.loadOutside,
   readRules: rules.readRules,
   ok: rules.ok,
+  // All seven fixtures, not the two that happened to be needed first: a spec
+  // reaching for `matchDoc` and finding `undefined` learns nothing about the
+  // store, and a suite whose fixtures differ from the rules suite's is how the
+  // two ended up disagreeing about `lastActiveAt: null` in the first place.
   userDoc: rules.userDoc,
   discoveryDoc: rules.discoveryDoc,
+  swipeDoc: rules.swipeDoc,
+  matchDoc: rules.matchDoc,
+  messageDoc: rules.messageDoc,
+  reportDoc: rules.reportDoc,
+  pairId: rules.pairId,
   countingDb: countingDb
 };

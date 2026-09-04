@@ -69,6 +69,17 @@ function createContext() {
   // try/catch, and firebase mode never reaches one.
   globalThis.window = globalThis;
 
+  // ...and `firebase` itself, which a page gets from its <script> tags. This is
+  // not decoration: `fieldValue()` in the shipped store is guarded by
+  // `typeof firebase === 'undefined'`, and without the global it returns null,
+  // so `sendMessage` takes its read-modify-write fallback instead of the
+  // `FieldValue.increment` the browser runs. A suite that loads the shipped file
+  // and then starves it of a global is testing a branch the browser never takes
+  // — the same false green this suite exists to avoid, arrived at from the other
+  // side. `specs/13-messaging.store.js` asserts the increment path is the live
+  // one rather than trusting this line.
+  globalThis.firebase = firebase;
+
   // A named app, so nothing here can collide with an app the testing library
   // creates for its own contexts.
   const app = firebase.initializeApp({

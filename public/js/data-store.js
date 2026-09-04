@@ -2376,7 +2376,13 @@
       try {
         snap = await ref.get();
       } catch (err) {
-        if (err && err.code === 'permission-denied') return { ok: true, removed: false };
+        // Through `isPermissionDenied`, not a bare code comparison: the compat
+        // SDK namespaces the code as `firestore/permission-denied`, which this
+        // line did not accept — so on that SDK a retract of an already-gone
+        // report threw at the settings page instead of quietly succeeding. The
+        // helper twenty lines up had answered the same question correctly since
+        // the round it was written; this was the one caller not asking it.
+        if (isPermissionDenied(err)) return { ok: true, removed: false };
         throw err;
       }
       if (!snap.exists) return { ok: true, removed: false };

@@ -131,7 +131,7 @@ has, so it is worth the five minutes.
 Everything below is also *executed* — `npm run test:rules` runs the real rules file against
 the Firestore emulator, **175 checks** including the attacks each rule exists to stop. If you
 change the data model, run it. See [`rules-tests/README.md`](../rules-tests/README.md).
-`npm run test:emulator` adds the store suite to the same emulator boot: **84 more checks** that
+`npm run test:emulator` adds the store suite to the same emulator boot: **116 more checks** that
 drive the shipped `public/js/data-store.js` against a real Firestore, which is where the
 daily counter's transaction is proven — see [`store-tests/README.md`](../store-tests/README.md).
 
