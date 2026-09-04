@@ -248,7 +248,7 @@ npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.
 
 ### Unit suites
 
-Thirteen suites on Node's built-in runner — **224 checks**, no install, no browser, seconds:
+Thirteen suites on Node's built-in runner — **225 checks**, no install, no browser, seconds:
 
 | Suite | What it pins down |
 | --- | --- |
@@ -318,7 +318,7 @@ readable by other accounts, that nobody can mint a match with a stranger and the
 them, that the abuse queue cannot be enumerated — is a claim about one file,
 `firestore.rules`, because there is no server to enforce anything else. Reading it
 carefully is not evidence. `rules-tests/` executes it against the Firestore emulator:
-**133 checks**, including the attacks each rule exists to stop.
+**135 checks**, including the attacks each rule exists to stop.
 
 ```sh
 npm install --prefix /tmp/zc-rules @firebase/rules-unit-testing firebase-tools
@@ -336,14 +336,16 @@ The daily usage counter is the one piece of client logic where reading the code 
 as weak an argument as it was for the rules: whether two concurrent bumps collapse into one
 is a property of a real database, not of anything visible in the file. `store-tests/` loads
 the **shipped** `public/js/data-store.js` into Node — `window` aliased to `globalThis`,
-`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **54
+`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **60
 checks**, including 20 concurrent `bumpUsage` calls on one document storing exactly 20, the
 midnight roll-over happening inside the same transaction, a bump writing `usage` and nothing
 else, 30 swipes replaying the deck's real learning-save-then-bump ordering and storing exactly
 30, an account deletion that has to leave nothing of itself in any collection, a 520-message
 conversation that has to stay live at its newest end, survive a rewind, and leave nothing
-underneath it when it is finally unmatched — and a background refresh whose bill is counted
-document by document and has to come out the same against a swipe history twice as long.
+underneath it when it is finally unmatched, a background refresh whose bill is counted
+document by document and has to come out the same against a swipe history twice as long — and
+a match document the rules refuse, which has to come back as "no match" rather than as a
+swipe the deck believes it lost.
 
 ```sh
 npm install --prefix /tmp/zc-emu firebase @firebase/rules-unit-testing firebase-tools
@@ -498,6 +500,22 @@ deliberate local `npm run deploy`.
 
 These are real, and worth knowing before you show this to anyone:
 
+- **Blocking stops contact, not visibility — and only the rules make even that true.**
+  Your block list lives in your private `users/{uid}` document and is deliberately left
+  out of the public `discovery/{uid}` projection, because publishing who somebody has
+  blocked is its own disclosure. That has a consequence worth stating plainly: somebody
+  you have blocked still sees you in their deck. Their client cannot filter you out
+  without reading something that would tell them they had been blocked, which is the one
+  thing a block is supposed not to announce, and there is no server to filter for them.
+  What a block does do is stop them reaching you: `firestore.rules` refuses to create a
+  match when the other party has blocked the caller, and a rule may read a private
+  document no client can. That also makes **unmatching durable when it came with a
+  block** — unmatch alone deletes the match and not the like underneath it, so the other
+  side could otherwise write the match document again and carry on.
+  The Firebase adapter used to carry a "and they have not blocked me" filter that ran
+  against a projection with no `blocked` field: it excluded nobody while looking like it
+  did, and the demo adapter's working copy of the same check hid the difference. It is
+  gone, and the comment in its place says where the enforcement really is.
 - **The background badge poll is the largest standing read cost, and it is not free.**
   `app.js` refreshes the unread-message and pending-like badges every 20 seconds while the
   tab is in the foreground (it skips ticks while it is hidden). A refresh costs about two

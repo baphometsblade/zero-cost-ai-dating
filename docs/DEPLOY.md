@@ -153,8 +153,12 @@ daily counter's transaction is proven — see [`store-tests/README.md`](../store
   not have: an unconditional allowance would answer "has Alice swiped on Bob?" for any pair,
   from the difference between an empty snapshot and a denial.
 - `matches/{matchId}` — read and update only if you are one of the two `users`; create only
-  with `users.size() == 2`, yourself among them, an id equal to the sorted join, and proof the
-  other person actually liked you first. Absent documents follow the same id rule as swipes,
+  with `users.size() == 2`, yourself among them, an id equal to the sorted join, proof the
+  other person actually liked you first, **and** that they have not blocked you. That last
+  clause is what makes a block durable: unmatching removes the match document but not the
+  like underneath it, so without it the other side could write the document again and
+  resume the conversation. The rule reads their private `users/{uid}` document to check —
+  which a rule may do and no client can. Absent documents follow the same id rule as swipes,
   for a fact worth hiding rather more: whether two named people have matched.
 - `matches/{matchId}/messages/{msgId}` — read if you participate in the parent match; create
   only as yourself with 1–1000 characters of text. Never editable; deletable by participants

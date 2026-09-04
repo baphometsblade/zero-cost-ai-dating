@@ -332,6 +332,23 @@ service cloud.firestore {
           && get(inboundSwipe(d)).data.action in ['like', 'super'];
       }
 
+      // Whether `owner` has blocked `subject`.
+      //
+      // A block list lives in the owner's private `users/{uid}` document, which no other
+      // client may read — deliberately, since publishing who you have blocked is its own
+      // disclosure. A rule may read it: `get()` is evaluated server-side and is not itself
+      // subject to the read rules. That makes this the only place in a project with no
+      // server where a block can be *enforced* rather than merely honoured by a
+      // cooperating client, and a blocked account is exactly the one whose client should
+      // not be trusted to cooperate.
+      //
+      // `get('blocked', [])` rather than a membership test on the key, so an account
+      // written before that field existed reads as blocking nobody instead of erroring.
+      function hasBlocked(owner, subject) {
+        return exists(/databases/$(database)/documents/users/$(owner))
+          && subject in get(/databases/$(database)/documents/users/$(owner)).data.get('blocked', []);
+      }
+
       // Read: participants only. As with swipes, a read of a document that does not exist
       // has `resource == null` and dereferencing it errors instead of returning an empty
       // snapshot — and rewind probes the (usually absent) match document for the pair on
@@ -353,9 +370,23 @@ service cloud.firestore {
       // read and then message a stranger, since message writes are gated purely on
       // membership of the match. The client already satisfies this: recordSwipe writes
       // the swipe and only then, as a separate operation, creates the match.
+      //
+      // ...and not once they have blocked you. Unmatching alone is not durable: it deletes
+      // the match document but not the like underneath it, so `likedByOther` still holds
+      // and the other side can simply write the document again and carry on messaging.
+      // The report dialog's "Block and unmatch" is the flow that has to survive that, and
+      // this is what makes it survive.
+      //
+      // Only that direction is checked. "I blocked them" is enforced by my own client,
+      // and a tampered client that matched somebody it had itself blocked would only be
+      // reaching a person who liked it and has not blocked it back — self-inflicted, not
+      // a safety failure — while checking it would double the document reads this rule
+      // spends, against a hard limit of ten per request that `likedByOther` already uses
+      // two of.
       allow create: if isSignedIn()
         && matchOk(request.resource.data)
-        && likedByOther(request.resource.data);
+        && likedByOther(request.resource.data)
+        && !hasBlocked(otherOf(request.resource.data), request.auth.uid);
 
       // Update: participants only, for lastMessage / lastMessageAt / unread counters.
       // The participant list itself is frozen.

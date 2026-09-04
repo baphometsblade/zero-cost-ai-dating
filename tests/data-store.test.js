@@ -321,6 +321,32 @@ test('recordSwipe is idempotent and super counts as positive', async function ()
   assert.equal((await store.getSwipes('cara'))[0].action, 'like', 'the original action is preserved');
 });
 
+test('a block outranks a mutual like, and says so as a plain no-match', async function () {
+  await resetWorld();
+  await store.createUser('alice', {});
+  await store.createUser('bob', {});
+  await store.recordSwipe('bob', 'alice', 'like');
+  await store.updateUser('bob', { blocked: ['alice'] });
+
+  // Everything except the block says this is a match. The answer is "no match"
+  // rather than an error, because the person who was blocked must not be told
+  // that they were — an error nobody else gets would tell them.
+  const out = await store.recordSwipe('alice', 'bob', 'like');
+  assert.deepEqual(out, { matched: false, matchId: null, created: false });
+  assert.equal(await store.getMatch(['alice', 'bob'].sort().join('_'), 'alice'), null);
+
+  // The swipe itself is stored: the deck must not put the card back.
+  assert.equal((await store.getSwipes('alice')).length, 1);
+
+  // The Firestore adapter cannot make this decision — the block list is private
+  // and its client never sees it — so `firestore.rules` refuses the match write
+  // and the adapter turns that refusal into the same answer. The two agree by
+  // arriving from opposite ends, which is the only agreement available here.
+  await store.updateUser('bob', { blocked: [] });
+  const now = await store.recordSwipe('alice', 'bob', 'like');
+  assert.equal(now.matched, true, 'unblocking lets the same pair match');
+});
+
 test('undoSwipe removes a swipe nobody has answered yet', async function () {
   await resetWorld();
   await store.createUser('alice', {});

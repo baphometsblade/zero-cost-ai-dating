@@ -19,6 +19,8 @@ module.exports = {
     const STRANGER = 'stranger';  // has not
     const THIRD = 'third';
     const FOURTH = 'fourth';
+    const BLOCKER = 'blocker';    // has liked me, and has blocked me
+    const OPENER = 'opener';      // has liked me, has a user document, blocks nobody
 
     await seed(async function (admin) {
       const db = admin.firestore();
@@ -31,6 +33,15 @@ module.exports = {
       await db.doc('swipes/' + THIRD + '_' + ME).set(h.swipeDoc(THIRD, ME, 'like'));
       // A match between two other people, for the outsider checks.
       await db.doc('matches/' + h.pairId(THIRD, FOURTH)).set(h.matchDoc(THIRD, FOURTH));
+
+      // Two more who have liked ME, so the reciprocal-like precondition holds for both
+      // and the block list is the only thing that can separate them. Both have a user
+      // document, which LIKER above deliberately does not: a rule that denied whenever
+      // it could read one would pass the blocked check for the wrong reason.
+      await db.doc('swipes/' + BLOCKER + '_' + ME).set(h.swipeDoc(BLOCKER, ME, 'like'));
+      await db.doc('users/' + BLOCKER).set(h.userDoc(BLOCKER, { blocked: [ME] }));
+      await db.doc('swipes/' + OPENER + '_' + ME).set(h.swipeDoc(OPENER, ME, 'like'));
+      await db.doc('users/' + OPENER).set(h.userDoc(OPENER, { blocked: [] }));
     });
 
     /* ---- the attack the rule exists to stop ---- */
@@ -42,6 +53,21 @@ module.exports = {
 
     t.check('you CAN create the match once they have liked you',
       await ok(assertSucceeds(as(ME).doc('matches/' + h.pairId(ME, LIKER)).set(h.matchDoc(ME, LIKER)))));
+
+    /* ---- a block, enforced here because there is nowhere else ---- */
+
+    // Unmatching deletes the match document and not the like underneath it, so
+    // `likedByOther` still holds afterwards and the other side could simply write the
+    // document again and carry on messaging. A block list lives in a private user
+    // document no client but its owner can read — and a rule can read it, which makes
+    // this the one place a block survives a determined client.
+    t.check('you cannot create a match with somebody who has blocked you',
+      await ok(assertFails(as(ME).doc('matches/' + h.pairId(ME, BLOCKER)).set(h.matchDoc(ME, BLOCKER)))));
+
+    // The control. OPENER has a user document too, so this fails if the rule is denying
+    // because it found a document rather than because it found the caller inside it.
+    t.check('but you can with somebody who has one and has not blocked you',
+      await ok(assertSucceeds(as(ME).doc('matches/' + h.pairId(ME, OPENER)).set(h.matchDoc(ME, OPENER)))));
 
     /* ---- shape ---- */
     t.check('the document id must be the sorted pair',
