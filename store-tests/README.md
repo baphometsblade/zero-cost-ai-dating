@@ -129,7 +129,7 @@ One spec per property. `tests/docs.test.js` fails if a spec exists without a row
 | `specs/01-concurrency.store.js` | concurrent bumps land exactly once each — 20 at a time on one document store 20 |
 | `specs/02-rollover.store.js` | the day roll-over happens inside the transaction, so a bump at midnight cannot resurrect yesterday |
 | `specs/03-writes.store.js` | a bump writes the `usage` field and nothing else, so it can never clobber a profile edit |
-| `specs/04-rules-accept.store.js` | the value the transaction stores is one `firestore.rules` accepts — the two suites agreeing about the same document |
+| `specs/04-rules-accept.store.js` | the values the shipped code stores are ones `firestore.rules` accepts — the counter the transaction writes, and the `discovery/{uid}` projection a profile save publishes, each replayed against the real ruleset. The projection half matters most: it is written best-effort, so a refusal there throws nothing and the account just stops appearing in decks |
 | `specs/05-swipe-race.store.js` | a document save in flight cannot eat the counter, or be eaten by it |
 | `specs/06-projection-order.store.js` | a racing save cannot leave the public `discovery/{uid}` projection behind the private document |
 | `specs/07-deletion.store.js` | deleting an account leaves nothing of it behind — every collection enumerated, not just the ids the test knows about, plus the match's message subcollection; a report *about* the account is the documented exception and stays in the queue |

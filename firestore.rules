@@ -76,11 +76,14 @@ service cloud.firestore {
     // A rules request may evaluate at most 1000 expressions, and this file's user
     // document validator sits close enough to that ceiling that the margin is
     // measured by a test (`rules-tests/specs/08-budget.rules.js`). Folding the
-    // repeated comparisons into helpers reads better and costs more: a function
-    // call is worth about 2.2 plain clauses, measured against this very file, so
-    // wrapping every bound in one spent the remaining margin and every user
-    // document write began failing — as a flat `permission-denied` naming no
-    // field, which is how running out of budget always looks.
+    // repeated comparisons into helpers reads better and costs more: measured
+    // against this very file, a clause that is a call — `stampOk(d.createdAt)` —
+    // costs about 2.2 times a plain `d.uid is string`, where its body alone is
+    // worth about 1.5. Wrapping every bound in one spent the remaining margin and
+    // every user document write began failing, as a flat `permission-denied`
+    // naming no field, which is how running out of budget always looks. (The
+    // per-call overhead that leaves is under one clause, so deleting a lone
+    // pass-through wrapper buys clarity and no measurable budget.)
     //
     // `stampOk` and `listCharsOk` stay because each is called for a construct
     // there is no short way to write, and each earns its call.
@@ -95,9 +98,22 @@ service cloud.firestore {
     match /users/{uid} {
 
       // profile.personality — five integer axes, 0..100, all optional.
+      //
+      // The key list is closed, and that is not symmetry for its own sake. This
+      // validator named five keys and bounded neither the others nor how many there
+      // were, so a personality map could carry ten thousand fields and pass; and the
+      // projection copies `personality` across verbatim, so a private document the
+      // rules accepted could produce a `discovery/{uid}` write they refused. The
+      // projection write is best-effort by design — it must never fail the profile
+      // save that caused it — so the account would save, silently stop publishing,
+      // and vanish from every deck with nothing said. That is the `lastActiveAt: null`
+      // failure exactly, and `store-tests/specs/04-rules-accept.store.js` now replays
+      // a real projection against this file so it cannot happen quietly again.
       function personalityOk(pp) {
         return pp == null || (
           pp is map
+          && pp.keys().hasOnly(['openness', 'conscientiousness', 'extraversion',
+                                'agreeableness', 'stability'])
           && (!('openness' in pp) || (pp.openness is number && pp.openness >= 0 && pp.openness <= 100))
           && (!('conscientiousness' in pp) || (pp.conscientiousness is number && pp.conscientiousness >= 0 && pp.conscientiousness <= 100))
           && (!('extraversion' in pp) || (pp.extraversion is number && pp.extraversion >= 0 && pp.extraversion <= 100))
@@ -194,14 +210,6 @@ service cloud.firestore {
           && (!('rewinds' in u) || (u.rewinds is number && u.rewinds >= 0));
       }
 
-      function bookkeepingOk(d) {
-        return (!('learning' in d) || learningOk(d.learning))
-          && (!('usage' in d) || usageOk(d.usage))
-          // 1000 uids at 48 characters each. A Firebase Auth uid is 28.
-          && (!('blocked' in d) || (d.blocked is list && d.blocked.size() <= 1000
-                                    && listCharsOk(d.blocked, 48000)));
-      }
-
       // The whole UserDoc: a closed top-level key list and every nested validator.
       // `createdAt` has to be present so that the immutability check below can always
       // compare it without tripping over a missing field, which the unconditional
@@ -245,7 +253,15 @@ service cloud.firestore {
           && (!('lastActiveAt' in d) || (d.lastActiveAt == null || stampOk(d.lastActiveAt)))
           && profileOk(d.profile)
           && prefsOk(d.preferences)
-          && bookkeepingOk(d);
+          // These three were behind a `bookkeepingOk(d)` wrapper that did nothing but
+          // forward them. A function call costs about 2.2 plain clauses here, so a
+          // pass-through is one of the few things in this file that is pure overhead —
+          // and one hop less to follow when reading what a user document may contain.
+          && (!('learning' in d) || learningOk(d.learning))
+          && (!('usage' in d) || usageOk(d.usage))
+          // 1000 uids at 48 characters each. A Firebase Auth uid is 28.
+          && (!('blocked' in d) || (d.blocked is list && d.blocked.size() <= 1000
+                                    && listCharsOk(d.blocked, 48000)));
       }
 
       // Identity fields are set once at sign-up and can never be rewritten afterwards —

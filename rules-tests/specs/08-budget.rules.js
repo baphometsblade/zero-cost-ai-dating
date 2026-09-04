@@ -109,7 +109,7 @@ module.exports = {
       headroom >= FLOOR,
       headroom + ' more `' + PAD.trim() + '` clauses fit before every user write fails. ' +
       (headroom >= FLOOR
-        ? 'Spend it knowing a function call is worth about 2.2 of these.'
+        ? 'Spend it knowing a clause that is a function call costs about 2.2 of these.'
         : 'Buy some back before adding anything: inline a helper, or drop a check ' +
           'that a write path already enforces.'));
   }

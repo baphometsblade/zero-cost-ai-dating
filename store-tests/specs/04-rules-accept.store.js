@@ -63,5 +63,74 @@ module.exports = {
       await k.ok(k.testing.assertFails(updateDoc(doc(owner, 'users', uid), { usage: negative }))),
       k.show(negative)
     );
+
+    /* ---- and the same loop for the public projection --------------------- */
+
+    // The other document the store writes, and the one with a history. It is
+    // published best-effort — a failed projection write must never fail the
+    // profile save that caused it — so if the rules refuse it, nothing throws,
+    // nothing is logged where anybody looks, and the account simply stops
+    // appearing in other people's decks. That has happened once already, when
+    // the projection emitted `lastActiveAt: null` and the rules accepted that
+    // key only as a string.
+    //
+    // `tests/projection.test.js` compares the projection's KEY SET against the
+    // rules' allowlists, with no emulator. It cannot compare values, and both
+    // times this broke it was a value. So: let the shipped code project a real
+    // account, then replay that exact document against the real ruleset.
+    const puid = 'rules-projected';
+    await k.store.updateUser(puid, {
+      uid: puid,
+      email: puid + '@example.com',
+      displayName: 'Projected',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      profile: {
+        birthdate: '1995-02-19',
+        age: 31,
+        gender: 'woman',
+        bio: 'A short, valid bio.',
+        interests: ['hiking', 'coffee'],
+        // A sixth axis the private half tolerated for eight rounds. The rules
+        // close the key list on both sides now, so a projection that copied this
+        // across verbatim would be refused — silently.
+        personality: { openness: 70, conscientiousness: 60, extraversion: 50,
+                       agreeableness: 65, stability: 55, chaos: 99 },
+        location: { label: 'Portland, OR', lat: 45.52, lng: -122.68 }
+      }
+    });
+    k.ctx.drainWarnings();
+    const projected = await k.admin.get('discovery', puid);
+
+    t.check(
+      'the shipped code published a projection to replay',
+      !!projected && !!projected.profile,
+      projected ? k.show(Object.keys(projected)) : 'nothing was written'
+    );
+
+    t.check(
+      'and it published the five axes without the sixth the private half held',
+      !!projected && k.same(Object.keys(projected.profile.personality || {}).sort(),
+        ['agreeableness', 'conscientiousness', 'extraversion', 'openness', 'stability']),
+      k.show(projected && projected.profile.personality)
+    );
+
+    const pOwner = k.rulesEnv.authenticatedContext(puid).firestore();
+
+    t.check(
+      'and firestore.rules accepts exactly what was published',
+      await k.ok(k.testing.assertSucceeds(setDoc(doc(pOwner, 'discovery', puid), projected))),
+      k.show(projected && projected.profile.personality)
+    );
+
+    // The counterweight. Without it the check above would pass against rules
+    // that accepted anything at all under `personality`, which is what they did
+    // until this round.
+    const smuggled = JSON.parse(JSON.stringify(projected));
+    smuggled.profile.personality.chaos = 99;
+    t.check(
+      'while the un-normalised version the projection used to publish is refused',
+      await k.ok(k.testing.assertFails(setDoc(doc(pOwner, 'discovery', puid), smuggled))),
+      k.show(smuggled.profile.personality)
+    );
   }
 };
