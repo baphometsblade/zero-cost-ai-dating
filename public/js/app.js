@@ -334,6 +334,7 @@
 
   let matchStop = null;
   let likeStop = null;
+  let badgeUid = null;
   let badgeWarned = false;
 
   /**
@@ -358,6 +359,13 @@
   function syncBadgeListeners() {
     const me = signedInDoc();
     if (!me || !me.uid || !ZC.store || typeof ZC.store.listenMatches !== 'function') return;
+
+    // A subscription belongs to one account. Signing out always tears these
+    // down, so a different uid here means something changed the session without
+    // that — and a live subscription to the previous account's matches would
+    // keep painting their unread count over this one's.
+    if (badgeUid && badgeUid !== me.uid) stopBadgePolling();
+    badgeUid = me.uid;
 
     if (!matchStop) {
       matchStop = ZC.store.listenMatches(me.uid, function (rows) {
@@ -409,6 +417,7 @@
     if (typeof likeStop === 'function') likeStop();
     matchStop = null;
     likeStop = null;
+    badgeUid = null;
   }
 
   /* ------------------------------------------------------------------------
