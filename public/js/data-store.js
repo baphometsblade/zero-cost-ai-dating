@@ -513,7 +513,13 @@
     if (!force && sig === rec.sig) return;
     rec.sig = sig;
     try {
-      rec.cb(value);
+      // Copied only when something is actually being delivered. `snapshot()`
+      // runs on every poll tick — 1.5 seconds, for as long as a chat is open —
+      // and deep-copying a conversation each time to decide it had not changed
+      // was work the version this replaced did not do: it compared first and
+      // copied second. Records that build fresh objects anyway (match rows, a
+      // count) ask for no copy at all.
+      rec.cb(rec.clone ? cloneDeep(value) : value);
     } catch (err) {
       console.warn('[zc.store] A live listener threw.', err);
     }
@@ -1051,9 +1057,10 @@
     listenMessages(matchId, cb) {
       return listen({
         cb: cb,
+        clone: true,
         snapshot: function () {
           const all = readMessages();
-          return cloneDeep(Array.isArray(all[matchId]) ? all[matchId] : []);
+          return Array.isArray(all[matchId]) ? all[matchId] : [];
         },
         signature: messagesSignature
       });
