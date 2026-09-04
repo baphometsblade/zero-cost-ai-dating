@@ -66,7 +66,7 @@ function createRecorder(sink, label) {
  * its write fails, so only the stored document is evidence.
  * @param {Object} env a RulesTestEnvironment
  * @param {Object} mod the modular firebase/firestore module
- * @returns {{get:Function, set:Function, del:Function, list:Function}} helpers
+ * @returns {{get:Function, set:Function, del:Function, list:Function, setMany:Function}} helpers
  */
 function adminAccess(env, mod) {
   return {
@@ -86,6 +86,28 @@ function adminAccess(env, mod) {
     async del(collection, id) {
       await env.withSecurityRulesDisabled(async function (c) {
         await mod.deleteDoc(mod.doc(c.firestore(), collection, id));
+      });
+    },
+    /**
+     * Write many documents in batches. One withSecurityRulesDisabled context
+     * per call rather than per document, because a spec that has to exceed a
+     * production limit needs to write a few hundred documents and doing that
+     * one context at a time is slow enough to discourage writing the test at
+     * all — which is how a limit ends up untested.
+     * @param {string} collection collection path
+     * @param {Array<{id:string, data:Object}>} docs what to write
+     * @returns {Promise<void>}
+     */
+    async setMany(collection, docs) {
+      await env.withSecurityRulesDisabled(async function (c) {
+        const db = c.firestore();
+        for (let i = 0; i < docs.length; i += 400) {
+          const batch = mod.writeBatch(db);
+          docs.slice(i, i + 400).forEach(function (entry) {
+            batch.set(mod.doc(db, collection, entry.id), entry.data);
+          });
+          await batch.commit();
+        }
       });
     },
     /**
