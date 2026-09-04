@@ -29,6 +29,21 @@
    ========================================================================== */
 'use strict';
 
+/* What this number is, and is not.
+   ---------------------------------
+   It is a measurement of the rules engine's own accounting, not of anything in
+   this repository, so it can move when the emulator does. It has been the same
+   on two independent machines — this sandbox and CI, both on firebase-tools
+   15.26.0 with emulator jar v1.22.0, which CI pins — but a version bump could
+   shift it either way without a line of this project changing.
+
+   If that happens the check is still telling the truth: there is now less room
+   than there was. What it cannot tell you is whether the cause was your edit or
+   the engine's, and the difference matters, so find out before reacting.
+   Lowering FLOOR to make a red build green is the one response that is always
+   wrong — it is the number this file exists to stop anybody from quietly
+   spending. */
+
 /** Clauses of headroom this file must keep. Below it, stop and buy some back. */
 const FLOOR = 5;
 

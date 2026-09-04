@@ -129,6 +129,12 @@ another's preconditions and mask a missing rule.
   *cheaper* than reading a field, so factoring repeated bounds into helpers — the obvious
   tidy-up — spends the margin rather than saving it.
 
+  The number is a measurement of the rules engine's accounting rather than of anything in
+  this repository, so an emulator upgrade could move it with nothing here changing. It has
+  read the same on two independent machines so far. Whatever moves it, the response is to
+  find out what did — never to lower the floor until the build goes green, which is the one
+  thing that would make the check worthless.
+
 Query-level rules are covered too, not just document reads: the suite asserts that the
 constrained queries the app issues are allowed and that an unconstrained scan of the same
 collection is refused.
