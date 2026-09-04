@@ -150,7 +150,11 @@ function fullPrivateUser() {
       theme: PRIVATE_VALUES.theme,
       discoverable: true
     },
-    learning: { interestAffinity: {}, likeCount: 7, passCount: 3 },
+    learning: {
+      interestAffinity: { 'zc-private-affinity-key': 0.9 },
+      likeCount: 7,
+      passCount: 3
+    },
     usage: { date: '2026-01-02', likes: 11, superLikes: 1, rewinds: 0 },
     blocked: [PRIVATE_VALUES.blockedUid]
   };
@@ -228,6 +232,22 @@ test('the projection emits exactly the keys firestore.rules allows', function ()
 /* --------------------------------------------------------------------------
    (b) nothing private gets out, whatever the rules happen to permit
    -------------------------------------------------------------------------- */
+
+test('every sentinel is actually present in the input', function () {
+  // Found by re-reading this file rather than by running it: the affinity
+  // sentinel was declared and never planted, so the leak check that looked for
+  // it could not have failed however badly the projection behaved. A sentinel
+  // absent from the input is a check that passes for free, which is the exact
+  // false green the rest of this repository refuses — so the sentinels are held
+  // to being real before anything concludes anything from their absence.
+  const serialised = JSON.stringify(fullPrivateUser());
+  const unplanted = Object.keys(PRIVATE_VALUES).filter(function (name) {
+    return serialised.indexOf(PRIVATE_VALUES[name]) === -1;
+  });
+  assert.deepEqual(unplanted, [],
+    'sentinel(s) declared but never put in the private account: ' + unplanted.join(', ') +
+    ' — the leak checks below would pass for them no matter what the projection did');
+});
 
 test('no private field name survives into the projection', function () {
   const projected = projectDiscovery(fullPrivateUser());
