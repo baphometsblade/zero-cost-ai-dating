@@ -988,7 +988,21 @@
       // queue and the screen are brought back into step the instant it lands.
       // Anything after it that fails can no longer leave the user liking a card
       // they were never shown.
-      await ZC.store.undoSwipe(state.me.uid, entry.result.uid);
+      const outcome = await ZC.store.undoSwipe(state.me.uid, entry.result.uid);
+
+      // The guard above reads `entry.matched`, which was stamped when the swipe
+      // was saved and is right about that moment only. If they liked back in
+      // between, the match — and anything either of you has said in it — exists
+      // now, and the store is what noticed. Nothing was deleted; the entry is
+      // corrected so the cheap check is right from here on, and the rewind is
+      // not counted, because none was spent.
+      if (!outcome || outcome.ok === false) {
+        entry.matched = true;
+        toast(nameOf(entry.result.profile) + ' liked you back — rewind cannot undo a match.', 'warn');
+        announce('Rewind refused: that swipe has become a match.');
+        if (ZC.app && typeof ZC.app.refreshBadges === 'function') ZC.app.refreshBadges(true);
+        return;
+      }
       undone = true;
       state.history.pop();
       state.queue.unshift(entry.result);

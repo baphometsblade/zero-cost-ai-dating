@@ -1,10 +1,10 @@
 /* ==========================================================================
-   A conversation keeps working, and does not outlive the match it belonged to.
+   A conversation keeps working, and outlives everything except an unmatch.
 
-   Both properties here are about the Firebase adapter alone. The demo adapter
-   holds every message in one array and drops the array when the match goes, so
-   it has neither problem and neither could be found by a demo-mode test — which
-   is the shape of divergence this repository has been bitten by before.
+   All three properties here are about the Firebase adapter alone. The demo
+   adapter holds every message in one array in one tab, so it has none of these
+   problems and none could be found by a demo-mode test — which is the shape of
+   divergence this repository has been bitten by before.
 
    1. The live stream used to ask for the 500 *oldest* messages
       (`orderBy('createdAt','asc').limit(500)`). Below the window that is
@@ -15,15 +15,27 @@
       above already took the newest end and reversed it — the two functions
       disagreed about which end of a conversation matters.
 
-   2. Rewinding across a match deleted the match document and left its messages
-      underneath it. `unmatch()` carries the comment explaining why that cannot
-      stand: the message-delete rule proves membership through the parent match,
-      so once the parent is gone nothing can authorise deleting them. They are
-      not merely orphaned, they are permanently undeletable — real message
-      content left in the project with no way to reach or remove it.
+   2. A rewind used to delete the match, and the conversation inside it.
+      dashboard.js refuses to rewind across a match — "you two already have a
+      conversation" — but it decides that from `entry.matched`, stamped when
+      the swipe was saved and never revisited. It is true only for the swipe
+      that completed the pair. Like somebody who has not liked you back and it
+      is false and stays false; when they like you back a minute later the
+      match is real, messages can already be in it, and the stale flag still
+      says there is nothing there. The refusal now happens in the store, in a
+      transaction, against the database — because the reciprocal like arriving
+      after the swipe was recorded is precisely the case the caller cannot see.
 
-   The window is deliberately exceeded here rather than assumed. A test that
-   seeds ten messages passes against both the broken and the fixed listener.
+   3. What may legitimately remove a match is `unmatch`, and it has to take the
+      messages first. The message-delete rule proves membership through the
+      parent match, so once the parent is gone nothing can authorise deleting
+      them: they are not merely orphaned, they are permanently undeletable —
+      real message content left in the project with no way to reach or remove
+      it. Nothing had ever run `unmatch` against a real Firestore.
+
+   The window in (1) is deliberately exceeded here rather than assumed. A test
+   that seeds ten messages passes against both the broken and the fixed
+   listener.
    ========================================================================== */
 'use strict';
 
@@ -42,7 +54,7 @@
 const OVER_WINDOW = 520;
 
 module.exports = {
-  title: 'A conversation stays live, and dies with its match',
+  title: 'A conversation stays live, survives a rewind, and dies with an unmatch',
 
   async run(t, k) {
     const a = 'convo-a';
@@ -114,24 +126,48 @@ module.exports = {
         ascending, k.show(texts.slice(0, 2).concat(['…']).concat(texts.slice(-1))));
     }
 
-    /* ---- 2. a rewind takes the conversation with it -------------------- */
+    /* ---- 2. a rewind cannot take a match down -------------------------- */
 
-    // The swipe that made the match, so undoSwipe has something to undo.
+    // The swipe that made the match, so undoSwipe has something to undo. The
+    // rewind is asked for by `a`, who at swipe time had no match: this is the
+    // reciprocal-like-arrived-later case, the one the dashboard's own flag
+    // cannot see, and the one that used to delete everything below.
     await k.admin.set('swipes', a + '_' + b, {
       from: a, to: b, action: 'like', createdAt: '2026-01-01T00:00:00.000Z'
     });
 
-    const result = await k.store.undoSwipe(a, b);
+    const rewind = await k.store.undoSwipe(a, b);
     k.ctx.drainWarnings();
-    t.check('the rewind reports that it removed the match', result && result.removedMatch === true, k.show(result));
+    t.check('the rewind is refused, and says why',
+      !!rewind && rewind.ok === false && rewind.reason === 'matched', k.show(rewind));
 
-    t.check('the match document is gone', (await k.admin.get('matches', matchId)) === null, 'matches/' + matchId);
+    t.check('the swipe it would have deleted is still there',
+      (await k.admin.get('swipes', a + '_' + b)) !== null, 'swipes/' + a + '_' + b);
+
+    t.check('the match is still there', (await k.admin.get('matches', matchId)) !== null,
+      'matches/' + matchId);
+
+    // The half that matters to the other person: not one word of the
+    // conversation may go because somebody pressed rewind on their own swipe.
+    const stillThere = await k.admin.list('matches/' + matchId + '/messages');
+    t.check('and every message in it survived',
+      stillThere.length === messages.length, stillThere.length + ' of ' + messages.length);
+
+    /* ---- 3. unmatching does take the conversation with it -------------- */
+
+    const ended = await k.store.unmatch(matchId, a);
+    k.ctx.drainWarnings();
+    t.check('the unmatch reports that it removed the match',
+      !!ended && ended.removed === true, k.show(ended));
+
+    t.check('the match document is gone', (await k.admin.get('matches', matchId)) === null,
+      'matches/' + matchId);
 
     const leftBehind = await k.admin.list('matches/' + matchId + '/messages');
-    // The whole point. These documents are unreachable by the app once their
-    // parent is deleted, and unreachable is not the same as gone: they are
-    // still in the project, still billable, and no rule can now authorise
-    // removing them.
+    // The whole point. These documents would be unreachable by the app once
+    // their parent was deleted, and unreachable is not the same as gone: still
+    // in the project, still billable, and no rule could now authorise removing
+    // them. All 520 have to go, which is more than one batch.
     t.check('no message survived the match it belonged to',
       leftBehind.length === 0,
       leftBehind.length + ' orphaned message(s), e.g. ' + k.show((leftBehind[0] || {}).data));

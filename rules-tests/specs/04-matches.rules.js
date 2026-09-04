@@ -69,6 +69,15 @@ module.exports = {
     t.check('an outsider cannot read a match they are not in',
       await ok(assertFails(as(ME).doc('matches/' + h.pairId(THIRD, FOURTH)).get())));
 
+    // The absent case is load-bearing, not a curiosity. undoSwipe reads the
+    // pair's match document inside a transaction *before* deleting the swipe,
+    // and for almost every rewind that document is not there. Tightening this
+    // rule to `request.auth.uid in resource.data.users` alone reads perfectly
+    // sensibly and would break every rewind in the app, because a null
+    // resource cannot be dereferenced and the whole transaction fails.
+    t.check('a signed-in user can probe a match document that does not exist, which rewind depends on',
+      await ok(assertSucceeds(as(ME).doc('matches/' + h.pairId(ME, THIRD)).get())));
+
     t.check('a query constrained to your own matches is allowed',
       await ok(assertSucceeds(as(ME).collection('matches').where('users', 'array-contains', ME).get())));
 

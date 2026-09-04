@@ -110,6 +110,7 @@ without a row here, so this list cannot quietly fall behind `specs/`.
 | `specs/10-firebase.e2e.js` | the one spec that runs in firebase mode, against the emulators, and reads every result back out of Firestore |
 | `specs/11-subscription.e2e.js` | the premium simulation: that the page says plainly it takes no money and asks for no card, that declining the confirmation changes nothing, and that accepting it actually moves the entitlement the deck reads |
 | `specs/12-accessibility.e2e.js` | the promises the docs make about keyboards and motion, executed: landmarks and accessible names on every page, `prefers-reduced-motion` actually stilling the deck, the modal's focus trap in both directions with Escape and focus restored, and the two pane swaps that strand a keyboard user if focus is not moved deliberately |
+| `specs/13-rewind.e2e.js` | rewind puts back a swipe nobody answered, and refuses to take down a match that formed after it — the reciprocal like arriving while the card is still the last thing in the deck's history, which the deck's own `matched` flag was stamped too early to see; the refusal has to reach the toast and the live region, and neither the match nor the swipe may be deleted |
 
 A spec exports `{ title, viewports, run(t, page, ctx) }`. `t.check(name, ok, detail)`
 records one named expectation and keeps going; throwing aborts that spec and fails it.

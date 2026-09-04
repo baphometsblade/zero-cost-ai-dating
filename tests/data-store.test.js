@@ -321,7 +321,22 @@ test('recordSwipe is idempotent and super counts as positive', async function ()
   assert.equal((await store.getSwipes('cara'))[0].action, 'like', 'the original action is preserved');
 });
 
-test('undoSwipe removes the swipe and unwinds the match it created', async function () {
+test('undoSwipe removes a swipe nobody has answered yet', async function () {
+  await resetWorld();
+  await store.createUser('alice', {});
+  await store.createUser('bob', {});
+  await store.recordSwipe('alice', 'bob', 'like');
+
+  const undone = await store.undoSwipe('alice', 'bob');
+  assert.deepEqual(undone, { ok: true });
+  assert.equal((await store.getSwipes('alice')).length, 0);
+
+  // Undoing again is a clean no-op rather than an error: the deck can ask
+  // twice, and there is nothing left to protect.
+  assert.deepEqual(await store.undoSwipe('alice', 'bob'), { ok: true });
+});
+
+test('undoSwipe refuses once the pair have matched, and deletes nothing', async function () {
   await resetWorld();
   await store.createUser('alice', {});
   await store.createUser('bob', {});
@@ -329,16 +344,15 @@ test('undoSwipe removes the swipe and unwinds the match it created', async funct
   const matched = await store.recordSwipe('bob', 'alice', 'like');
   await store.sendMessage(matched.matchId, 'bob', 'hello there');
 
-  const undone = await store.undoSwipe('bob', 'alice');
-  assert.deepEqual(undone, { ok: true, removedMatch: true });
-  assert.equal((await store.getSwipes('bob')).length, 0);
-  assert.equal(await store.getMatch(matched.matchId, 'alice'), null);
-  assert.equal(raw(KEYS.messages)[matched.matchId], undefined, 'the conversation went with the match');
+  // This assertion used to run the other way — the rewind removed the match
+  // and the conversation went with it — which was the defect written down as
+  // a requirement. A match is two people's, and only one of them is holding
+  // the rewind button; the other is not asked and is not told.
+  assert.deepEqual(await store.undoSwipe('bob', 'alice'), { ok: false, reason: 'matched' });
+  assert.equal((await store.getSwipes('bob')).length, 1, 'the swipe stands');
+  assert.notEqual(await store.getMatch(matched.matchId, 'alice'), null, 'the match stands');
+  assert.equal(raw(KEYS.messages)[matched.matchId].length, 1, 'and so does what was said in it');
   assert.equal((await store.getSwipes('alice')).length, 1, 'the other side\'s swipe stands');
-
-  // Undoing again is a clean no-op.
-  const again = await store.undoSwipe('bob', 'alice');
-  assert.deepEqual(again, { ok: true, removedMatch: false });
 });
 
 /* ------------------------------------------------------------------------
