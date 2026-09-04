@@ -2369,7 +2369,12 @@
      * exercising directly rather than only through a storage round-trip.
      */
     _internal: {
-      nextUsage: nextUsage
+      nextUsage: nextUsage,
+      // The whole of "what is public about an account", in one pure function.
+      // Exposed so tests/projection.test.js can hold it against the closed key
+      // lists in firestore.rules directly, rather than inferring the shape from
+      // a storage round-trip and hoping the two agree.
+      projectDiscovery: projectDiscovery
     }
   };
 
