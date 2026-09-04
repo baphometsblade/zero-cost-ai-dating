@@ -96,6 +96,15 @@ another's preconditions and mask a missing rule.
   Each of those has a check, and each check writes to its **own** document: they shared one
   at first, and a whole-suite mutation run showed the first write succeeding and turning
   the next into an update, refused by a different rule, green for the wrong reason.
+- **Every key a closed allowlist admits.** `hasOnly` decides which fields a document may
+  have and says nothing about what any of them may contain, so a key on the list that
+  nothing else in its validator looks at is a field the rules accept unexamined — any type,
+  any size, up to 1 MiB. That happened twice. `discovery/{uid}`'s `location` was found by
+  eye a few rounds ago; `personality` had the identical defect three lines away, survived
+  that pass and every one since, and was found only when `tests/limits.test.js` started
+  asking the question mechanically. `reports/{from_about}` had it too, on `id`, in the one
+  collection whose entire design is a deterministic id bounding the queue. Both are
+  validated now, and both are executed here.
 - **The contents of a list, not just its length** — `size()` bounds how many elements a
   list has and says nothing about what is in them, so `photos: [<a quarter of a megabyte>]`
   was one photo, comfortably under six. The same was true of `interests`, of `blocked`, and

@@ -135,6 +135,35 @@ module.exports = {
         }) })
       ))));
 
+    // `personality` sat on discoveryProfileOk's closed key list with nothing
+    // validating it, while the private profileOk held the same field to five
+    // numeric axes — so the copy every signed-in account downloads accepted
+    // whatever it liked under that name, and the two halves of one decision had
+    // drifted without a word. `location` had the identical defect and was found by
+    // eye a few rounds earlier; this one survived that pass and was found by asking
+    // the question mechanically instead (tests/limits.test.js).
+    t.check('a personality that is not five numeric axes is refused here too',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).set(
+        h.discoveryDoc(ME, { profile: Object.assign({}, h.discoveryDoc(ME).profile, {
+          personality: 'x'.repeat(5000)
+        }) })
+      ))));
+
+    t.check('and an axis outside 0..100 is refused, as it is in the private document',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).set(
+        h.discoveryDoc(ME, { profile: Object.assign({}, h.discoveryDoc(ME).profile, {
+          personality: { openness: 101 }
+        }) })
+      ))));
+
+    // The control: the projection the store actually writes still publishes.
+    t.check('but the five real axes still publish',
+      await ok(assertSucceeds(as(ME).doc('discovery/' + ME).set(
+        h.discoveryDoc(ME, { profile: Object.assign({}, h.discoveryDoc(ME).profile, {
+          personality: { openness: 70, conscientiousness: 60, extraversion: 50, agreeableness: 65, stability: 55 }
+        }) })
+      ))));
+
     t.check('the lastActiveAt-only refresh the store makes is allowed',
       await ok(assertSucceeds(as(ME).doc('discovery/' + ME).update({ lastActiveAt: '2026-02-02T00:00:00.000Z' }))));
 

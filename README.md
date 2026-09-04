@@ -248,7 +248,7 @@ npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.
 
 ### Unit suites
 
-Fourteen suites on Node's built-in runner — **232 checks**, no install, no browser, seconds:
+Fourteen suites on Node's built-in runner — **233 checks**, no install, no browser, seconds:
 
 | Suite | What it pins down |
 | --- | --- |
@@ -258,7 +258,7 @@ Fourteen suites on Node's built-in runner — **232 checks**, no install, no bro
 | `tests/data-store.test.js` | The demo storage adapter, loaded for real in Node against a `localStorage` shim: seeding (32 profiles, inbound likes, both conversations, idempotency, force re-seed), user create/update deep-merge semantics with wholesale `interestAffinity` replacement, swipe/match/undo idempotency, messaging with unread counters and the 1000-char cap, daily usage limits per plan, the reports lifecycle (file, list, retract, purge on account deletion), and export/import/reset round-trips. |
 | `tests/docs.test.js` | The claims this README makes about itself: that every `**N checks**` total is one `scripts/claims.js` stands behind, that every path and `npm run` incantation in the docs resolves, and that no spec exists without a line describing it. Documentation is the one part of this project that fails silently; this is the cheapest check there is, so it runs on every push. |
 | `tests/injection.test.js` | No shipped script can hand a browser a string to parse as markup or run as code — `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, `srcdoc`, `eval`, `new Function`, string-bodied timers, `javascript:` URLs — with comments and string literals blanked first, so a sink named in prose is not mistaken for one in use. In a dating app almost every string on screen was typed by somebody else. |
-| `tests/limits.test.js` | Every bound in this app is written down twice — once in `public/js/profile.js`, which enforces it while you type and names it in the message, and once in `firestore.rules`, because a client-side limit is a courtesy. This reads both files and refuses to let them drift: no limit the form accepts may be one the rules refuse, the private document and the public projection must state each bound identically, and the rules' photo-link allowance must be exactly six of what the editor permits per link. Plus the rule that made those caps necessary: a list whose *length* is bounded must have its *contents* bounded too, counted per occurrence, because one element can be a megabyte. |
+| `tests/limits.test.js` | Every bound in this app is written down twice — once in `public/js/profile.js`, which enforces it while you type and names it in the message, and once in `firestore.rules`, because a client-side limit is a courtesy. This reads both files and refuses to let them drift: no limit the form accepts may be one the rules refuse, the private document and the public projection must state each bound identically, and the rules' photo-link allowance must be exactly six of what the editor permits per link. Plus the two rules that made those caps necessary: every key a `hasOnly` allowlist admits must be one something in the same validator looks at, and a list whose *length* is bounded must have its *contents* bounded too, counted per occurrence, because one element can be a megabyte. The first of those found `discovery/{uid}.personality` accepting anything at all, three lines from the `location` field that had the same defect and was caught by eye rounds earlier. |
 | `tests/matching-engine.test.js` | Every hard filter including the mutual gender/age cases, the neutral missing-location path, score bounds, determinism, tokeniser and cosine behaviour, learning clamp/prune/cap, ranking tie-breaks, weight renormalisation, and a golden end-to-end score. |
 | `tests/projection.test.js` | What is public about an account, agreed in one place. The key set `projectDiscovery()` emits must equal the closed `hasOnly` lists in `firestore.rules` — drift either way is named — and, separately, a fully populated private account is projected and searched for sentinels, so `email`, `birthdate`, `blocked`, `learning` or `usage` cannot reach the world-readable half even if somebody widens the rules to let them. |
 | `tests/pwa.test.js` | The manifest and the service worker carry no root-anchored assumptions, so the same `public/` installs and serves offline under a GitHub Pages project subpath as well as at a site root. |
@@ -319,7 +319,7 @@ readable by other accounts, that nobody can mint a match with a stranger and the
 them, that the abuse queue cannot be enumerated — is a claim about one file,
 `firestore.rules`, because there is no server to enforce anything else. Reading it
 carefully is not evidence. `rules-tests/` executes it against the Firestore emulator:
-**171 checks**, including the attacks each rule exists to stop.
+**175 checks**, including the attacks each rule exists to stop.
 
 ```sh
 npm install --prefix /tmp/zc-rules @firebase/rules-unit-testing firebase-tools

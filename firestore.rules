@@ -305,10 +305,33 @@ service cloud.firestore {
           && (!('age' in p) || p.age == null || (p.age is number && p.age >= 18 && p.age <= 120))
           && (!('showAge' in p) || (p.showAge is bool))
           && (!('showDistance' in p) || (p.showDistance is bool))
-          // `location` was on the key list above and had no validator at all, so the
-          // one world-readable collection in the project accepted a megabyte under that
-          // name. Every signed-in user reads these documents to build a deck.
-          && (!('location' in p) || locationOk(p.location));
+          // `location` and `personality` were both on the key list above with no
+          // validator at all, so the one world-readable collection in the project
+          // accepted a megabyte under either name. Every signed-in user reads these
+          // documents to build a deck. `location` was found by eye a few rounds ago;
+          // `personality` outlived that pass, and was found by asking the question
+          // mechanically instead — tests/limits.test.js now checks that every key an
+          // allowlist admits is one something in the same validator looks at.
+          && (!('location' in p) || locationOk(p.location))
+          && (!('personality' in p) || personalityOk(p.personality));
+      }
+
+      // Restated rather than shared: a rules function does not cross a `match` block,
+      // and the private document's copy is two hundred lines and one collection away.
+      // Same five axes, same range — and a closed key list this time, which the private
+      // copy does not have and does not need, since `profileOk` is not the document
+      // anybody else can read.
+      function personalityOk(pp) {
+        return pp == null || (
+          pp is map
+          && pp.keys().hasOnly(['openness', 'conscientiousness', 'extraversion',
+                                'agreeableness', 'stability'])
+          && (!('openness' in pp) || (pp.openness is number && pp.openness >= 0 && pp.openness <= 100))
+          && (!('conscientiousness' in pp) || (pp.conscientiousness is number && pp.conscientiousness >= 0 && pp.conscientiousness <= 100))
+          && (!('extraversion' in pp) || (pp.extraversion is number && pp.extraversion >= 0 && pp.extraversion <= 100))
+          && (!('agreeableness' in pp) || (pp.agreeableness is number && pp.agreeableness >= 0 && pp.agreeableness <= 100))
+          && (!('stability' in pp) || (pp.stability is number && pp.stability >= 0 && pp.stability <= 100))
+        );
       }
 
       // Either null or a real coordinate pair with a short label. Same shape the private
@@ -609,6 +632,13 @@ service cloud.firestore {
           && exists(/databases/$(database)/documents/discovery/$(d.about))
           && d.reason in ['fake-profile', 'inappropriate-content', 'harassment', 'underage', 'scam-or-spam', 'other']
           && (!('details' in d) || (d.details is string && d.details.size() <= 500))
+          // `id` was on the key list above with no validator at all — the same
+          // oversight `discovery/{uid}`'s `location` had, and the swipe, match and
+          // message rules all pin their `id` to the document id. Without it the one
+          // collection whose entire design is "a deterministic id bounds the queue"
+          // accepted a megabyte under the field named `id`, and the queue it bounds
+          // is the abuse queue.
+          && (!('id' in d) || (d.id == reportId))
           && stampOk(d.createdAt);
       }
 

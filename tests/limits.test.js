@@ -139,6 +139,57 @@ test('the photo-link cap in the rules is exactly six of what the editor allows',
       : 'The rule is looser than the editor, so the editor is the only thing enforcing it.'));
 });
 
+test('every key a closed allowlist admits is one something validates', function () {
+  // `keys().hasOnly([...])` decides which fields a document may have. It says
+  // nothing about what any of them may contain, so a key that appears on the list
+  // and nowhere else in its validator is a field the rules accept unexamined —
+  // which, at Firestore's 1 MiB per document, means any size and any type.
+  //
+  // This has happened twice. `discovery/{uid}`'s `location` was on the list with
+  // no validator at all, in the one world-readable collection, and was found by
+  // eye. `personality` had the identical defect three lines away, survived that
+  // pass and several since, and was found by this check — which is the argument
+  // for asking the question mechanically rather than carefully.
+  const bodies = new Map();
+  for (const m of RULES.matchAll(/function\s+(\w+)\s*\(([^)]*)\)\s*\{([\s\S]*?)\n\s*\}/g)) {
+    bodies.set(m[1], m[3]);
+  }
+  assert.ok(bodies.size >= 15, 'found only ' + bodies.size + ' rules functions — the pattern has ' +
+    'probably stopped matching, which would make this test vacuous');
+
+  const unexamined = [];
+  let listsChecked = 0;
+  for (const [name, body] of bodies) {
+    for (const list of body.matchAll(/(\w+)\.keys\(\)\.hasOnly\(\[([\s\S]*?)\]\)/g)) {
+      listsChecked += 1;
+      const receiver = list[1];
+      const keys = [...list[2].matchAll(/'([^']+)'/g)].map(function (m) { return m[1]; });
+
+      // The validator's own text, minus the allowlist itself — plus the body of
+      // anything it hands the whole document to. `userDocOk` delegates `learning`,
+      // `usage` and `blocked` wholesale to `bookkeepingOk(d)`, and a check that did
+      // not follow that would report three fields as unexamined that are not.
+      let covering = body.split(list[0]).join('');
+      for (const call of body.matchAll(new RegExp('\\b(\\w+)\\(' + receiver + '\\)', 'g'))) {
+        if (bodies.has(call[1])) covering += bodies.get(call[1]);
+      }
+
+      keys.forEach(function (key) {
+        const named = covering.indexOf("'" + key + "'") !== -1;
+        const read = new RegExp('\\.' + key + '\\b').test(covering);
+        if (!named && !read) unexamined.push(name + ' → ' + key);
+      });
+    }
+  }
+
+  assert.ok(listsChecked >= 6, 'found only ' + listsChecked + ' closed key lists — ' +
+    'the pattern is no longer finding them');
+  assert.deepEqual(unexamined, [],
+    'these keys are on a closed allowlist and nothing in the validator looks at them:\n  ' +
+    unexamined.join('\n  ') + '\nA key the rules admit and never examine is a field of any ' +
+    'type and any size, up to Firestore\'s 1 MiB per document.');
+});
+
 test('every list whose length the rules bound also has its contents bounded', function () {
   // `size()` counts elements and says nothing about what is in them, so a list
   // capped at six could still carry a megabyte in one element and pass. Each of

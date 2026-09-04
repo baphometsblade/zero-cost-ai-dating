@@ -129,7 +129,7 @@ Open [`firestore.rules`](../firestore.rules). It is the only server-side securit
 has, so it is worth the five minutes.
 
 Everything below is also *executed* — `npm run test:rules` runs the real rules file against
-the Firestore emulator, **171 checks** including the attacks each rule exists to stop. If you
+the Firestore emulator, **175 checks** including the attacks each rule exists to stop. If you
 change the data model, run it. See [`rules-tests/README.md`](../rules-tests/README.md).
 `npm run test:emulator` adds the store suite to the same emulator boot: **80 more checks** that
 drive the shipped `public/js/data-store.js` against a real Firestore, which is where the
@@ -164,7 +164,12 @@ anywhere else was free to rot. It now reads every document.
   keyed by the two participants with numeric counts, an `id` field must equal the document
   id, and `discovery/{uid}`'s `location` — which was on its key list with **no validator at
   all**, in the one world-readable collection — is held to a coordinate pair with a short
-  label.
+  label. `personality` was on that same world-readable key list with no validator either,
+  three lines from `location`; it outlived the pass that found `location` and every pass
+  since, and turned up only when `tests/limits.test.js` began asking mechanically whether
+  every key an allowlist admits is one something examines. `reports/{from_about}` had the
+  same defect on `id` — in the collection whose entire design is a deterministic id
+  bounding the abuse queue. Both are validated now.
 
   The elements *inside* those lists were the part this document said could not be helped:
   the strings in `profile.photos`, `profile.interests` and `blocked`, and the keys and
