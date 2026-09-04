@@ -147,10 +147,15 @@ daily counter's transaction is proven — see [`store-tests/README.md`](../store
   app mirrors it automatically on every profile save.
 - `swipes/{swipeId}` — create only when you are the `from` user **and** the document id is
   exactly `from_to`. Read your own (either direction). Delete your own, or one aimed at you —
-  account deletion purges inbound likes too. No updates.
+  account deletion purges inbound likes too. No updates. A read of a document that is *not
+  there* is allowed only when the id names you, which the client needs (every first swipe
+  reads its own unwritten record and the usually-absent reciprocal one) and an onlooker must
+  not have: an unconditional allowance would answer "has Alice swiped on Bob?" for any pair,
+  from the difference between an empty snapshot and a denial.
 - `matches/{matchId}` — read and update only if you are one of the two `users`; create only
   with `users.size() == 2`, yourself among them, an id equal to the sorted join, and proof the
-  other person actually liked you first.
+  other person actually liked you first. Absent documents follow the same id rule as swipes,
+  for a fact worth hiding rather more: whether two named people have matched.
 - `matches/{matchId}/messages/{msgId}` — read if you participate in the parent match; create
   only as yourself with 1–1000 characters of text. Never editable; deletable by participants
   so unmatch and account deletion can purge the conversation before the match goes.

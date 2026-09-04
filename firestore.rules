@@ -252,15 +252,31 @@ service cloud.firestore {
       //
       // `resource` is null when the requested document does not exist, and dereferencing
       // it would raise an evaluation error (surfacing to the client as PERMISSION_DENIED
-      // rather than an empty snapshot). Every first swipe reads its own not-yet-written
-      // document and the usually-absent reciprocal one, so the miss has to be an allowed
-      // read that reports `exists == false`. This leaks nothing: a null resource carries
-      // no data, and list queries — where documents do exist — still have to be
-      // constrained to `from`/`to == uid`.
+      // rather than an empty snapshot). The client reads absent documents constantly:
+      // every first swipe reads its own not-yet-written record and the usually-absent
+      // reciprocal one, and `getLikesReceived` asks, once per person who liked you,
+      // whether `swipes/{me}_{them}` exists. So a miss has to be an allowed read that
+      // reports `exists == false`.
+      //
+      // Which miss, though, is the whole question. This used to be a bare
+      // `resource == null`, allowing every signed-in caller to read every absent
+      // document — and that is an existence oracle rather than nothing, because the
+      // answers differ: an empty snapshot means the document is not there, a denial
+      // means it is there and is not yours. Anyone could therefore learn that Alice has
+      // swiped on Bob, for any pair, without reading a byte of it — and uids are
+      // enumerable, since `discovery/{uid}` is world-readable to signed-in users and its
+      // document id is the uid. The reports rule below already refuses misses for exactly
+      // this reason and says so; these two disagreed with it.
+      //
+      // The id is `from_to`, so the pair is in the name: a caller may probe a miss only
+      // when they are one half of it. That is precisely what the client does, and a uid
+      // is never a substring match — `in` compares whole elements — so a uid that somehow
+      // contained an underscore would be denied rather than admitted.
       allow read: if isSignedIn()
         && (resource == null
-            || resource.data.from == request.auth.uid
-            || resource.data.to == request.auth.uid);
+              ? request.auth.uid in swipeId.split('_')
+              : (resource.data.from == request.auth.uid
+                 || resource.data.to == request.auth.uid));
 
       // Create: you may only record swipes authored by yourself.
       allow create: if isSignedIn()
@@ -316,12 +332,20 @@ service cloud.firestore {
           && get(inboundSwipe(d)).data.action in ['like', 'super'];
       }
 
-      // Read: participants only. As with swipes, a read of a document that does not
-      // exist has `resource == null`, and dereferencing it errors instead of returning
-      // an empty snapshot — rewind always probes the (usually absent) match document for
-      // the pair, and `getMatch()` must answer `null` for a stale or hand-typed id.
+      // Read: participants only. As with swipes, a read of a document that does not exist
+      // has `resource == null` and dereferencing it errors instead of returning an empty
+      // snapshot — and rewind probes the (usually absent) match document for the pair on
+      // every undo, inside a transaction, so that miss has to be allowed.
+      //
+      // Allowed by the id, not unconditionally, for the reason spelled out on the swipes
+      // rule above: a bare `resource == null` answers every caller for every id, and the
+      // difference between an empty snapshot and a denial tells them whether two people
+      // they named have matched. That is a more sensitive fact than a swipe. The id is
+      // the sorted pair, so a caller may probe only a match they would be in.
       allow read: if isSignedIn()
-        && (resource == null || request.auth.uid in resource.data.users);
+        && (resource == null
+              ? request.auth.uid in matchId.split('_')
+              : request.auth.uid in resource.data.users);
 
       // Create: a participant creating a well-formed match document, but only once the
       // other person has actually liked them back. Without that proof any signed-in user

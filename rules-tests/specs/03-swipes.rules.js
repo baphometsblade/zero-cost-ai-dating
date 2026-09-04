@@ -74,6 +74,17 @@ module.exports = {
     t.check('a signed-in user can probe their own swipe document before it exists',
       await ok(assertSucceeds(as(ME).doc('swipes/' + ME + '_unswiped-so-far').get())));
 
+    // The other half of that, and the reason the miss is allowed by the id
+    // rather than unconditionally. `resource == null` on its own answers every
+    // caller for every id, and the two answers differ: an empty snapshot means
+    // the document is not there, a denial means it is there and is not yours.
+    // Probing `other_fourth` and `other_third` in turn therefore reports which
+    // of them `other` has swiped on — without reading a byte of either — and
+    // uids are enumerable, because discovery/{uid} is world-readable to signed-in
+    // users and its document id is the uid.
+    t.check('but not a missing swipe between two other people, which would tell them it is missing',
+      await ok(assertFails(as(ME).doc('swipes/' + OTHER + '_' + FOURTH).get())));
+
     t.check('a query constrained to your own swipes is allowed',
       await ok(assertSucceeds(as(ME).collection('swipes').where('from', '==', ME).get())));
 
