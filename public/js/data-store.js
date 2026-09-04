@@ -794,6 +794,17 @@
       const reverse = swipes[swipeId(toUid, fromUid)];
       if (!reverse || !isPositive(reverse.action)) return { matched: false, matchId: null, created: false };
 
+      // A block outranks a mutual like, and the answer is a plain "no match" rather than
+      // an error: the person who was blocked must not be told that they were. The
+      // Firestore adapter cannot make this decision — the block list is private, so its
+      // client never sees it — and relies on `firestore.rules` refusing the write. Same
+      // outcome, reached from opposite ends, which is the agreement worth having.
+      const users = readUsers();
+      const target = isPlainObject(users[toUid]) ? normalizeUser(users[toUid]) : null;
+      if (target && target.blocked.indexOf(fromUid) !== -1) {
+        return { matched: false, matchId: null, created: false };
+      }
+
       // Mutual like — create the match once and only once.
       const matches = readMatches();
       const matchId = pairId(fromUid, toUid);
@@ -1516,6 +1527,11 @@
           if (doc.id === uid) return;
           if (swiped[doc.id]) return;
           if (myBlocks.indexOf(doc.id) !== -1) return;
+          // People I blocked are filtered above, from my own private document. People
+          // who blocked *me* are not, and cannot be: their block list is private, and
+          // any signal this client could read to filter on would tell its user they had
+          // been blocked — which is the one thing a block is supposed not to announce.
+          // The deck therefore still shows them; the rules stop the contact.
           const candidate = docToUser(doc);
           if (!candidate) return;
           // Cheap mutual gender/age pre-filters (same semantics as the
@@ -1596,14 +1612,29 @@
         const unread = {};
         unread[fromUid] = 0;
         unread[toUid] = 0;
-        await matchRef.set({
-          id: matchId,
-          users: [String(fromUid), String(toUid)].sort(),
-          createdAt: nowIso(),
-          lastMessage: null,
-          lastMessageAt: null,
-          unread: unread
-        });
+        try {
+          await matchRef.set({
+            id: matchId,
+            users: [String(fromUid), String(toUid)].sort(),
+            createdAt: nowIso(),
+            lastMessage: null,
+            lastMessageAt: null,
+            unread: unread
+          });
+        } catch (err) {
+          // The expected reason is the block rule: the other person has blocked this
+          // account, and the rule refuses the write because the client cannot — their
+          // block list is private and this client never sees it. The answer has to be a
+          // plain "no match", not an error: the swipe itself is already stored and the
+          // deck must not take the card back, and somebody who was blocked must not be
+          // told that they were, which an error message would do.
+          //
+          // Swallowing every failure here would hide real ones, so it is warned about
+          // once, with the rejection attached, and the demo adapter reaches the same
+          // no-match from the other direction by reading the list it can see.
+          console.warn('[zc.store] No match document was created for ' + matchId + '.', err);
+          return { matched: false, matchId: null, created: false };
+        }
         created = true;
       }
       return { matched: true, matchId: matchId, created: created };
@@ -1677,9 +1708,18 @@
       }));
       const pending = unblocked.filter(function (from, index) { return !already[index].exists; });
       const users = await fetchProfiles(pending);
+      // No "and they have not blocked me" filter, because there cannot be one here.
+      // These profiles come from `discovery/{uid}`, and projectDiscovery deliberately
+      // leaves `blocked` out — publishing who somebody has blocked is its own
+      // disclosure. This line used to read `user.blocked.indexOf(uid) === -1`, which
+      // normalizeUser makes a filter over an always-empty array: it excluded nobody and
+      // looked like it did. The demo adapter reads whole private documents, so its copy
+      // of the check works, and the two quietly disagreed about a safety feature.
+      // Where a block is actually enforced is `firestore.rules`, on match creation,
+      // where a rule can read a private document no client may.
       return pending
         .map(function (from) { return users[from]; })
-        .filter(function (user) { return !!user && user.blocked.indexOf(uid) === -1; });
+        .filter(function (user) { return !!user; });
     },
 
     async getMatches(uid) {

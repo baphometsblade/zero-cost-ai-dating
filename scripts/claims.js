@@ -41,7 +41,7 @@
  */
 const CLAIMS = {
   unit: {
-    total: 224,
+    total: 225,
     how: 'npm test',
     note: 'Node\'s built-in runner, no install'
   },
@@ -56,12 +56,12 @@ const CLAIMS = {
     note: 'the same twelve specs plus the thirteenth, which drives the real SDK'
   },
   rules: {
-    total: 133,
+    total: 135,
     how: 'npm run test:rules',
     note: 'firestore.rules executed against the emulator'
   },
   store: {
-    total: 54,
+    total: 60,
     how: 'npm run test:store',
     note: 'the shipped data-store.js driven against the emulator'
   }
