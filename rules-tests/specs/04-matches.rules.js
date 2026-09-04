@@ -70,6 +70,15 @@ module.exports = {
       await ok(assertSucceeds(as(ME).doc('matches/' + h.pairId(ME, OPENER)).set(h.matchDoc(ME, OPENER)))));
 
     /* ---- shape ---- */
+    // One unexpected key is the whole test. `hasAll` admitted any number of them at
+    // any size, so a document the rules called well-formed could still be padded to
+    // Firestore's 1 MiB ceiling; a spec that actually wrote a megabyte would prove the
+    // same thing and take a hundred times as long.
+    t.check('a match carrying a field the shape does not name is refused',
+      await ok(assertFails(as(ME).doc('matches/' + h.pairId(ME, OPENER)).set(
+        h.matchDoc(ME, OPENER, { padding: 'x'.repeat(64) })
+      ))));
+
     t.check('the document id must be the sorted pair',
       await ok(assertFails(as(ME).doc('matches/not-the-pair-id').set(h.matchDoc(ME, LIKER)))));
 

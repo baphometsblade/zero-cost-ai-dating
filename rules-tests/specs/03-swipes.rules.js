@@ -36,6 +36,15 @@ module.exports = {
     t.check('you cannot record a swipe authored by someone else',
       await ok(assertFails(as(ME).doc('swipes/' + OTHER + '_' + FOURTH).set(h.swipeDoc(OTHER, FOURTH, 'like')))));
 
+    // One unexpected key is the whole test. `hasAll` admitted any number of them at
+    // any size, so a document the rules called well-formed could still be padded to
+    // Firestore's 1 MiB ceiling; a spec that actually wrote a megabyte would prove the
+    // same thing and take a hundred times as long.
+    t.check('a swipe carrying a field the shape does not name is refused',
+      await ok(assertFails(as(ME).doc('swipes/' + ME + '_' + FOURTH).set(
+        Object.assign(h.swipeDoc(ME, FOURTH, 'like'), { padding: 'x'.repeat(64) })
+      ))));
+
     t.check('you cannot swipe on yourself',
       await ok(assertFails(as(ME).doc('swipes/' + ME + '_' + ME).set(h.swipeDoc(ME, ME, 'like')))));
 

@@ -293,3 +293,29 @@ test('an empty account projects the same shape as a full one', function () {
   assert.deepEqual(Object.keys(sparse.preferences).sort(), Object.keys(full.preferences).sort(),
     'a sparse account projects a different preferences shape than a complete one');
 });
+
+test('the rules accept exactly the keys the store puts in a private user document', async function () {
+  // The same three-copies problem as the projection above, one collection over.
+  // `DEFAULT_USER` in data-store.js decides what a user document holds; the
+  // `hasOnly` list in `userDocOk` decides what firestore.rules accepts; nothing
+  // compared them. That list used to be a `hasAll`, which compared nothing by
+  // construction — an account could pad its own document to the 1 MiB ceiling
+  // with fields no part of this app reads.
+  //
+  // The shape is taken from the *shipped store*, not restated here: a field
+  // added to DEFAULT_USER now fails `npm test` until the rule agrees, which is
+  // the direction that would otherwise surface as a rejected sign-up in
+  // Firebase mode only. The other direction — a key dropped from the rule and
+  // left in the store — fails the same way, and is the one nobody would notice
+  // until somebody could not sign up.
+  const stored = await window.ZC.store.createUser('rules-shape-uid', {});
+  const shape = Object.keys(stored).sort();
+  const allowed = hasOnlyList('userDocOk').sort();
+
+  assert.deepEqual(shape, allowed,
+    'the store writes a user document whose keys are not the ones firestore.rules accepts.\n' +
+    '  store:  ' + shape.join(', ') + '\n' +
+    '  rules:  ' + allowed.join(', ') + '\n' +
+    'A key in the store but not the rules is a write Firebase mode will reject; a key in ' +
+    'the rules but not the store is an allowance nothing needs. Move both together.');
+});

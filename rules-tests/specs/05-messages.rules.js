@@ -40,6 +40,17 @@ module.exports = {
       await ok(assertFails(anon().collection('matches/' + mine + '/messages').get())));
 
     /* ---- create ---- */
+    // One unexpected key is the whole test. `hasAll` admitted any number of them at
+    // any size, so a document the rules called well-formed could still be padded to
+    // Firestore's 1 MiB ceiling; a spec that actually wrote a megabyte would prove the
+    // same thing and take a hundred times as long.
+    // This one is the sharpest: the 1000-character cap on `text` reads like a bound on
+    // the message and bounded only that field.
+    t.check('a message carrying a field the shape does not name is refused',
+      await ok(assertFails(as(ME).collection('matches/' + mine + '/messages').add(
+        Object.assign(h.messageDoc(ME, 'hello'), { padding: 'x'.repeat(64) })
+      ))));
+
     t.check('a participant can send a message as themselves',
       await ok(assertSucceeds(as(ME).collection('matches/' + mine + '/messages').add(h.messageDoc(ME, 'hello')))));
 
