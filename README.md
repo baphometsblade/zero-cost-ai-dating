@@ -336,7 +336,7 @@ The daily usage counter is the one piece of client logic where reading the code 
 as weak an argument as it was for the rules: whether two concurrent bumps collapse into one
 is a property of a real database, not of anything visible in the file. `store-tests/` loads
 the **shipped** `public/js/data-store.js` into Node — `window` aliased to `globalThis`,
-`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **60
+`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **62
 checks**, including 20 concurrent `bumpUsage` calls on one document storing exactly 20, the
 midnight roll-over happening inside the same transaction, a bump writing `usage` and nothing
 else, 30 swipes replaying the deck's real learning-save-then-bump ordering and storing exactly
@@ -516,6 +516,12 @@ These are real, and worth knowing before you show this to anyone:
   against a projection with no `blocked` field: it excluded nobody while looking like it
   did, and the demo adapter's working copy of the same check hid the difference. It is
   gone, and the comment in its place says where the enforcement really is.
+  One more honest edge, since the point of all this is not telling somebody they were
+  blocked: the refused match write is a 403 in the network tab whatever the app does with
+  it, so anyone driving the SDK themselves can see the denial. What the app controls is
+  whether it *volunteers* the reason, and it no longer does — the console line names the
+  document that was not written and nothing else. That removes the casual tell and not the
+  determined one, which is the most a client-side project can claim.
 - **The background badge poll is the largest standing read cost, and it is not free.**
   `app.js` refreshes the unread-message and pending-like badges every 20 seconds while the
   tab is in the foreground (it skips ticks while it is hidden). A refresh costs about two

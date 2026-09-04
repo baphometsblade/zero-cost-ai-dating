@@ -1245,6 +1245,23 @@
    * @param {Object} matchRef the match document reference
    * @returns {Promise<void>}
    */
+  /**
+   * Whether a Firestore rejection is the rules refusing the write.
+   *
+   * The compat SDK sets `code` to 'permission-denied'; the message is checked
+   * as well because a rejection that reaches here without a code — a wrapped
+   * error, a future SDK — should still be recognised rather than treated as an
+   * unknown failure and re-thrown at the user.
+   * @param {*} err a rejection from a Firestore write
+   * @returns {boolean}
+   */
+  function isPermissionDenied(err) {
+    if (!err) return false;
+    const code = String(err.code || '');
+    if (code === 'permission-denied' || code === 'firestore/permission-denied') return true;
+    return /permission[\s_-]?denied/i.test(String(err.message || ''));
+  }
+
   async function deleteMatchMessages(matchRef) {
     for (;;) {
       const snap = await matchRef.collection('messages').limit(200).get();
@@ -1622,17 +1639,28 @@
             unread: unread
           });
         } catch (err) {
-          // The expected reason is the block rule: the other person has blocked this
-          // account, and the rule refuses the write because the client cannot — their
-          // block list is private and this client never sees it. The answer has to be a
-          // plain "no match", not an error: the swipe itself is already stored and the
-          // deck must not take the card back, and somebody who was blocked must not be
-          // told that they were, which an error message would do.
+          // Only a rules refusal becomes a quiet no-match, and the expected reason for
+          // one is the block rule: the other person has blocked this account, and the
+          // rule refuses the write because the client cannot — their block list is
+          // private and this client never sees it. The answer has to be a plain "no
+          // match" rather than an error, because the swipe itself is already stored and
+          // the deck must not take the card back.
           //
-          // Swallowing every failure here would hide real ones, so it is warned about
-          // once, with the rejection attached, and the demo adapter reaches the same
-          // no-match from the other direction by reading the list it can see.
-          console.warn('[zc.store] No match document was created for ' + matchId + '.', err);
+          // Everything else propagates. A first version caught every rejection here,
+          // which turned an offline write, an exhausted quota or a transient failure
+          // into a confident "you did not match" — a claim this function cannot make,
+          // since the pair may well be mutual and the document may land on a retry.
+          // Those are the caller's to see, exactly as they were before any of this.
+          if (!isPermissionDenied(err)) throw err;
+
+          // The rejection is deliberately *not* logged with it. The whole point of this
+          // path is not telling a blocked account that it was blocked, and a console
+          // line carrying `permission-denied` does precisely that. This is not a seal —
+          // a refused write is a 403 in the network tab whatever this line does, and
+          // anyone driving the SDK directly sees the denial — it removes the casual
+          // tell, not the determined one. What is left is a breadcrumb naming the
+          // document that was not written, which is what the UI shows anyway.
+          console.warn('[zc.store] No match document was created for ' + matchId + '.');
           return { matched: false, matchId: null, created: false };
         }
         created = true;
