@@ -37,45 +37,6 @@ const PENDING = 12;
 /** People who liked this account and have already been answered. */
 const ANSWERED = 6;
 
-/**
- * Wrap a compat Firestore so every document a read returns is tallied.
- *
- * Firestore bills a query that matches nothing as one read, so an empty result
- * counts as one here too — the point is to model the bill, not the payload.
- *
- * Deliberately not counted: reads made through a transaction's own `tx.get`,
- * which never passes through this object. Nothing measured here uses one, and
- * a spec that silently under-counted would be worse than no spec, so it is
- * said out loud instead of assumed.
- *
- * @param {Object} target the real compat Firestore, or one of its refs
- * @param {{reads:number, calls:number}} tally accumulator, mutated in place
- * @returns {Object} a stand-in that behaves identically and records reads
- */
-function counting(target, tally) {
-  return new Proxy(target, {
-    get: function (obj, prop) {
-      const value = obj[prop];
-      if (typeof value !== 'function') return value;
-      return function () {
-        const out = value.apply(obj, arguments);
-        if (prop === 'get' && out && typeof out.then === 'function') {
-          return out.then(function (snap) {
-            tally.calls += 1;
-            tally.reads += (snap && typeof snap.size === 'number') ? Math.max(1, snap.size) : 1;
-            return snap;
-          });
-        }
-        // Refs and queries are chained off each other, so they have to carry
-        // the tally forward. Promises must not be wrapped: a thenable behind a
-        // proxy is still awaited, but nothing good comes of proxying one.
-        if (out && typeof out === 'object' && typeof out.then !== 'function') return counting(out, tally);
-        return out;
-      };
-    }
-  });
-}
-
 module.exports = {
   title: 'A background refresh does not cost more the longer you have used the app',
 
@@ -179,7 +140,7 @@ module.exports = {
 async function measure(k, fn) {
   const real = k.ctx.ZC.firebase.db;
   const tally = { reads: 0, calls: 0 };
-  k.ctx.ZC.firebase.db = counting(real, tally);
+  k.ctx.ZC.firebase.db = k.h.countingDb(real, tally);
   try {
     const value = await fn();
     return { value: value, reads: tally.reads, calls: tally.calls };

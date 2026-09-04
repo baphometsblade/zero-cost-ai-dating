@@ -722,3 +722,69 @@ test('resetDemo wipes every demo key and restores the pristine seed', async func
   assert.deepEqual(Object.keys(raw(KEYS.matches)).sort(), [DEVIN_MATCH, SAM_MATCH]);
   assert.equal(raw(KEYS.seeded).version, 1);
 });
+
+/* ------------------------------------------------------------------------
+   9. Live badge subscriptions (demo mode)
+   ------------------------------------------------------------------------ */
+
+test('listenMatches delivers this account\'s unread counts and follows a message', async function () {
+  await resetWorld();
+  await store.createUser('alice', {});
+  await store.createUser('bob', {});
+  await store.recordSwipe('alice', 'bob', 'like');
+  const matched = await store.recordSwipe('bob', 'alice', 'like');
+
+  const seen = [];
+  const stop = store.listenMatches('alice', function (rows) { seen.push(rows); });
+  try {
+    await settle();
+    assert.equal(seen.length, 1, 'the first delivery is the current state');
+    assert.equal(seen[0].length, 1);
+    assert.equal(seen[0][0].id, matched.matchId);
+    assert.equal(seen[0][0].unread, 0, 'nothing said yet');
+
+    // Rows carry no profile. The badge draws a number, and fetching a name per
+    // match on a timer is what made the poll this replaced expensive.
+    assert.deepEqual(Object.keys(seen[0][0]).sort(),
+      ['createdAt', 'id', 'lastMessage', 'lastMessageAt', 'unread', 'users']);
+
+    await store.sendMessage(matched.matchId, 'bob', 'hello there');
+    await settle();
+    assert.equal(seen.length, 2, 'a message is delivered without waiting for a poll');
+    assert.equal(seen[1][0].unread, 1, 'and it is alice who has not read it');
+  } finally {
+    stop();
+  }
+});
+
+test('listenLikesReceived counts only the likes still waiting for an answer', async function () {
+  await resetWorld();
+  await store.createUser('alice', {});
+  await store.createUser('bob', {});
+  await store.createUser('cara', {});
+  await store.recordSwipe('bob', 'alice', 'like');
+
+  const seen = [];
+  const stop = store.listenLikesReceived('alice', function (count) { seen.push(count); });
+  try {
+    await settle();
+    assert.deepEqual(seen, [1], 'bob is waiting');
+
+    await store.recordSwipe('cara', 'alice', 'super');
+    await settle();
+    assert.deepEqual(seen, [1, 2], 'a super like counts too');
+
+    // Answering one takes it off the badge — which is the half a count that
+    // only watched inbound swipes would get wrong.
+    await store.recordSwipe('alice', 'bob', 'pass');
+    await settle();
+    assert.deepEqual(seen, [1, 2, 1], 'answered likes stop counting');
+  } finally {
+    stop();
+  }
+});
+
+/** Let the store's async first delivery and any same-tick nudges run. */
+function settle() {
+  return new Promise(function (resolve) { setTimeout(resolve, 20); });
+}

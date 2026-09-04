@@ -33,11 +33,6 @@
   const THEME_KEY = 'zc.theme';
   const THEMES = { system: 1, light: 1, dark: 1 };
 
-  // The badge poll only runs while the tab is visible, and never more often
-  // than BADGE_MIN_GAP_MS even when several triggers fire at once.
-  const BADGE_POLL_MS = 20000;
-  const BADGE_MIN_GAP_MS = 5000;
-
   const PAGES = {
     index: 1, auth: 1, dashboard: 1, profile: 1,
     matches: 1, settings: 1, subscription: 1, '404': 1
@@ -337,76 +332,92 @@
     return { matches: lastCounts.matches, dashboard: lastCounts.dashboard };
   }
 
-  let pollTimer = null;
-  let pollWired = false;
-  let badgeBusy = false;
+  let matchStop = null;
+  let likeStop = null;
+  let badgeUid = null;
   let badgeWarned = false;
-  let lastBadgeRun = 0;
 
   /**
-   * Recount unread messages (and, for premium, pending likes) and repaint the
-   * badges. Cheap, guarded and silent: a background poll must never take the
-   * page over.
-   * @param {boolean} [force=false] ignore the minimum gap between runs
-   * @returns {Promise<void>}
+   * Repaint the badges from a live subscription rather than a timer.
+   *
+   * This was a 20-second poll that re-read every match *and a profile for each
+   * of them* — plus, on the premium plan, every inbound like and a profile for
+   * each of those — whether or not anything had changed. Bounded by the size of
+   * a social graph, and spent again every twenty seconds for as long as a tab
+   * stayed open, against a Spark quota of 50,000 document reads a day.
+   *
+   * A snapshot listener bills the documents it first delivers and then only the
+   * ones that change, so an open tab now costs nothing while nothing happens.
+   * The rows carry no profiles either: a badge draws a number, and loading a
+   * name to count it was waste on top of waste.
+   *
+   * Idempotent, and safe to call again — `subscription.js` does exactly that
+   * when the plan changes, which is when the likes subscription has to start or
+   * stop.
+   * @returns {void}
    */
-  async function refreshBadges(force) {
+  function syncBadgeListeners() {
     const me = signedInDoc();
-    if (!me || !me.uid || !ZC.store || typeof ZC.store.getMatches !== 'function') return;
-    if (badgeBusy) return;
-    const now = Date.now();
-    if (!force && now - lastBadgeRun < BADGE_MIN_GAP_MS) return;
-    badgeBusy = true;
-    lastBadgeRun = now;
-    try {
-      const matches = await ZC.store.getMatches(me.uid);
-      let unread = 0;
-      (Array.isArray(matches) ? matches : []).forEach(function (match) {
-        unread += Math.max(0, Number(match && match.unread) || 0);
+    if (!me || !me.uid || !ZC.store || typeof ZC.store.listenMatches !== 'function') return;
+
+    // A subscription belongs to one account. Signing out always tears these
+    // down, so a different uid here means something changed the session without
+    // that — and a live subscription to the previous account's matches would
+    // keep painting their unread count over this one's.
+    if (badgeUid && badgeUid !== me.uid) stopBadgePolling();
+    badgeUid = me.uid;
+
+    if (!matchStop) {
+      matchStop = ZC.store.listenMatches(me.uid, function (rows) {
+        try {
+          let unread = 0;
+          (Array.isArray(rows) ? rows : []).forEach(function (row) {
+            unread += Math.max(0, Number(row && row.unread) || 0);
+          });
+          badge({ matches: unread });
+        } catch (err) {
+          warnOnce(err);
+        }
       });
+    }
 
-      let likes = 0;
-      if (planSeesLikes(me) && typeof ZC.store.getLikesReceived === 'function') {
-        const waiting = await ZC.store.getLikesReceived(me.uid);
-        likes = Array.isArray(waiting) ? waiting.length : 0;
-      }
-      badge({ matches: unread, likes: likes });
-    } catch (err) {
-      // One warning, then silence — this runs every 20 seconds.
-      if (!badgeWarned) {
-        badgeWarned = true;
-        console.warn('[zc] Unread badge could not refresh:', err);
-      }
-    } finally {
-      badgeBusy = false;
+    const wantsLikes = planSeesLikes(me) && typeof ZC.store.listenLikesReceived === 'function';
+    if (wantsLikes && !likeStop) {
+      likeStop = ZC.store.listenLikesReceived(me.uid, function (count) {
+        try {
+          badge({ likes: Math.max(0, Number(count) || 0) });
+        } catch (err) {
+          warnOnce(err);
+        }
+      });
+    } else if (!wantsLikes && likeStop) {
+      // Dropped back to Free: stop paying for the subscription and clear the
+      // number, rather than leaving a count the plan no longer entitles them to.
+      likeStop();
+      likeStop = null;
+      badge({ likes: 0 });
     }
   }
 
-  /** Recount when the tab comes back to the foreground. */
-  function onVisibilityChange() {
-    if (document.visibilityState === 'visible') refreshBadges(true);
+  /** One warning per session — a background subscription must not spam a console. */
+  function warnOnce(err) {
+    if (badgeWarned) return;
+    badgeWarned = true;
+    console.warn('[zc] A badge could not update:', err);
   }
 
-  /** Start the 20s poll (idempotent). It skips ticks while the tab is hidden. */
+  /** Start the badge subscriptions (idempotent). */
   function startBadgePolling() {
-    if (!pollWired) {
-      pollWired = true;
-      document.addEventListener('visibilitychange', onVisibilityChange);
-      window.addEventListener('focus', onVisibilityChange);
-    }
-    refreshBadges(true);
-    if (pollTimer) return;
-    pollTimer = window.setInterval(function () {
-      if (document.visibilityState === 'visible') refreshBadges(false);
-    }, BADGE_POLL_MS);
+    syncBadgeListeners();
   }
 
-  /** Stop the poll — used the moment the session ends. */
+  /** Drop them — used the moment the session ends. */
   function stopBadgePolling() {
-    if (pollTimer) {
-      window.clearInterval(pollTimer);
-      pollTimer = null;
-    }
+    if (typeof matchStop === 'function') matchStop();
+    if (typeof likeStop === 'function') likeStop();
+    matchStop = null;
+    likeStop = null;
+    badgeUid = null;
   }
 
   /* ------------------------------------------------------------------------
@@ -676,7 +687,7 @@
     currentPage: currentPage,
     onReady: onReady,
     badge: badge,
-    refreshBadges: refreshBadges,
+    refreshBadges: syncBadgeListeners,
     url: url
   };
 
