@@ -318,7 +318,7 @@ readable by other accounts, that nobody can mint a match with a stranger and the
 them, that the abuse queue cannot be enumerated — is a claim about one file,
 `firestore.rules`, because there is no server to enforce anything else. Reading it
 carefully is not evidence. `rules-tests/` executes it against the Firestore emulator:
-**139 checks**, including the attacks each rule exists to stop.
+**147 checks**, including the attacks each rule exists to stop.
 
 ```sh
 npm install --prefix /tmp/zc-rules @firebase/rules-unit-testing firebase-tools

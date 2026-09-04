@@ -79,6 +79,24 @@ module.exports = {
         h.matchDoc(ME, OPENER, { padding: 'x'.repeat(64) })
       ))));
 
+    // `unread` was checked as "a map with at most two keys", which bounded the number
+    // of keys and neither their names nor their values.
+    const outsiderUnread = {};
+    outsiderUnread[ME] = 0;
+    outsiderUnread[THIRD] = 0;
+    t.check('an unread map keyed by somebody outside the match is refused',
+      await ok(assertFails(as(ME).doc('matches/' + h.pairId(ME, OPENER)).set(
+        h.matchDoc(ME, OPENER, { unread: outsiderUnread })
+      ))));
+
+    const paddedUnread = {};
+    paddedUnread[ME] = 'x'.repeat(200);
+    paddedUnread[OPENER] = 0;
+    t.check('an unread count that is not a number is refused',
+      await ok(assertFails(as(ME).doc('matches/' + h.pairId(ME, OPENER)).set(
+        h.matchDoc(ME, OPENER, { unread: paddedUnread })
+      ))));
+
     t.check('the document id must be the sorted pair',
       await ok(assertFails(as(ME).doc('matches/not-the-pair-id').set(h.matchDoc(ME, LIKER)))));
 

@@ -40,13 +40,33 @@ module.exports = {
     // any size, so a document the rules called well-formed could still be padded to
     // Firestore's 1 MiB ceiling; a spec that actually wrote a megabyte would prove the
     // same thing and take a hundred times as long.
+    // Each of the three shape refusals below writes to its **own** document id, and
+    // that is load-bearing rather than tidy. They used to share one, and a combined
+    // mutation run showed why: with the rule weakened, the first write succeeded, so
+    // the next was an update rather than a create — refused by `allow update: if false`
+    // — and the check went green against the very code it exists to catch. A check that
+    // passes for the wrong reason is the failure mode this suite has had before.
     t.check('a swipe carrying a field the shape does not name is refused',
-      await ok(assertFails(as(ME).doc('swipes/' + ME + '_' + FOURTH).set(
-        Object.assign(h.swipeDoc(ME, FOURTH, 'like'), { padding: 'x'.repeat(64) })
+      await ok(assertFails(as(ME).doc('swipes/' + ME + '_pad-target').set(
+        Object.assign(h.swipeDoc(ME, 'pad-target', 'like'), { padding: 'x'.repeat(64) })
       ))));
 
     t.check('you cannot swipe on yourself',
       await ok(assertFails(as(ME).doc('swipes/' + ME + '_' + ME).set(h.swipeDoc(ME, ME, 'like')))));
+
+    // `createdAt is string` bounded nothing, and every document in this project
+    // carries one — so the closed key list above stopped a document growing an
+    // extra field while this one could still hold a megabyte.
+    t.check('a timestamp longer than a timestamp is refused',
+      await ok(assertFails(as(ME).doc('swipes/' + ME + '_stamp-target').set(
+        Object.assign(h.swipeDoc(ME, 'stamp-target', 'like'), { createdAt: 'x'.repeat(200) })
+      ))));
+
+    // `id` was on the key list and validated by nothing at all.
+    t.check('an id field that is not the document id is refused',
+      await ok(assertFails(as(ME).doc('swipes/' + ME + '_id-target').set(
+        Object.assign(h.swipeDoc(ME, 'id-target', 'like'), { id: 'x'.repeat(200) })
+      ))));
 
     t.check('an action outside like/pass/super is rejected',
       await ok(assertFails(as(ME).doc('swipes/' + ME + '_x').set(h.swipeDoc(ME, 'x', 'adore')))));

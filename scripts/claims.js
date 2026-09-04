@@ -56,7 +56,7 @@ const CLAIMS = {
     note: 'the same twelve specs plus the thirteenth, which drives the real SDK'
   },
   rules: {
-    total: 139,
+    total: 147,
     how: 'npm run test:rules',
     note: 'firestore.rules executed against the emulator'
   },
