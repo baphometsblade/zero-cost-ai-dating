@@ -324,7 +324,11 @@ changes. `store-tests/specs/11-live-cost.store.js` measures that.
 - `canSpend(uid, field)` returns `{ allowed, remaining, limit, plan }` by reading the plan
   limits out of `ZC.config`, and is called *before* every spend.
 - `touchActive` is throttled to one write per five minutes, because `lastActiveAt` feeds the
-  activity score but is not worth a write per navigation.
+  activity score but is not worth a write per navigation. It is called on every auth
+  resolution and on every page that resolves a user, so without the throttle a browsing
+  session is one Firestore write per navigation. `store-tests/specs/03-writes.store.js`
+  executes the sentence — the second touch must not write, and a touch after the window
+  must, which is what pins the five minutes rather than merely "some throttle".
 
 ---
 
