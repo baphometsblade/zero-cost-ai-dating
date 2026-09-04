@@ -550,6 +550,77 @@
      Reasons — §5.4
      ---------------------------------------------------------------------- */
 
+  /* ----------------------------------------------------------------------
+     The two display switches, honoured by the reasons as well — §5.3
+     ---------------------------------------------------------------------- */
+
+  // profile.html tells people, in as many words, that showAge and showDistance
+  // are "display-only… turning them off changes what people read, not who you
+  // are shown to". Both halves of that sentence are promises, and both are
+  // checked here, because the reasons used to keep only the second one: every
+  // other surface honoured the switches — dashboard's ageOf returns null, its
+  // distanceText returns '' — while the reason list printed "Same age" and
+  // "Just 1 km away" directly underneath the fields it had just suppressed, to
+  // the same precision. A viewer who knows their own age learns the other
+  // person's exactly.
+  const NEAR = { label: 'Portland', lat: 45.52, lng: -122.68 };
+  const ALSO_NEAR = { label: 'Portland', lat: 45.529, lng: -122.68 };
+
+  /**
+   * @param {Object} [over] profile overrides for the candidate
+   * @returns {Object} reason kinds the candidate would have shown about them
+   */
+  function kindsFor(over) {
+    const me = mkUser('me', { profile: { age: 30, location: NEAR } });
+    const them = mkUser('them', { profile: Object.assign({ age: 30, location: ALSO_NEAR }, over || {}) });
+    return M.scoreCandidate(me, them, OPTS).reasons.map(function (r) { return r.kind; });
+  }
+
+  test('a candidate showing both age and distance gets both reasons', function () {
+    const kinds = kindsFor({ showAge: true, showDistance: true });
+    // Without this the two checks below would pass on a build that emitted no
+    // age or distance reason at all, for any candidate.
+    assert.ok(kinds.indexOf('distance') !== -1, 'distance reason: ' + kinds.join(', '));
+    assert.ok(kinds.indexOf('age') !== -1, 'age reason: ' + kinds.join(', '));
+  });
+
+  test('showDistance: false suppresses the distance reason', function () {
+    const kinds = kindsFor({ showDistance: false });
+    assert.equal(kinds.indexOf('distance'), -1,
+      'a profile that hides its distance must not have it republished as a reason: ' + kinds.join(', '));
+  });
+
+  test('showAge: false suppresses the age reason', function () {
+    const kinds = kindsFor({ showAge: false });
+    assert.equal(kinds.indexOf('age'), -1,
+      'a profile that hides its age must not have it republished as a reason: ' + kinds.join(', '));
+  });
+
+  test('a profile predating the switches is treated as showing, not hiding', function () {
+    const stored = mkUser('them', { profile: { age: 30, location: ALSO_NEAR } });
+    delete stored.profile.showAge;
+    delete stored.profile.showDistance;
+    const me = mkUser('me', { profile: { age: 30, location: NEAR } });
+    const kinds = M.scoreCandidate(me, stored, OPTS).reasons.map(function (r) { return r.kind; });
+    // Absent is not off. A document written before these fields existed must
+    // not go quiet on its owner's behalf; normalizeUser defaults both to true.
+    assert.ok(kinds.indexOf('distance') !== -1 && kinds.indexOf('age') !== -1, kinds.join(', '));
+  });
+
+  test('the switches change what is said, never the score or the ranking', function () {
+    const me = mkUser('me', { profile: { age: 30, location: NEAR } });
+    const shown = mkUser('them', { profile: { age: 30, location: ALSO_NEAR, showAge: true, showDistance: true } });
+    const hidden = mkUser('them', { profile: { age: 30, location: ALSO_NEAR, showAge: false, showDistance: false } });
+    const a = M.scoreCandidate(me, shown, OPTS);
+    const b = M.scoreCandidate(me, hidden, OPTS);
+    // The other half of the promise: "your age and your city still take part in
+    // matching". Hiding them must not quietly cost somebody their matches, so
+    // the score and every component behind it have to be identical.
+    assert.equal(a.score, b.score);
+    assert.deepEqual(a.breakdown, b.breakdown);
+    assert.equal(a.distanceKm, b.distanceKm);
+  });
+
   test('reasons are specific, capped at four, and never empty-handed', function () {
     const r = M.scoreCandidate(ALEX, RILEY, OPTS);
     const kinds = ['interests', 'personality', 'bio', 'distance', 'age', 'activity'];
