@@ -580,6 +580,53 @@
   }
 
   /**
+   * The half of the demo recordSwipe that runs once the swipe is stored.
+   * @param {string} fromUid the swiper
+   * @param {string} toUid the swiped
+   * @param {string} effective the action that actually stands
+   * @param {Object} swipes the swipe map already read by the caller
+   * @returns {{matched:boolean, matchId:string|null, created:boolean}}
+   */
+  function demoMatchFor(fromUid, toUid, effective, swipes) {
+    if (!isPositive(effective)) return { matched: false, matchId: null, created: false };
+    const reverse = swipes[swipeId(toUid, fromUid)];
+    if (!reverse || !isPositive(reverse.action)) return { matched: false, matchId: null, created: false };
+
+    // A block outranks a mutual like, and the answer is a plain "no match" rather than
+    // an error: the person who was blocked must not be told that they were. The
+    // Firestore adapter cannot make this decision — the block list is private, so its
+    // client never sees it — and relies on `firestore.rules` refusing the write. Same
+    // outcome, reached from opposite ends, which is the agreement worth having.
+    const users = readUsers();
+    const target = isPlainObject(users[toUid]) ? normalizeUser(users[toUid]) : null;
+    if (target && target.blocked.indexOf(fromUid) !== -1) {
+      return { matched: false, matchId: null, created: false };
+    }
+
+    // Mutual like — create the match once and only once.
+    const matches = readMatches();
+    const matchId = pairId(fromUid, toUid);
+    let created = false;
+    if (!matches[matchId]) {
+      const unread = {};
+      unread[fromUid] = 0;
+      unread[toUid] = 0;
+      matches[matchId] = {
+        id: matchId,
+        users: [String(fromUid), String(toUid)].sort(),
+        createdAt: nowIso(),
+        lastMessage: null,
+        lastMessageAt: null,
+        unread: unread
+      };
+      writeMatches(matches);
+      created = true;
+    }
+    pollAll();
+    return { matched: true, matchId: matchId, created: created };
+  }
+
+  /**
    * People who have liked this account and are still waiting for an answer, as
    * whole user documents. Shared by `getLikesReceived` and the live count, so
    * the badge and the list can never disagree about who is waiting.
@@ -912,43 +959,17 @@
         pollAll();
       }
 
-      if (!isPositive(effective)) return { matched: false, matchId: null, created: false };
-      const reverse = swipes[swipeId(toUid, fromUid)];
-      if (!reverse || !isPositive(reverse.action)) return { matched: false, matchId: null, created: false };
-
-      // A block outranks a mutual like, and the answer is a plain "no match" rather than
-      // an error: the person who was blocked must not be told that they were. The
-      // Firestore adapter cannot make this decision — the block list is private, so its
-      // client never sees it — and relies on `firestore.rules` refusing the write. Same
-      // outcome, reached from opposite ends, which is the agreement worth having.
-      const users = readUsers();
-      const target = isPlainObject(users[toUid]) ? normalizeUser(users[toUid]) : null;
-      if (target && target.blocked.indexOf(fromUid) !== -1) {
-        return { matched: false, matchId: null, created: false };
+      // Same contract as the Firestore adapter, and not hypothetical here: the
+      // swipe is written before any of this, and `localStorage` throws when the
+      // profile's quota is full. A caller that read that as "the swipe is lost"
+      // would put the card back over a decision already stored.
+      try {
+        return demoMatchFor(fromUid, toUid, effective, swipes);
+      } catch (err) {
+        throw storedSwipeFailure(err);
       }
-
-      // Mutual like — create the match once and only once.
-      const matches = readMatches();
-      const matchId = pairId(fromUid, toUid);
-      let created = false;
-      if (!matches[matchId]) {
-        const unread = {};
-        unread[fromUid] = 0;
-        unread[toUid] = 0;
-        matches[matchId] = {
-          id: matchId,
-          users: [String(fromUid), String(toUid)].sort(),
-          createdAt: nowIso(),
-          lastMessage: null,
-          lastMessageAt: null,
-          unread: unread
-        };
-        writeMatches(matches);
-        created = true;
-      }
-      pollAll();
-      return { matched: true, matchId: matchId, created: created };
     },
+
 
     async undoSwipe(fromUid, toUid) {
       // The same refusal the Firebase adapter makes, for the same reason, and
@@ -1625,6 +1646,37 @@
   }
 
   /**
+   * Mark a rejection as having arrived *after* the swipe was stored.
+   *
+   * Marked rather than wrapped, so the caller still gets the SDK's own error
+   * with its code intact — `isPermissionDenied` and anything else reading it
+   * keep working. The guard is not decoration: assigning to a frozen or sealed
+   * object throws under `'use strict'`, and that TypeError would replace the
+   * real rejection with a meaningless one carrying no mark at all, sending the
+   * deck down exactly the path this exists to avoid. When marking is refused,
+   * the signal survives in a wrapper that keeps the code, the message and the
+   * original as its cause.
+   * @param {*} err the rejection to mark
+   * @returns {*} the same error, marked, or a wrapper that carries the mark
+   */
+  function storedSwipeFailure(err) {
+    if (err && typeof err === 'object') {
+      try {
+        err.swipeStored = true;
+        if (err.swipeStored === true) return err;
+      } catch (ignored) {
+        // Not extensible. Fall through to the wrapper.
+      }
+    }
+    const wrapped = new Error(err && err.message ? String(err.message)
+      : 'The swipe was stored, but checking for a match failed.');
+    if (err && err.code) wrapped.code = err.code;
+    wrapped.cause = err;
+    wrapped.swipeStored = true;
+    return wrapped;
+  }
+
+  /**
    * The half of recordSwipe that runs once the swipe itself is stored: is this
    * mutual, and if so does the match document exist yet.
    * @param {string} fromUid the swiper
@@ -1906,8 +1958,7 @@
       try {
         return await recordMatchFor(fromUid, toUid, effective);
       } catch (err) {
-        if (err && typeof err === 'object') err.swipeStored = true;
-        throw err;
+        throw storedSwipeFailure(err);
       }
     },
 

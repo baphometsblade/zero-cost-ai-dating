@@ -87,6 +87,19 @@ function outage() {
 }
 
 /**
+ * A rejection that cannot be written to. Firestore does not produce one today,
+ * but marking an error is an assignment, and assigning to a frozen object throws
+ * under `'use strict'` — which would replace the real rejection with a
+ * meaningless TypeError carrying no mark at all, and send the deck down exactly
+ * the path the mark exists to avoid.
+ */
+function frozenOutage() {
+  const err = new Error('Backend unavailable.');
+  err.code = 'unavailable';
+  return Object.freeze(err);
+}
+
+/**
  * A failure that is not a refusal but says the words anyway — a wrapped error,
  * a proxy, a log line quoted into a message. The refusal test used to fall back
  * to matching the message when no code was present, which would have swallowed
@@ -221,5 +234,36 @@ module.exports = {
     t.check('a failure that only says "permission denied" is not treated as one',
       impostorError !== null && !impostorError.code,
       impostorError ? String(impostorError.message) : 'resolved instead of throwing');
+
+    /* ---- and a rejection that refuses to be marked ---------------------- */
+
+    const fourth = 'refused-fourth';
+    await k.admin.set('users', fourth, k.h.userDoc(fourth));
+    await k.admin.set('swipes', fourth + '_' + me, {
+      id: fourth + '_' + me, from: fourth, to: me, action: 'like', createdAt: '2026-01-02T00:00:00.000Z'
+    });
+
+    const frozenTally = { denied: 0 };
+    k.ctx.ZC.firebase.db = refusingMatchWrites(real, frozenTally, frozenOutage);
+    let frozenError = null;
+    try {
+      await k.store.recordSwipe(me, fourth, 'like');
+    } catch (err) {
+      frozenError = err;
+    } finally {
+      k.ctx.ZC.firebase.db = real;
+    }
+    k.ctx.drainWarnings();
+
+    // The signal has to survive a frozen error, because losing it is not a
+    // degraded outcome: the deck takes the card back and invites a second
+    // decision the store will drop.
+    t.check('a rejection that cannot be marked still says the swipe was stored',
+      !!frozenError && frozenError.swipeStored === true,
+      frozenError ? 'swipeStored=' + frozenError.swipeStored : 'no error');
+
+    t.check('and keeps the code and the message it arrived with',
+      !!frozenError && frozenError.code === 'unavailable' && /Backend unavailable/.test(String(frozenError.message)),
+      frozenError ? frozenError.code + ': ' + frozenError.message : 'no error');
   }
 };
