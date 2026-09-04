@@ -745,8 +745,17 @@
       });
     }
 
-    // Distance — only worth saying when it is genuinely close.
-    if (ctx.distanceKm !== null && ctx.distanceKm <= 25) {
+    // Distance — only worth saying when it is genuinely close, and only when
+    // they are willing to have it said. `showDistance` is the candidate's own
+    // switch, and profile.html promises it "changes what people read": every
+    // other surface honoured that (dashboard's distanceText returns '' when it
+    // is off) while these reasons, which the deck prints directly under the
+    // suppressed pill, ignored it and republished the same number to the same
+    // precision. Gating here rather than at the three render sites is
+    // deliberate — a reason nobody may show is a reason this function should
+    // not emit, and the alternative is three separate filters that a fourth
+    // caller would forget.
+    if (ctx.showDistance !== false && ctx.distanceKm !== null && ctx.distanceKm <= 25) {
       found.push({
         kind: 'distance',
         icon: '📍',
@@ -756,8 +765,9 @@
       });
     }
 
-    // Age.
-    if (ctx.ageGap !== null && ctx.ageGap <= 3) {
+    // Age — same bargain. "Same age" tells a viewer who knows their own age
+    // exactly how old somebody who asked not to publish it is.
+    if (ctx.showAge !== false && ctx.ageGap !== null && ctx.ageGap <= 3) {
       found.push({
         kind: 'age',
         icon: '🎂',
@@ -963,6 +973,11 @@
       sharedSurfaces: sharedTokens.map(function (token) { return surfaces[token]; }),
       distanceKm: km,
       ageGap: (myAge === null || theirAge === null) ? null : Math.abs(myAge - theirAge),
+      // The candidate's display switches. Absent means shown: an older stored
+      // profile that predates these fields must not silently go quiet, and
+      // normalizeUser defaults both to true anyway.
+      showAge: theirProfile.showAge !== false,
+      showDistance: theirProfile.showDistance !== false,
       activityDays: (activeAt === null || nowMs === null) ? null : Math.max(0, (nowMs - activeAt) / DAY_MS)
     });
 
