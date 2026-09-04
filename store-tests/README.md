@@ -136,6 +136,7 @@ One spec per property. `tests/docs.test.js` fails if a spec exists without a row
 | `specs/08-conversation.store.js` | a conversation stays live past the listener's window — seeded beyond both the current 200 and the 500 the listener used to ask for — survives a rewind of the swipe that led to it, because the reciprocal like can arrive after the swipe the caller remembers, and leaves nothing underneath it when `unmatch` finally removes it, which the message-delete rule stops being able to authorise once the parent is gone |
 | `specs/09-read-cost.store.js` | a background refresh does not get more expensive the longer somebody has used the app — the Firestore the store talks to is wrapped and every document a read returns is tallied, and the same call against twice the swipe history has to come out at the same number |
 | `specs/10-blocked-match.store.js` | a match write the rules refuse — which is how a block is enforced, since the list is private — comes back as a plain "no match" instead of throwing, so the deck does not take the card back and tell somebody their swipe was lost |
+| `specs/11-live-cost.store.js` | a badge subscription costs one read per match once, nothing at all while nothing happens, and one read when one conversation changes — the claim the twenty-second poll was replaced on, counted rather than quoted |
 
 Each spec starts from a cleared database, but the store itself is loaded once per process
 (the IIFE returns early on a second load, and `require` caches), so specs use their own

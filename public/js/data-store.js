@@ -356,7 +356,41 @@
     const ta = Date.parse(a.lastMessageAt || a.createdAt || 0) || 0;
     const tb = Date.parse(b.lastMessageAt || b.createdAt || 0) || 0;
     if (tb !== ta) return tb - ta;
-    return String(a.matchId).localeCompare(String(b.matchId));
+    return String(a.matchId || a.id).localeCompare(String(b.matchId || b.id));
+  }
+
+  /**
+   * One match document reduced to what a badge needs, from this account's point
+   * of view. Deliberately no profile: fetching a name per match on a timer is
+   * what made the badge refresh expensive, and a badge draws a number.
+   * @param {Object} data a stored match document
+   * @param {string} id the document id
+   * @param {string} uid the viewer
+   * @returns {Object} a match row
+   */
+  function matchRow(data, id, uid) {
+    const users = Array.isArray(data.users) ? data.users : [];
+    const unread = isPlainObject(data.unread) ? Number(data.unread[uid]) : 0;
+    return {
+      id: id,
+      users: users.slice(),
+      unread: Math.max(0, unread || 0),
+      lastMessage: data.lastMessage === undefined ? null : data.lastMessage,
+      lastMessageAt: data.lastMessageAt || null,
+      createdAt: data.createdAt || null
+    };
+  }
+
+  /**
+   * A cheap fingerprint of a match-row list, so a poll that changed nothing
+   * delivers nothing.
+   * @param {Object[]} rows match rows
+   * @returns {string}
+   */
+  function rowsSignature(rows) {
+    return rows.map(function (row) {
+      return row.id + ':' + row.unread + ':' + (row.lastMessageAt || '');
+    }).join('|');
   }
 
   /* ------------------------------------------------------------------------
@@ -464,22 +498,45 @@
   }
 
   /**
-   * Push the current message list to one listener if it changed.
+   * Push a listener's current value if it changed since the last delivery.
+   *
+   * The record carries its own `snapshot()` and `signature()` rather than this
+   * reading messages directly, because there are three kinds of listener now
+   * and only the storage-event plumbing is common to them.
    * @param {Object} rec listener record
    * @param {boolean} force deliver even when unchanged
    * @returns {void}
    */
   function deliver(rec, force) {
-    const all = readMessages();
-    const list = Array.isArray(all[rec.matchId]) ? all[rec.matchId] : [];
-    const sig = messagesSignature(list);
+    const value = rec.snapshot();
+    const sig = rec.signature(value);
     if (!force && sig === rec.sig) return;
     rec.sig = sig;
     try {
-      rec.cb(cloneDeep(list));
+      rec.cb(value);
     } catch (err) {
-      console.warn('[zc.store] A message listener threw.', err);
+      console.warn('[zc.store] A live listener threw.', err);
     }
+  }
+
+  /**
+   * Register a listener record and hand back its unsubscribe.
+   * @param {Object} rec a record with cb, snapshot and signature
+   * @returns {Function} unsubscribe
+   */
+  function listen(rec) {
+    rec.sig = null;
+    listeners.push(rec);
+    ensurePlumbing();
+    // First delivery is async so callers can finish wiring up first.
+    Promise.resolve().then(function () {
+      if (listeners.indexOf(rec) !== -1) deliver(rec, true);
+    });
+    return function unsubscribe() {
+      const index = listeners.indexOf(rec);
+      if (index !== -1) listeners.splice(index, 1);
+      teardownPlumbing();
+    };
   }
 
   function pollAll() {
@@ -487,22 +544,77 @@
   }
 
   // Other tabs announce their writes through the storage event; our own tab
-  // never fires it, so local writes call pollAll() directly.
-  function onStorageEvent(event) {
-    if (!event || !event.key || event.key === KEYS.messages || event.key === KEYS.matches) pollAll();
+  // never fires it, so local writes call pollAll() directly. Every key is worth
+  // a poll now rather than only messages and matches: an inbound like lands in
+  // `swipes` and a block lands in `users`, and both move a badge. The signature
+  // check makes a poll that changes nothing free.
+  function onStorageEvent() {
+    pollAll();
+  }
+
+  // `window` is aliased to globalThis when this file is loaded under Node, and
+  // Node's global is not an EventTarget — so the cross-tab half is wired only
+  // where it exists. The poll carries the rest, which is all a single process
+  // has anyway: there is no second tab to hear from.
+  function canHearOtherTabs() {
+    return typeof window.addEventListener === 'function' && typeof window.removeEventListener === 'function';
   }
 
   function ensurePlumbing() {
     if (pollTimer) return;
-    window.addEventListener('storage', onStorageEvent);
+    if (canHearOtherTabs()) window.addEventListener('storage', onStorageEvent);
     pollTimer = setInterval(pollAll, POLL_MS);
   }
 
   function teardownPlumbing() {
     if (listeners.length || !pollTimer) return;
-    window.removeEventListener('storage', onStorageEvent);
+    if (canHearOtherTabs()) window.removeEventListener('storage', onStorageEvent);
     clearInterval(pollTimer);
     pollTimer = null;
+  }
+
+  /**
+   * People who have liked this account and are still waiting for an answer, as
+   * whole user documents. Shared by `getLikesReceived` and the live count, so
+   * the badge and the list can never disagree about who is waiting.
+   * @param {string} uid the viewer
+   * @returns {Object[]} UserDocs
+   */
+  function pendingLikers(uid) {
+    const swipes = readSwipes();
+    const users = readUsers();
+    const me = users[uid] ? normalizeUser(users[uid]) : null;
+    const myBlocks = me ? me.blocked : [];
+    const out = [];
+    Object.keys(swipes).forEach(function (key) {
+      const swipe = swipes[key];
+      if (!isPlainObject(swipe) || swipe.to !== uid || !isPositive(swipe.action)) return;
+      // Only the ones I have not answered yet.
+      if (swipes[swipeId(uid, swipe.from)]) return;
+      if (myBlocks.indexOf(swipe.from) !== -1) return;
+      const candidate = users[swipe.from];
+      if (!candidate) return;
+      const doc = normalizeUser(candidate);
+      if (doc.blocked.indexOf(uid) !== -1) return;
+      out.push(doc);
+    });
+    return out;
+  }
+
+  /**
+   * The match rows this account is in, newest conversation first.
+   * @param {Object} matches the stored matches map
+   * @param {string} uid the viewer
+   * @returns {Object[]} match rows
+   */
+  function matchRows(matches, uid) {
+    return Object.keys(matches)
+      .map(function (key) { return matches[key]; })
+      .filter(function (m) {
+        return isPlainObject(m) && Array.isArray(m.users) && m.users.indexOf(uid) !== -1;
+      })
+      .map(function (m) { return matchRow(m, m.id || pairId(m.users[0], m.users[1]), uid); })
+      .sort(byRecency);
   }
 
   /* ------------------------------------------------------------------------
@@ -788,6 +900,10 @@
           createdAt: nowIso()
         };
         writeSwipes(swipes);
+        // Before the early returns below, because a one-sided like is exactly
+        // the write the who-liked-you badge is watching for and most swipes
+        // never reach the match-creation path at the bottom.
+        pollAll();
       }
 
       if (!isPositive(effective)) return { matched: false, matchId: null, created: false };
@@ -824,6 +940,7 @@
         writeMatches(matches);
         created = true;
       }
+      pollAll();
       return { matched: true, matchId: matchId, created: created };
     },
 
@@ -850,29 +967,14 @@
       if (swipes[id]) {
         delete swipes[id];
         writeSwipes(swipes);
+        // An answered like becomes unanswered again, which the badge counts.
+        pollAll();
       }
       return { ok: true };
     },
 
     async getLikesReceived(uid) {
-      const swipes = readSwipes();
-      const users = readUsers();
-      const me = users[uid] ? normalizeUser(users[uid]) : null;
-      const myBlocks = me ? me.blocked : [];
-      const out = [];
-      Object.keys(swipes).forEach(function (key) {
-        const swipe = swipes[key];
-        if (!isPlainObject(swipe) || swipe.to !== uid || !isPositive(swipe.action)) return;
-        // Only the ones I have not answered yet.
-        if (swipes[swipeId(uid, swipe.from)]) return;
-        if (myBlocks.indexOf(swipe.from) !== -1) return;
-        const candidate = users[swipe.from];
-        if (!candidate) return;
-        const doc = normalizeUser(candidate);
-        if (doc.blocked.indexOf(uid) !== -1) return;
-        out.push(doc);
-      });
-      return out;
+      return pendingLikers(uid);
     },
 
     async getMatches(uid) {
@@ -947,18 +1049,30 @@
     },
 
     listenMessages(matchId, cb) {
-      const rec = { matchId: matchId, cb: cb, sig: null };
-      listeners.push(rec);
-      ensurePlumbing();
-      // First delivery is async so callers can finish wiring up first.
-      Promise.resolve().then(function () {
-        if (listeners.indexOf(rec) !== -1) deliver(rec, true);
+      return listen({
+        cb: cb,
+        snapshot: function () {
+          const all = readMessages();
+          return cloneDeep(Array.isArray(all[matchId]) ? all[matchId] : []);
+        },
+        signature: messagesSignature
       });
-      return function unsubscribe() {
-        const index = listeners.indexOf(rec);
-        if (index !== -1) listeners.splice(index, 1);
-        teardownPlumbing();
-      };
+    },
+
+    listenMatches(uid, cb) {
+      return listen({
+        cb: cb,
+        snapshot: function () { return matchRows(readMatches(), uid); },
+        signature: rowsSignature
+      });
+    },
+
+    listenLikesReceived(uid, cb) {
+      return listen({
+        cb: cb,
+        snapshot: function () { return pendingLikers(uid).length; },
+        signature: function (count) { return String(count); }
+      });
     },
 
     async markRead(matchId, uid) {
@@ -972,6 +1086,9 @@
       }
       match.unread[uid] = 0;
       writeMatches(matches);
+      // Our own tab gets no storage event, so nudge listeners directly — the
+      // badge is watching this number and should not wait for the next tick.
+      pollAll();
       return true;
     },
 
@@ -1386,6 +1503,47 @@
     return map;
   }
 
+  /**
+   * Of the people who liked this account, the ones it has not answered.
+   *
+   * One point read per liker, rather than the whole swipe history. That used to
+   * be `getSwipes(uid)` — one line, looks like one read, and is a read for every
+   * card the account has ever swiped. app.js asked for this on a timer, so the
+   * cost of a background refresh grew with how long somebody had used the app:
+   * measured at 437 reads for a month's use and 837 once that history doubled,
+   * against a Spark quota of 50,000 a day. Swipe ids are derived from the pair,
+   * so "have I answered them" is a document lookup needing no query and no
+   * index.
+   *
+   * `listCandidates` still reads the whole history and should: it excludes
+   * everyone already swiped from an unbounded walk of `discovery`, it cannot do
+   * that one id at a time, and it runs when a deck loads rather than on a timer.
+   * @param {string} uid the viewer
+   * @param {string[]} senders everyone who has liked them
+   * @returns {Promise<string[]>} the uids still waiting for an answer
+   */
+  async function pendingOf(uid, senders) {
+    if (!senders.length) return [];
+    const me = await firestoreAdapter.getUser(uid);
+    const myBlocks = me ? me.blocked : [];
+    const unblocked = senders.filter(function (from) { return myBlocks.indexOf(from) === -1; });
+    const already = await Promise.all(unblocked.map(function (from) {
+      return db().collection('swipes').doc(swipeId(uid, from)).get();
+    }));
+    return unblocked.filter(function (from, index) { return !already[index].exists; });
+  }
+
+  /** The `from` uids of a snapshot of inbound swipes, positives only, deduped. */
+  function positiveSenders(snap) {
+    const senders = [];
+    snap.forEach(function (doc) {
+      const data = doc.data() || {};
+      if (!isPositive(data.action) || !data.from) return;
+      if (senders.indexOf(data.from) === -1) senders.push(data.from);
+    });
+    return senders;
+  }
+
   const firestoreAdapter = {
     mode: 'firebase',
 
@@ -1713,35 +1871,10 @@
         console.warn('[zc.store] "in" query unavailable, filtering client-side.', err);
         snap = await db().collection('swipes').where('to', '==', uid).get();
       }
-      const senders = [];
-      snap.forEach(function (doc) {
-        const data = doc.data() || {};
-        if (!isPositive(data.action) || !data.from) return;
-        if (senders.indexOf(data.from) === -1) senders.push(data.from);
-      });
+      const senders = positiveSenders(snap);
       if (!senders.length) return [];
 
-      const me = await firestoreAdapter.getUser(uid);
-      const myBlocks = me ? me.blocked : [];
-      const unblocked = senders.filter(function (from) { return myBlocks.indexOf(from) === -1; });
-
-      // One point read per person who liked you, rather than the whole swipe
-      // history. This used to be `getSwipes(uid)`, which is one line and looks
-      // like one read; it is a read for every card this account has ever
-      // swiped, and app.js calls this function every twenty seconds on the
-      // premium plan. The history only ever grows, so the cost of a background
-      // refresh grew with how long somebody had used the app — measured at 437
-      // reads for a month's use and 837 once that history doubled, against a
-      // Spark quota of 50,000 a day. Swipe ids are derived from the pair, so
-      // the answer is a document lookup and needs no query and no index.
-      // `listCandidates` still reads the whole history and should: it excludes
-      // everyone already swiped from an unbounded walk of `discovery`, it
-      // cannot do that one id at a time, and it runs when a deck is loaded
-      // rather than on a timer.
-      const already = await Promise.all(unblocked.map(function (from) {
-        return db().collection('swipes').doc(swipeId(uid, from)).get();
-      }));
-      const pending = unblocked.filter(function (from, index) { return !already[index].exists; });
+      const pending = await pendingOf(uid, senders);
       const users = await fetchProfiles(pending);
       // No "and they have not blocked me" filter, because there cannot be one here.
       // These profiles come from `discovery/{uid}`, and projectDiscovery deliberately
@@ -1838,6 +1971,63 @@
         console.warn('[zc.store] Message sent but the conversation preview did not update.', err);
       }
       return message;
+    },
+
+    listenMatches(uid, cb) {
+      try {
+        // No `orderBy`, deliberately. An ordered query here would want a
+        // composite index that `getMatches` has a documented fallback for, and
+        // a listener has no good place to fall back from; the list is one row
+        // per conversation, so sorting it in the browser costs nothing.
+        //
+        // A snapshot listener is what makes this affordable at all. It bills
+        // the documents it first delivers and then only the ones that change,
+        // so a tab left open costs nothing while nothing happens — where the
+        // twenty-second poll it replaces spent two reads per match every time,
+        // forever, whether or not anything had moved.
+        return db().collection('matches').where('users', 'array-contains', uid)
+          .onSnapshot(function (snap) {
+            const rows = [];
+            snap.forEach(function (doc) { rows.push(matchRow(doc.data() || {}, doc.id, uid)); });
+            cb(rows.sort(byRecency));
+          }, function (err) {
+            console.warn('[zc.store] Live match stream failed.', err);
+          });
+      } catch (err) {
+        console.warn('[zc.store] Could not open the live match stream.', err);
+        return function () { /* nothing to unsubscribe */ };
+      }
+    },
+
+    listenLikesReceived(uid, cb) {
+      let stopped = false;
+      let stop = function () { /* nothing to unsubscribe */ };
+      try {
+        stop = db().collection('swipes')
+          .where('to', '==', uid)
+          .where('action', 'in', ['like', 'super'])
+          .onSnapshot(function (snap) {
+            // The point reads happen per delivery rather than per tick, and a
+            // delivery only happens when somebody's swipe on this account
+            // actually changes. `getLikesReceived` also fetches a profile for
+            // each pending liker; this does not, because a badge is a number.
+            pendingOf(uid, positiveSenders(snap)).then(function (pending) {
+              if (!stopped) cb(pending.length);
+            }, function (err) {
+              console.warn('[zc.store] Live like count failed.', err);
+            });
+          }, function (err) {
+            // No client-side fallback for the `in` query, unlike getLikesReceived:
+            // a listener's error arrives asynchronously, so "try the other query"
+            // would mean holding two subscriptions and reconciling them. The
+            // emulator and production both support `in`; a failure here means the
+            // badge stops updating, not that anything is lost.
+            console.warn('[zc.store] Live like stream failed.', err);
+          });
+      } catch (err) {
+        console.warn('[zc.store] Could not open the live like stream.', err);
+      }
+      return function () { stopped = true; stop(); };
     },
 
     listenMessages(matchId, cb) {
@@ -2306,6 +2496,39 @@
     listenMessages(matchId, cb) {
       if (!matchId || typeof cb !== 'function') return function () { /* nothing to do */ };
       return adapter.listenMessages(matchId, cb);
+    },
+
+    /**
+     * Subscribe to this account's matches, as badge rows rather than views:
+     * `{ id, users, unread, lastMessage, lastMessageAt, createdAt }`, newest
+     * conversation first, and **no profiles**. Fetching a name per match on a
+     * timer is what made the badge refresh expensive, and a badge draws a
+     * number; the matches page still uses `getMatches` for the names.
+     *
+     * Firestore uses onSnapshot, which bills the first delivery and then only
+     * what changes — so an open tab costs nothing while nothing happens. Demo
+     * mode uses the cross-tab storage event plus the same poll `listenMessages`
+     * uses, which is free either way.
+     * @param {string} uid the viewer
+     * @param {Function} cb called with the row list on every change
+     * @returns {Function} unsubscribe
+     */
+    listenMatches(uid, cb) {
+      if (!uid || typeof cb !== 'function') return function () { /* nothing to do */ };
+      return adapter.listenMatches(uid, cb);
+    },
+
+    /**
+     * Subscribe to how many people have liked this account and are still
+     * waiting for an answer. A count, not a list: the badge shows a number and
+     * loading a profile for each of them was pure waste.
+     * @param {string} uid the viewer
+     * @param {Function} cb called with the count on every change
+     * @returns {Function} unsubscribe
+     */
+    listenLikesReceived(uid, cb) {
+      if (!uid || typeof cb !== 'function') return function () { /* nothing to do */ };
+      return adapter.listenLikesReceived(uid, cb);
     },
 
     /**

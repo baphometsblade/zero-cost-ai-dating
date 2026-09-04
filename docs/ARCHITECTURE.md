@@ -302,7 +302,11 @@ alive. A demo user who fills their quota gets a toast, not a white screen.
 `listenMessages` in demo mode has no server to push from, so it does both of the things a
 browser can: it listens for the `storage` event (another tab in the same profile) and polls a
 cheap signature of the thread every 1.5 s (same tab). Callers cannot tell the two adapters
-apart.
+apart. `listenMatches` and `listenLikesReceived` ride the same plumbing, and exist because
+the nav badges used to be a 20-second poll that re-read every match and a profile for each
+of them. They deliver rows and a count — no profiles, because a badge draws a number — and
+on Firestore they are `onSnapshot`, which bills its first delivery and then only what
+changes. `store-tests/specs/11-live-cost.store.js` measures that.
 
 ### Shared semantics
 

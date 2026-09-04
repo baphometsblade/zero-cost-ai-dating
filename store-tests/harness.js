@@ -74,6 +74,76 @@ function emulatorAddress() {
   return { host: raw.slice(0, at) || '127.0.0.1', port: port };
 }
 
+/**
+ * Wrap a compat Firestore so every document a read returns is tallied.
+ *
+ * Firestore bills a query that matches nothing as one read, so an empty result
+ * counts as one here too — the point is to model the bill, not the payload.
+ * Snapshot listeners are counted the same way, per delivery, which is what
+ * makes "an idle listener costs nothing" a measurable claim rather than a
+ * quotation from the documentation.
+ *
+ * Deliberately not counted: reads made through a transaction's own `tx.get`,
+ * which never passes through this object. Nothing measured with it uses one,
+ * and a helper that silently under-counted would be worse than no helper, so it
+ * is said out loud instead of assumed.
+ *
+ * @param {Object} target the real compat Firestore, or one of its refs
+ * @param {{reads:number, calls:number}} tally accumulator, mutated in place
+ * @returns {Object} a stand-in that behaves identically and records reads
+ */
+function countingDb(target, tally) {
+  return new Proxy(target, {
+    get: function (obj, prop) {
+      const value = obj[prop];
+      if (typeof value !== 'function') return value;
+      return function () {
+        if (prop === 'onSnapshot') {
+          const args = Array.prototype.slice.call(arguments);
+          if (typeof args[0] === 'function') {
+            const next = args[0];
+            let first = true;
+            args[0] = function (snap) {
+              tally.calls += 1;
+              // Deltas, not the result set. Firestore bills a listener for the
+              // documents in its first snapshot and then for each document that
+              // changes — so a delivery that carries twelve rows because one of
+              // them moved is one read, not twelve. Counting `size` every time
+              // measured the payload instead of the bill, and made a listener
+              // look exactly as expensive as the poll it replaced.
+              //
+              // `docChanges()` reports every document as "added" on the first
+              // delivery, so it is right for both cases; the minimum-one-read
+              // rule applies only to that first one, where an empty result still
+              // costs a read.
+              const changed = snap && typeof snap.docChanges === 'function'
+                ? snap.docChanges().length
+                : (snap && typeof snap.size === 'number' ? snap.size : 1);
+              tally.reads += first ? Math.max(1, changed) : changed;
+              first = false;
+              return next.apply(null, arguments);
+            };
+          }
+          return value.apply(obj, args);
+        }
+        const out = value.apply(obj, arguments);
+        if (prop === 'get' && out && typeof out.then === 'function') {
+          return out.then(function (snap) {
+            tally.calls += 1;
+            tally.reads += (snap && typeof snap.size === 'number') ? Math.max(1, snap.size) : 1;
+            return snap;
+          });
+        }
+        // Refs and queries are chained off each other, so they have to carry the
+        // tally forward. Promises must not be wrapped: a thenable behind a proxy
+        // is still awaited, but nothing good comes of proxying one.
+        if (out && typeof out === 'object' && typeof out.then !== 'function') return countingDb(out, tally);
+        return out;
+      };
+    }
+  });
+}
+
 module.exports = {
   ROOT: ROOT,
   RULES_PATH: rules.RULES_PATH,
@@ -87,5 +157,6 @@ module.exports = {
   readRules: rules.readRules,
   ok: rules.ok,
   userDoc: rules.userDoc,
-  discoveryDoc: rules.discoveryDoc
+  discoveryDoc: rules.discoveryDoc,
+  countingDb: countingDb
 };

@@ -248,7 +248,7 @@ npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.
 
 ### Unit suites
 
-Thirteen suites on Node's built-in runner — **226 checks**, no install, no browser, seconds:
+Thirteen suites on Node's built-in runner — **228 checks**, no install, no browser, seconds:
 
 | Suite | What it pins down |
 | --- | --- |
@@ -336,7 +336,7 @@ The daily usage counter is the one piece of client logic where reading the code 
 as weak an argument as it was for the rules: whether two concurrent bumps collapse into one
 is a property of a real database, not of anything visible in the file. `store-tests/` loads
 the **shipped** `public/js/data-store.js` into Node — `window` aliased to `globalThis`,
-`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **63
+`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **69
 checks**, including 20 concurrent `bumpUsage` calls on one document storing exactly 20, the
 midnight roll-over happening inside the same transaction, a bump writing `usage` and nothing
 else, 30 swipes replaying the deck's real learning-save-then-bump ordering and storing exactly
@@ -522,21 +522,24 @@ These are real, and worth knowing before you show this to anyone:
   whether it *volunteers* the reason, and it no longer does — the console line names the
   document that was not written and nothing else. That removes the casual tell and not the
   determined one, which is the most a client-side project can claim.
-- **The background badge poll is the largest standing read cost, and it is not free.**
-  `app.js` refreshes the unread-message and pending-like badges every 20 seconds while the
-  tab is in the foreground (it skips ticks while it is hidden). A refresh costs about two
-  reads per match — the query, then the other person's profile — plus, on the premium plan,
-  two per account that has liked you and one profile for each of those still waiting. That
-  is bounded by the size of your social graph, which is the right shape, but a Spark project
-  gets 50,000 document reads a day and several people with tabs open will find the edge of
-  it. `store-tests/specs/09-read-cost.store.js` counts the exact figure document by document
-  and prints it on every run, so the number is measured rather than asserted here.
-  What it no longer does is grow with how long you have used the app. `getLikesReceived`
-  read the caller's **entire swipe history** on every one of those polls, to work out which
-  inbound likes were already answered: 437 reads for a month of ordinary use, 837 once that
-  history doubled, on a timer. It now looks up one document per person who liked you, which
-  the deterministic swipe id makes a plain lookup. Replacing the poll itself with a snapshot
-  listener, which bills only what changes, is the next thing worth doing here.
+- **The badges are live now, and an open tab is no longer a standing cost.** This used to
+  be a 20-second poll that re-read every match *and a profile for each of them* — plus, on
+  the premium plan, every inbound like and a profile for each of those — whether or not
+  anything had changed. Two problems, one on top of the other. `getLikesReceived` read the
+  caller's **entire swipe history** on every tick to work out which inbound likes were
+  already answered: 437 reads for a month of ordinary use, 837 once that history doubled,
+  on a timer. And the poll spent the rest of it again every twenty seconds for as long as
+  a tab stayed open, against a Spark project's 50,000 document reads a day.
+  `app.js` now subscribes instead. A Firestore snapshot listener bills the documents it
+  first delivers and then only the ones that change, and the rows it delivers carry no
+  profiles, because a badge draws a number.
+  `store-tests/specs/11-live-cost.store.js` counts it rather than quoting the
+  documentation: twelve matches cost twelve reads to subscribe, **nothing at all** while
+  nothing happens, and **one** read when one conversation changes.
+  What is left is not zero and is worth knowing: the first subscription costs one read per
+  match, and every reconnect — a dropped network, a browser discarding a background tab —
+  pays that again. That is bounded by the size of a social graph and spent when something
+  actually happened, which is the shape a free tier can carry.
 - **Client-side gating is only as strong as the Firestore rules.** Daily like limits, premium
   features and rewinds are enforced in the browser because the free plan has no server to
   enforce them on. A determined user with devtools can bypass any of it. The rules stop data
