@@ -81,12 +81,18 @@ module.exports = {
       t.check('answering one takes it off the count',
         seen.length > deliveries && seen[seen.length - 1] === WAITING - 1, k.show(seen));
 
-      // recordSwipe does its own reads; what matters is that the *listener*
-      // spends none, because the swipe it needs to know about is the one this
-      // client just wrote.
-      t.check('and the count itself costs no read to correct',
-        tally.reads - before <= 2,
-        (tally.reads - before) + ' read(s), all of them recordSwipe\'s own');
+      // Exactly one, and named rather than given slack: `recordSwipe` reads the
+      // pair's existing swipe document and, for a pass, stops there. So the
+      // listener spends nothing — the swipe it needs to know about is the one
+      // this client just wrote, and it is told rather than sent looking.
+      //
+      // An upper bound with room in it would pass just as well against a
+      // listener that had gone back to recomputing, as long as few enough
+      // people were waiting. This fails if recordSwipe's own cost changes too,
+      // which is worth knowing on a path the deck runs on every swipe.
+      t.check('and the count itself costs one read, recordSwipe\'s own',
+        tally.reads - before === 1,
+        (tally.reads - before) + ' read(s) across the answer');
 
       /* ---- and a rewind putting it back --------------------------------- */
 

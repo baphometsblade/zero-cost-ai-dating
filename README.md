@@ -273,7 +273,7 @@ store and its daily counter, the auth backend, the pure half of the utilities, t
 schema, the static HTML. It cannot reach the flows that only exist in a DOM — signing in,
 the deck and its keyboard, the match burst, chat that persists, reporting someone, deleting
 your account, and the service worker serving the app with the network gone. Those live in
-`e2e/`: **222 checks** across the twelve specs that need nothing installed but a browser, each
+`e2e/`: **228 checks** across the twelve specs that need nothing installed but a browser, each
 run at 390x844 and most of them at 1280x800 as well — plus a thirteenth, `10-firebase.e2e.js`,
 which needs the Firebase emulators and skips, by name and reason, when they are not running.
 
@@ -296,7 +296,7 @@ Firebase rather than `localStorage`: the real SDK, real Auth, real Firestore, an
 read back out of the emulator instead of off the page. It drives the pages **with their real
 CSP meta tag** — the emulators are reached through the page's own origin rather than by
 relaxing the policy, which is the whole reason it can exist; the Limitations section explains
-the constraint it is working around. With both emulators up the run is **240 checks**, all
+the constraint it is working around. With both emulators up the run is **246 checks**, all
 passing.
 
 It did not start that way. On its first run one check was red, and it had found a real bug:
@@ -308,7 +308,7 @@ fixture in `rules-tests/` ever used a null there. The rule now accepts null, and
 checks pin the shape.
 
 Without an emulator the runner prints `SKIP` and records nothing, so `npm run test:e2e` on a
-bare machine is still 222/222 — and CI runs it both ways, so the skip path and the emulator
+bare machine is still 228/228 — and CI runs it both ways, so the skip path and the emulator
 path are each exercised on every push.
 
 ### Security rules tests
@@ -336,7 +336,7 @@ The daily usage counter is the one piece of client logic where reading the code 
 as weak an argument as it was for the rules: whether two concurrent bumps collapse into one
 is a property of a real database, not of anything visible in the file. `store-tests/` loads
 the **shipped** `public/js/data-store.js` into Node — `window` aliased to `globalThis`,
-`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **76
+`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **80
 checks**, including 20 concurrent `bumpUsage` calls on one document storing exactly 20, the
 midnight roll-over happening inside the same transaction, a bump writing `usage` and nothing
 else, 30 swipes replaying the deck's real learning-save-then-bump ordering and storing exactly
@@ -407,7 +407,7 @@ of its own, so a failed download reads as infrastructure rather than as a red te
 than either suite does. The `e2e` job runs the browser suite twice: once bare, which is what
 a contributor with nothing installed gets and which proves the Firebase spec skips rather
 than silently passing, and once inside `emulators:exec`, which is the only run in which every
-spec executes and therefore the only one that can hold the 240-check total to account. There are no secrets and no deploy step — deploying stays a
+spec executes and therefore the only one that can hold the 246-check total to account. There are no secrets and no deploy step — deploying stays a
 deliberate local `npm run deploy`.
 
 ---

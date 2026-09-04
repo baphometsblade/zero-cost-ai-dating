@@ -862,14 +862,32 @@
     try {
       outcome = await ZC.store.recordSwipe(state.me.uid, entry.result.uid, entry.action);
     } catch (err) {
-      // Only this write failing means the swipe is not stored, so only this
-      // failure may take the card back.
       console.warn('[zc] The swipe could not be saved:', err);
-      entry.pending = false;
-      releaseReservation(entry.field);
-      restoreEntry(entry);
-      toast('That swipe did not save. The card is back on top — try again.', 'error');
-      return;
+
+      // `recordSwipe` writes the swipe and then goes looking for a match, so a
+      // failure can land on either side of the one write that matters. It says
+      // which: `swipeStored` marks a rejection that arrived after the decision
+      // was already in storage. This used to assume every failure meant the
+      // swipe was lost — "only this write failing means the swipe is not
+      // stored", which was true of the first line of recordSwipe and of nothing
+      // after it.
+      //
+      // Taking the card back when the swipe did land is worse than it looks. A
+      // recorded decision stands, so the second swipe would be silently dropped
+      // and the deck would be offering a choice the account no longer has —
+      // most sharply when somebody swipes the other way the second time.
+      if (!(err && err.swipeStored)) {
+        entry.pending = false;
+        releaseReservation(entry.field);
+        restoreEntry(entry);
+        toast('That swipe did not save. The card is back on top — try again.', 'error');
+        return;
+      }
+
+      // Stored, but we never found out whether it was mutual. Say so without
+      // claiming either answer, and carry on: the swipe was spent, so the daily
+      // count below is owed either way.
+      toast('Saved. We could not check for a match just then — it will show up if there is one.', 'warn');
     }
 
     // Past here the swipe — and any match it created — is in storage. Nothing

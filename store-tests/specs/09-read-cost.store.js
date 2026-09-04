@@ -102,9 +102,17 @@ module.exports = {
     /* ---- then the bill --------------------------------------------------- */
 
     // A history this long is an ordinary month of use, not an extreme.
+    //
+    // The lower bound is not padding. "Fewer reads than the history is long" is
+    // satisfied by a function that reads nothing and returns nothing, so on its
+    // own this check passes against a `getLikesReceived` that has been broken
+    // rather than fixed — it would be leaning entirely on the two correctness
+    // checks above to notice, and a cost check that cannot fail by itself is
+    // not evidence about cost. It has to read at least the profiles it returns.
     t.check('the first refresh is cheaper than the history is long',
-      first.reads < HISTORY,
-      first.reads + ' reads in ' + first.calls + ' round-trip(s), against ' + HISTORY + ' stored swipes');
+      first.reads < HISTORY && first.reads >= PENDING,
+      first.reads + ' reads in ' + first.calls + ' round-trip(s), against ' + HISTORY +
+      ' stored swipes and ' + PENDING + ' profiles to return');
 
     const more = [];
     for (let i = 0; i < MORE_HISTORY; i += 1) {
@@ -125,8 +133,13 @@ module.exports = {
     // The check this file exists for. Not "under N reads" — a number ages into
     // a lie. Twice the history, the same bill, or the app's cost grows with the
     // one thing guaranteed to grow.
+    //
+    // Carrying the same floor as the check above, for the same reason: equality
+    // between two measurements is satisfied by two measurements of nothing, and
+    // a mutation run confirmed it — against a `getLikesReceived` stubbed to
+    // return early this read `0 reads at 400 swipes, 0 at 800` and passed.
     t.check('and costs exactly what it cost before, with twice the history behind it',
-      second.reads === first.reads,
+      second.reads === first.reads && second.reads >= PENDING,
       first.reads + ' reads at ' + HISTORY + ' swipes, ' + second.reads + ' at ' + (HISTORY + MORE_HISTORY));
   }
 };
