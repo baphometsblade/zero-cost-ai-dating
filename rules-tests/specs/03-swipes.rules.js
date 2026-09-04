@@ -64,6 +64,16 @@ module.exports = {
     t.check('you cannot read a swipe between two other people',
       await ok(assertFails(as(ME).doc('swipes/' + OTHER + '_' + THIRD).get())));
 
+    // The absent case, which two shipped paths depend on and neither can work
+    // around. Every first swipe reads its own not-yet-written document and the
+    // usually-absent reciprocal one; and `getLikesReceived` asks, once per
+    // person who liked you, whether `swipes/{me}_{them}` exists — on a timer,
+    // every twenty seconds. Dropping `resource == null` from the read rule
+    // looks like tightening it and would deny a read of a document that holds
+    // nothing, breaking match detection and the who-liked-you badge together.
+    t.check('a signed-in user can probe their own swipe document before it exists',
+      await ok(assertSucceeds(as(ME).doc('swipes/' + ME + '_unswiped-so-far').get())));
+
     t.check('a query constrained to your own swipes is allowed',
       await ok(assertSucceeds(as(ME).collection('swipes').where('from', '==', ME).get())));
 
