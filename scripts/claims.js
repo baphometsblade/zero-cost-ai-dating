@@ -41,34 +41,34 @@
  */
 const CLAIMS = {
   unit: {
-    total: 228,
+    total: 233,
     how: 'npm test',
     note: 'Node\'s built-in runner, no install'
   },
   e2e: {
-    total: 228,
+    total: 236,
     how: 'npm run test:e2e',
     note: 'the twelve browser-only specs, both viewports, Firebase spec skipped'
   },
   e2eFirebase: {
-    total: 246,
+    total: 254,
     how: 'npm run test:e2e, with the Firestore and Auth emulators up',
     note: 'the same twelve specs plus the thirteenth, which drives the real SDK'
   },
   rules: {
-    total: 147,
+    total: 175,
     how: 'npm run test:rules',
     note: 'firestore.rules executed against the emulator'
   },
   store: {
-    total: 80,
+    total: 84,
     how: 'npm run test:store',
     note: 'the shipped data-store.js driven against the emulator'
   }
 };
 
 /** How many files `tests/` holds, which the README describes in words. */
-const UNIT_SUITE_FILES = 13;
+const UNIT_SUITE_FILES = 14;
 
 /**
  * Compare a finished run's count against what this project claims, and phrase

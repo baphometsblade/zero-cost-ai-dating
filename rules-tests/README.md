@@ -55,6 +55,7 @@ without a row here.
 | `specs/05-messages.rules.js` | `matches/{id}/messages` — participants only, append-only, self-authored |
 | `specs/06-reports.rules.js` | `reports/{from_about}` — bounded, author-only, unprobeable |
 | `specs/07-default-deny.rules.js` | everything else — denied by default |
+| `specs/08-budget.rules.js` | the rules file itself — how much of Firestore's 1000-expression-per-request ceiling `userDocOk` has left |
 
 Each spec starts from an empty database, so one spec's fixtures can never satisfy
 another's preconditions and mask a missing rule.
@@ -95,8 +96,44 @@ another's preconditions and mask a missing rule.
   Each of those has a check, and each check writes to its **own** document: they shared one
   at first, and a whole-suite mutation run showed the first write succeeding and turning
   the next into an update, refused by a different rule, green for the wrong reason.
+- **Every key a closed allowlist admits.** `hasOnly` decides which fields a document may
+  have and says nothing about what any of them may contain, so a key on the list that
+  nothing else in its validator looks at is a field the rules accept unexamined — any type,
+  any size, up to 1 MiB. That happened twice. `discovery/{uid}`'s `location` was found by
+  eye a few rounds ago; `personality` had the identical defect three lines away, survived
+  that pass and every one since, and was found only when `tests/limits.test.js` started
+  asking the question mechanically. `reports/{from_about}` had it too, on `id`, in the one
+  collection whose entire design is a deterministic id bounding the queue. Both are
+  validated now, and both are executed here.
+- **The contents of a list, not just its length** — `size()` bounds how many elements a
+  list has and says nothing about what is in them, so `photos: [<a quarter of a megabyte>]`
+  was one photo, comfortably under six. The same was true of `interests`, of `blocked`, and
+  of both the keys and the values of `learning.interestAffinity` — a map value could be a
+  megabyte-long string under the name `hiking`. `docs/DEPLOY.md` listed exactly those as
+  the hole that could not be closed, because the rules language cannot iterate a list.
+  It cannot, and it does not need to: `join` turns a list into a string and a string can be
+  measured. Both the private document and the world-readable projection are held to it, and
+  each cap has a control alongside it — six photo links at the length the profile editor
+  allows must still save, or the bound is a broken feature rather than a bound.
 - **The catch-all** — undeclared collections, and undeclared subcollections under your own
   user document, are closed rather than open.
+- **The rules file's own budget.** Firestore evaluates at most 1000 expressions per request.
+  It is hard, it is not configurable, and exceeding it is not a rule returning false: it is
+  an error, and the write comes back as a flat `permission-denied` naming no field. When the
+  caps above were added, every valid user write in this suite turned red at once — because
+  `userDocOk`, with its fourteen keys and forty-odd validated fields, had room for **eleven**
+  more trivial clauses and nothing had ever measured that. `08-budget` measures it now, by
+  padding `userDocOk` with a known number of always-true clauses and finding where a valid
+  document stops being accepted. It also measures the shape of the cost, which is not what
+  it looks like: a function call is worth about 2.2 plain clauses, and `in` on a map is
+  *cheaper* than reading a field, so factoring repeated bounds into helpers — the obvious
+  tidy-up — spends the margin rather than saving it.
+
+  The number is a measurement of the rules engine's accounting rather than of anything in
+  this repository, so an emulator upgrade could move it with nothing here changing. It has
+  read the same on two independent machines so far. Whatever moves it, the response is to
+  find out what did — never to lower the floor until the build goes green, which is the one
+  thing that would make the check worthless.
 
 Query-level rules are covered too, not just document reads: the suite asserts that the
 constrained queries the app issues are allowed and that an unconstrained scan of the same

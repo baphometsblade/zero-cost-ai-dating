@@ -105,6 +105,65 @@ module.exports = {
         }) })
       ))));
 
+    // Contents, not counts — and this is the copy that matters most. `photos: 6`
+    // bounded the number of links and not their length, so one element could be
+    // a quarter of a megabyte in the only collection every signed-in account
+    // downloads. The private document has the same hole and the same fix; this
+    // is where it is paid for by everybody rather than by its owner.
+    t.check('one enormous photo link is refused even though it is only one photo',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).set(
+        h.discoveryDoc(ME, { profile: Object.assign({}, h.discoveryDoc(ME).profile, {
+          photos: ['https://e/' + 'x'.repeat(250000) + '.png']
+        }) })
+      ))));
+
+    t.check('and an interest slug longer than the whole interest list may be',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).set(
+        h.discoveryDoc(ME, { profile: Object.assign({}, h.discoveryDoc(ME).profile, {
+          interests: ['x'.repeat(400)]
+        }) })
+      ))));
+
+    // The control, in the collection where a cap set too tight would be worst:
+    // a projection nobody can publish is a deck nobody appears in.
+    t.check('but six photo links at the length the editor allows still publish',
+      await ok(assertSucceeds(as(ME).doc('discovery/' + ME).set(
+        h.discoveryDoc(ME, { profile: Object.assign({}, h.discoveryDoc(ME).profile, {
+          photos: Array.from({ length: 6 }, function (_, i) {
+            return ('https://example.com/' + i + '/').padEnd(1024, 'x');
+          })
+        }) })
+      ))));
+
+    // `personality` sat on discoveryProfileOk's closed key list with nothing
+    // validating it, while the private profileOk held the same field to five
+    // numeric axes — so the copy every signed-in account downloads accepted
+    // whatever it liked under that name, and the two halves of one decision had
+    // drifted without a word. `location` had the identical defect and was found by
+    // eye a few rounds earlier; this one survived that pass and was found by asking
+    // the question mechanically instead (tests/limits.test.js).
+    t.check('a personality that is not five numeric axes is refused here too',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).set(
+        h.discoveryDoc(ME, { profile: Object.assign({}, h.discoveryDoc(ME).profile, {
+          personality: 'x'.repeat(5000)
+        }) })
+      ))));
+
+    t.check('and an axis outside 0..100 is refused, as it is in the private document',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).set(
+        h.discoveryDoc(ME, { profile: Object.assign({}, h.discoveryDoc(ME).profile, {
+          personality: { openness: 101 }
+        }) })
+      ))));
+
+    // The control: the projection the store actually writes still publishes.
+    t.check('but the five real axes still publish',
+      await ok(assertSucceeds(as(ME).doc('discovery/' + ME).set(
+        h.discoveryDoc(ME, { profile: Object.assign({}, h.discoveryDoc(ME).profile, {
+          personality: { openness: 70, conscientiousness: 60, extraversion: 50, agreeableness: 65, stability: 55 }
+        }) })
+      ))));
+
     t.check('the lastActiveAt-only refresh the store makes is allowed',
       await ok(assertSucceeds(as(ME).doc('discovery/' + ME).update({ lastActiveAt: '2026-02-02T00:00:00.000Z' }))));
 

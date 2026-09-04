@@ -66,6 +66,9 @@
   const TOUCH_THROTTLE_MS = 5 * 60 * 1000;
   const POLL_MS = 1500;
   const GENDERS = ['woman', 'man', 'nonbinary', 'other'];
+  /** The five axes the matching engine reads, and the only ones ever published. */
+  const PERSONALITY_AXES = ['openness', 'conscientiousness', 'extraversion',
+    'agreeableness', 'stability'];
   /** The bundled demo account every seeded relationship hangs off. */
   const DEMO_UID = 'demo-you';
 
@@ -1437,6 +1440,21 @@
    * @param {Object} user full UserDoc
    * @returns {Object} discovery document
    */
+  /**
+   * The five personality axes and nothing else, or null when there are none.
+   * @param {*} raw the private profile's personality value
+   * @returns {Object|null} a map the discovery rules accept
+   */
+  function projectPersonality(raw) {
+    if (!isPlainObject(raw)) return null;
+    const out = {};
+    PERSONALITY_AXES.forEach(function (axis) {
+      const value = num(raw[axis]);
+      if (value !== null) out[axis] = value;
+    });
+    return out;
+  }
+
   function projectDiscovery(user) {
     const p = isPlainObject(user.profile) ? user.profile : {};
     const f = isPlainObject(user.preferences) ? user.preferences : {};
@@ -1457,7 +1475,14 @@
         bio: String(p.bio || ''),
         photos: Array.isArray(p.photos) ? p.photos.slice(0, 6) : [],
         interests: Array.isArray(p.interests) ? p.interests.slice(0, 12) : [],
-        personality: isPlainObject(p.personality) ? p.personality : null,
+        // Only the five axes, never whatever else the private map happens to hold.
+        // `firestore.rules` closes the key list on both sides of this projection, so
+        // copying it across verbatim would let a private document the rules accept
+        // produce a public one they refuse — and publishing is best-effort by design
+        // (it must never fail the profile save), so the account would simply stop
+        // appearing in anybody's deck with nothing said. `lastActiveAt: null` was
+        // that same shape.
+        personality: projectPersonality(p.personality),
         location: location,
         showAge: p.showAge !== false,
         showDistance: p.showDistance !== false

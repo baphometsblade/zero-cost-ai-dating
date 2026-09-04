@@ -80,6 +80,31 @@ test('every "N checks" the README claims is a number scripts/claims.js stands be
     'reworded past the `**N checks**` form this test looks for.');
 });
 
+test('every "N checks" in every document is a total some suite claims', function () {
+  // The test above reads README.md, because the README is the one document
+  // expected to quote *all* the totals. It is not the only one that quotes any:
+  // docs/DEPLOY.md described the rules suite as "129 checks" for several rounds
+  // after it passed 147, and the store suite as "31 more" after it passed 80,
+  // because nothing was looking outside the README. A number in a document
+  // nobody checks is exactly the thing scripts/claims.js exists to abolish, so
+  // the staleness half of that rule applies everywhere — while the "is every
+  // total quoted?" half stays with the README, which is where they all belong.
+  const claimed = Object.keys(claims.CLAIMS).map(function (key) { return claims.CLAIMS[key].total; });
+  const stale = [];
+  DOCS.forEach(function (doc) {
+    if (doc === 'README.md') return;
+    const pattern = /\*\*(\d+)\s+(?:more\s+)?checks\*\*/g;
+    const text = read(doc);
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      if (claimed.indexOf(Number(match[1])) === -1) stale.push(doc + ' → ' + match[0]);
+    }
+  });
+  assert.deepEqual(stale, [],
+    'a check total is quoted at a number no suite claims:\n  ' + stale.join('\n  ') +
+    '\nThe runners are the authority — run the suite and take its number.');
+});
+
 test('a quoted "N/N passing" is a total some suite actually reports', function () {
   // The bolded `**N checks**` form above is not the only way this README states
   // a total: it also quotes runs the way a runner prints them, and one of those

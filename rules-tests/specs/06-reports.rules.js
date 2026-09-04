@@ -96,6 +96,18 @@ module.exports = {
       await ok(assertFails(as(SUBJECT).collection('reports').where('about', '==', SUBJECT).get())));
 
     /* ---- delete: retraction, and account deletion ---- */
+    // `id` sat on this rule's closed key list with no validator at all, while the
+    // swipe, match and message rules all pin theirs to the document id — so a
+    // report could carry a megabyte under the name `id`, in the one collection
+    // whose entire design is a deterministic id bounding the queue. Written to its
+    // own fresh document: reports/me_other is unseeded, and reusing me_subject
+    // would make this an update, refused by `allow update: if false` and green for
+    // the wrong reason.
+    t.check('a report whose id is not the document id is refused',
+      await ok(assertFails(as(ME).doc('reports/' + ME + '_' + OTHER).set(
+        h.reportDoc(ME, OTHER, { id: 'x'.repeat(5000) })
+      ))));
+
     t.check('the reported party cannot delete a report about them',
       await ok(assertFails(as(SUBJECT).doc('reports/' + ME + '_' + SUBJECT).delete())));
 

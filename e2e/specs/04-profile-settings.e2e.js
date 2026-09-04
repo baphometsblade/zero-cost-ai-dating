@@ -37,6 +37,35 @@ module.exports = {
     const reloadedBio = await page.inputValue('#input-bio');
     t.check('the edit survives a reload', reloadedBio.indexOf(MARKER) !== -1);
 
+    /* ---- a photo link the rules would refuse, refused here instead ---- */
+
+    // `firestore.rules` bounds the photo list by the total characters across all
+    // six, because rules can measure a joined list and cannot walk one. That makes
+    // the form the only place a person can be told *which* link is the problem: a
+    // save that trips the rule comes back as `permission-denied` naming no field.
+    // So the refusal has to happen here, and it has to say why.
+    const badgeBefore = (await page.textContent('#photo-badge')).trim();
+    await page.fill('#input-photo', 'https://example.com/' + 'x'.repeat(1200) + '.png');
+    await page.click('#btn-add-photo');
+    const photoError = (await page.textContent('#error-photo')).trim();
+
+    t.check('an over-long photo link is refused by the form', photoError.length > 0, photoError);
+
+    t.check('and the message says how far over it is, not just that it is over',
+      /\d+ characters too long/.test(photoError), photoError);
+
+    const badgeAfterBad = (await page.textContent('#photo-badge')).trim();
+    t.check('and the link is not added',
+      badgeAfterBad === badgeBefore, badgeBefore + ' → ' + badgeAfterBad);
+
+    // The control. A cap that refuses everything is a broken field, not a cap, and
+    // every check above would read the same against one.
+    await page.fill('#input-photo', 'https://example.com/ordinary.png');
+    await page.click('#btn-add-photo');
+    const badgeAfterGood = (await page.textContent('#photo-badge')).trim();
+    t.check('but a link of ordinary length still goes on',
+      badgeAfterGood !== badgeBefore, badgeBefore + ' → ' + badgeAfterGood);
+
     /* ---- settings ---- */
     await page.goto(ctx.base + '/settings.html', { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#theme-group');

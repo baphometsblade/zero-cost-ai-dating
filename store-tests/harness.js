@@ -62,19 +62,6 @@ const OPEN_RULES = [
 ].join('\n');
 
 /**
- * Split FIRESTORE_EMULATOR_HOST, which emulators:exec sets for us.
- * @returns {{host:string, port:number}|null} null when the variable is absent
- */
-function emulatorAddress() {
-  const raw = process.env.FIRESTORE_EMULATOR_HOST || '';
-  const at = raw.lastIndexOf(':');
-  if (at === -1) return null;
-  const port = Number(raw.slice(at + 1));
-  if (!port) return null;
-  return { host: raw.slice(0, at) || '127.0.0.1', port: port };
-}
-
-/**
  * Wrap a compat Firestore so every document a read returns is tallied.
  *
  * Firestore bills a query that matches nothing as one read, so an empty result
@@ -151,7 +138,7 @@ module.exports = {
   PROJECT_ID: PROJECT_ID,
   RULES_PROJECT_ID: RULES_PROJECT_ID,
   OPEN_RULES: OPEN_RULES,
-  emulatorAddress: emulatorAddress,
+  emulatorAddress: rules.emulatorAddress,
   resolveOutside: rules.resolveOutside,
   loadOutside: rules.loadOutside,
   readRules: rules.readRules,

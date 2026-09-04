@@ -129,11 +129,15 @@ Open [`firestore.rules`](../firestore.rules). It is the only server-side securit
 has, so it is worth the five minutes.
 
 Everything below is also *executed* — `npm run test:rules` runs the real rules file against
-the Firestore emulator, 129 checks including the attacks each rule exists to stop. If you
+the Firestore emulator, **175 checks** including the attacks each rule exists to stop. If you
 change the data model, run it. See [`rules-tests/README.md`](../rules-tests/README.md).
-`npm run test:emulator` adds the store suite to the same emulator boot: 31 more checks that
+`npm run test:emulator` adds the store suite to the same emulator boot: **84 more checks** that
 drive the shipped `public/js/data-store.js` against a real Firestore, which is where the
 daily counter's transaction is proven — see [`store-tests/README.md`](../store-tests/README.md).
+
+Those two numbers sat at 129 and 31 for several rounds after the suites had grown past them.
+`tests/docs.test.js` only compared the README against `scripts/claims.js`, so a total quoted
+anywhere else was free to rot. It now reads every document.
 
 - `users/{uid}` — readable and writable **only by the owner**. Email, birthdate, block lists,
   usage counters and learned affinities never leave the account. Writes are validated: `plan`
@@ -160,11 +164,35 @@ daily counter's transaction is proven — see [`store-tests/README.md`](../store
   keyed by the two participants with numeric counts, an `id` field must equal the document
   id, and `discovery/{uid}`'s `location` — which was on its key list with **no validator at
   all**, in the one world-readable collection — is held to a coordinate pair with a short
-  label. What is still unbounded, and is one document per account rather than one per
-  write: the string *elements* inside `profile.photos`, `profile.interests` and `blocked`,
-  and the values in `learning.interestAffinity`. Rules cannot iterate a list or a map, and
-  capping photo URLs needs a matching limit in the profile editor rather than a silent
-  rejection at save time. Read your own (either direction). Delete your own, or one aimed at you —
+  label. `personality` was on that same world-readable key list with no validator either,
+  three lines from `location`; it outlived the pass that found `location` and every pass
+  since, and turned up only when `tests/limits.test.js` began asking mechanically whether
+  every key an allowlist admits is one something examines. `reports/{from_about}` had the
+  same defect on `id` — in the collection whose entire design is a deterministic id
+  bounding the abuse queue. Both are validated now.
+
+  The elements *inside* those lists were the part this document said could not be helped:
+  the strings in `profile.photos`, `profile.interests` and `blocked`, and the keys and
+  values of `learning.interestAffinity`, on the grounds that the rules language cannot
+  iterate a list or a map. It cannot. It does not need to — `join` concatenates a list into
+  a string and a string can be measured, which bounds every element at once whatever the
+  split between them. That is the property that matters, since the ceiling being defended
+  is the document's rather than any one field's. All of them are capped now, in the private
+  document and in the world-readable projection both, and `profile.js` caps a photo link at
+  1024 characters while you paste it so the refusal names the field instead of arriving as
+  a `permission-denied` on save. `tests/limits.test.js` keeps those two numbers the same
+  number.
+
+  **Firestore evaluates at most 1000 expressions per request**, and this is the file that
+  gets close to it. Adding those caps put `userDocOk` over, and going over is not a rule
+  returning false: it is an error, so every account creation in the app began failing with
+  a flat `permission-denied` naming no field and no line. Measured afterwards, the version
+  before them had room for **eleven** more trivial clauses, and nothing had ever looked.
+  `rules-tests/specs/08-budget.rules.js` looks now, on every run, and prints what is left.
+  If you are adding a rule here, read its number first — and know that the costs are not
+  where they look: a function call is worth about 2.2 plain clauses, `in` on a map is
+  cheaper than reading a field, and factoring repeated bounds into helpers spends the
+  margin rather than saving it. Read your own (either direction). Delete your own, or one aimed at you —
   account deletion purges inbound likes too. No updates. A read of a document that is *not
   there* is allowed only when the id names you, which the client needs (every first swipe
   reads its own unwritten record and the usually-absent reciprocal one) and an onlooker must
