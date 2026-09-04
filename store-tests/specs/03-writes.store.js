@@ -155,5 +155,50 @@ module.exports = {
       offlineWarned.length === 1 && offlineStored.likes === 12,
       offlineWarned.length + ' warning(s), stored ' + offlineStored.likes
     );
+
+    /* ---- the presence write, and the throttle docs/ARCHITECTURE.md claims -- */
+
+    // > `touchActive` is throttled to one write per five minutes, because
+    // > `lastActiveAt` feeds the activity score but is not worth a write per
+    // > navigation.   — docs/ARCHITECTURE.md
+    //
+    // A sentence, and nothing executing it. `touchActive` is called on every
+    // auth resolution and on every page that resolves a user, so without the
+    // throttle a browsing session is a Firestore write per navigation, against a
+    // free tier's daily write allowance. It is also the only interesting logic
+    // that lives in the *facade* rather than in either adapter, which is why
+    // neither this suite nor the demo unit tests had ever touched it.
+    const touchUid = 'writes-touch';
+    await k.admin.set('users', touchUid, k.h.userDoc(touchUid, { lastActiveAt: null }));
+
+    const firstTouch = await k.store.touchActive(touchUid);
+    const afterFirst = (await k.admin.get('users', touchUid) || {}).lastActiveAt;
+    t.check('the first touch writes, because nothing is known about this account yet',
+      firstTouch === true && typeof afterFirst === 'string',
+      k.show({ returned: firstTouch, stored: afterFirst }));
+
+    const secondTouch = await k.store.touchActive(touchUid);
+    const afterSecond = (await k.admin.get('users', touchUid) || {}).lastActiveAt;
+    t.check('a touch straight after it does not write, and says so',
+      secondTouch === false && afterSecond === afterFirst,
+      k.show({ returned: secondTouch, unchanged: afterSecond === afterFirst }));
+
+    // And the other half of the claim: the throttle is a window, not a latch.
+    // Five minutes is too long to wait and too specific to guess at, so the
+    // clock is moved instead — `touchActive` reads `Date.now()` when it is
+    // called, so this is the shipped comparison running against a later now.
+    const realNow = Date.now;
+    let advanced;
+    try {
+      const jump = realNow() + 5 * 60 * 1000 + 1000;
+      Date.now = function () { return jump; };
+      advanced = await k.store.touchActive(touchUid);
+    } finally {
+      Date.now = realNow;
+    }
+    const afterJump = (await k.admin.get('users', touchUid) || {}).lastActiveAt;
+    t.check('but once the five minutes are up it writes again',
+      advanced === true && afterJump !== afterFirst,
+      k.show({ returned: advanced, moved: afterJump !== afterFirst }));
   }
 };

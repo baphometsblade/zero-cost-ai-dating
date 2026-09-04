@@ -337,7 +337,7 @@ The daily usage counter is the one piece of client logic where reading the code 
 as weak an argument as it was for the rules: whether two concurrent bumps collapse into one
 is a property of a real database, not of anything visible in the file. `store-tests/` loads
 the **shipped** `public/js/data-store.js` into Node — `window` aliased to `globalThis`,
-`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **84
+`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **119
 checks**, including 20 concurrent `bumpUsage` calls on one document storing exactly 20, the
 midnight roll-over happening inside the same transaction, a bump writing `usage` and nothing
 else, 30 swipes replaying the deck's real learning-save-then-bump ordering and storing exactly
@@ -346,7 +346,9 @@ conversation that has to stay live at its newest end, survive a rewind, and leav
 underneath it when it is finally unmatched, a background refresh whose bill is counted
 document by document and has to come out the same against a swipe history twice as long — and
 a match document the rules refuse, which has to come back as "no match" rather than as a
-swipe the deck believes it lost. And, in both directions, the two documents an account is
+swipe the deck believes it lost, and the messaging and abuse-report paths — fifteen of the
+thirty-one facade methods had never run against a real Firestore at all, so the documents
+the adapter writes had never met the rules that judge them. And, in both directions, the two documents an account is
 split across: the counter the transaction stores and the projection the profile save
 publishes are each replayed against the real `firestore.rules` on a separate project, because
 the projection is written best-effort — a rules refusal there throws nothing, logs nothing

@@ -108,6 +108,16 @@ value would go green against a store that persisted nothing.
 - **Offline is out of reach here.** A failed transaction warns and returns the optimistic
   figure, and nothing persists. That path is exercised only by its nearest neighbour — a
   bump for a uid with no user document — not by real connectivity loss.
+- **One client, so a two-device race cannot be staged.** Every spec drives a single
+  Firestore instance, and that instance's local cache already reflects its own pending
+  writes — so concurrent calls from it read each other's results and serialise instead of
+  racing. `01-concurrency` still means what it says, because `bumpUsage` is a *transaction*
+  and the emulator arbitrates it server-side. But a plain read-modify-write cannot be caught
+  here: `13-messaging` sends three messages at once and the unread counter reaches three
+  whether `sendMessage` uses `FieldValue.increment` or its fallback. Which branch runs is
+  pinned by a check on `globalThis.firebase` instead, because that is what actually decides
+  it — `context.js` had not set that global, and the shipped file was quietly taking the
+  fallback under test while every browser took the increment.
 - **Nothing here says anything about demo mode.** It is per-device, but not single-threaded:
   the store listens for `storage` events, so several tabs of one browser share the same
   `localStorage`, and the demo adapter's bump is still a read-modify-write two of them can
@@ -128,7 +138,7 @@ One spec per property. `tests/docs.test.js` fails if a spec exists without a row
 | --- | --- |
 | `specs/01-concurrency.store.js` | concurrent bumps land exactly once each — 20 at a time on one document store 20 |
 | `specs/02-rollover.store.js` | the day roll-over happens inside the transaction, so a bump at midnight cannot resurrect yesterday |
-| `specs/03-writes.store.js` | a bump writes the `usage` field and nothing else, so it can never clobber a profile edit |
+| `specs/03-writes.store.js` | a bump writes the `usage` field and nothing else, so it can never clobber a profile edit — and `touchActive` honours the one-write-per-five-minutes throttle `docs/ARCHITECTURE.md` claims for it, the only interesting logic in the facade rather than in an adapter, and until now the only such claim nothing executed |
 | `specs/04-rules-accept.store.js` | the values the shipped code stores are ones `firestore.rules` accepts — the counter the transaction writes, and the `discovery/{uid}` projection a profile save publishes, each replayed against the real ruleset. The projection half matters most: it is written best-effort, so a refusal there throws nothing and the account just stops appearing in decks |
 | `specs/05-swipe-race.store.js` | a document save in flight cannot eat the counter, or be eaten by it |
 | `specs/06-projection-order.store.js` | a racing save cannot leave the public `discovery/{uid}` projection behind the private document |
@@ -138,6 +148,8 @@ One spec per property. `tests/docs.test.js` fails if a spec exists without a row
 | `specs/10-blocked-match.store.js` | a match write the rules refuse — which is how a block is enforced, since the list is private — comes back as a plain "no match" instead of throwing, so the deck does not take the card back and tell somebody their swipe was lost |
 | `specs/11-live-cost.store.js` | a badge subscription costs one read per match once, nothing at all while nothing happens, and one read when one conversation changes — the claim the twenty-second poll was replaced on, counted rather than quoted |
 | `specs/12-live-likes.store.js` | the who-liked-you count goes down when *this* client answers somebody — which its own query can never tell it, and which the poll it replaced got right by brute force — and a stranger's new like costs three reads whether eight people were waiting or eight hundred |
+| `specs/13-messaging.store.js` | the messaging path against a real Firestore — `sendMessage`, `getMessages`, `markRead` and `getMatch` were four of the fifteen facade methods this suite had never called in firebase mode, so the documents the adapter produces had never met the rules that judge them. Also pins which branch `sendMessage` takes: `context.js` had not made `firebase` global, so the shipped file was quietly using its read-modify-write fallback under test while every browser used `FieldValue.increment` |
+| `specs/14-reports.store.js` | the abuse-report path, likewise never run against Firestore — the id that bounds the queue, the trimming, the listing, and the refused read that has to mean "nothing left to retract" without letting an outage mean the same thing |
 
 Each spec starts from a cleared database, but the store itself is loaded once per process
 (the IIFE returns early on a second load, and `require` caches), so specs use their own
