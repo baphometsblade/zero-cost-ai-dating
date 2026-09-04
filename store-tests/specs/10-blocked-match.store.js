@@ -183,6 +183,19 @@ module.exports = {
       outageError !== null && outageError.code === 'unavailable',
       outageError ? outageError.code + ': ' + outageError.message : 'resolved instead of throwing');
 
+    // And it says the swipe survived, which the caller cannot work out for
+    // itself. dashboard.js reads any throw from recordSwipe as "the swipe is
+    // not stored" and puts the card back — true of the first write in that
+    // function and of nothing after it. Taking a card back that was in fact
+    // recorded invites a second, contradictory decision the store will silently
+    // drop, because a recorded swipe stands.
+    t.check('and says the swipe itself was already stored',
+      !!outageError && outageError.swipeStored === true,
+      outageError ? 'swipeStored=' + outageError.swipeStored : 'no error');
+
+    t.check('which it was',
+      (await k.admin.get('swipes', me + '_' + other)) !== null, 'swipes/' + me + '_' + other);
+
     // And the refusal is decided by the code, not by the words. A rejection that
     // merely *says* permission denied — a wrapped error, a gateway message quoted
     // into one — is still a failure of unknown outcome, and answering "no match"

@@ -1568,6 +1568,80 @@
     });
   }
 
+  /**
+   * The match document for a pair that has just been found mutual: created once
+   * and only once, and answered as "no match" when the rules refuse it.
+   * @param {string} fromUid the swiper
+   * @param {string} toUid the swiped
+   * @returns {Promise<{matched:boolean, matchId:string|null, created:boolean}>}
+   */
+  async function matchDocumentFor(fromUid, toUid) {
+    // Mutual like — create the match doc only when it is not already there.
+    const matchId = pairId(fromUid, toUid);
+    const matchRef = db().collection('matches').doc(matchId);
+    const matchSnap = await matchRef.get();
+    let created = false;
+    if (!matchSnap.exists) {
+      const unread = {};
+      unread[fromUid] = 0;
+      unread[toUid] = 0;
+      try {
+        await matchRef.set({
+          id: matchId,
+          users: [String(fromUid), String(toUid)].sort(),
+          createdAt: nowIso(),
+          lastMessage: null,
+          lastMessageAt: null,
+          unread: unread
+        });
+      } catch (err) {
+        // Only a rules refusal becomes a quiet no-match, and the expected reason for
+        // one is the block rule: the other person has blocked this account, and the
+        // rule refuses the write because the client cannot — their block list is
+        // private and this client never sees it. The answer has to be a plain "no
+        // match" rather than an error, because the swipe itself is already stored and
+        // the deck must not take the card back.
+        //
+        // Everything else propagates. A first version caught every rejection here,
+        // which turned an offline write, an exhausted quota or a transient failure
+        // into a confident "you did not match" — a claim this function cannot make,
+        // since the pair may well be mutual and the document may land on a retry.
+        // Those are the caller's to see, exactly as they were before any of this.
+        if (!isPermissionDenied(err)) throw err;
+
+        // The rejection is deliberately *not* logged with it. The whole point of this
+        // path is not telling a blocked account that it was blocked, and a console
+        // line carrying `permission-denied` does precisely that. This is not a seal —
+        // a refused write is a 403 in the network tab whatever this line does, and
+        // anyone driving the SDK directly sees the denial — it removes the casual
+        // tell, not the determined one. What is left is a breadcrumb naming the
+        // document that was not written, which is what the UI shows anyway.
+        console.warn('[zc.store] No match document was created for ' + matchId + '.');
+        return { matched: false, matchId: null, created: false };
+      }
+      created = true;
+    }
+    return { matched: true, matchId: matchId, created: created };
+  }
+
+  /**
+   * The half of recordSwipe that runs once the swipe itself is stored: is this
+   * mutual, and if so does the match document exist yet.
+   * @param {string} fromUid the swiper
+   * @param {string} toUid the swiped
+   * @param {string} effective the action that actually stands
+   * @returns {Promise<{matched:boolean, matchId:string|null, created:boolean}>}
+   */
+  async function recordMatchFor(fromUid, toUid, effective) {
+    if (!isPositive(effective)) return { matched: false, matchId: null, created: false };
+
+    const reverseSnap = await db().collection('swipes').doc(swipeId(toUid, fromUid)).get();
+    if (!reverseSnap.exists || !isPositive((reverseSnap.data() || {}).action)) {
+      return { matched: false, matchId: null, created: false };
+    }
+    return matchDocumentFor(fromUid, toUid);
+  }
+
   /** The `from` uids of a snapshot of inbound swipes, positives only, deduped. */
   function positiveSenders(snap) {
     const senders = [];
@@ -1818,60 +1892,25 @@
         noteAnswered(fromUid, toUid, true);
       }
 
-      if (!isPositive(effective)) return { matched: false, matchId: null, created: false };
-
-      const reverseSnap = await db().collection('swipes').doc(swipeId(toUid, fromUid)).get();
-      if (!reverseSnap.exists || !isPositive((reverseSnap.data() || {}).action)) {
-        return { matched: false, matchId: null, created: false };
+      // Everything from here happens *after* the decision is in storage, so a
+      // failure below is not a lost swipe — it is a swipe that landed and an
+      // exchange that did not finish. The rejection says so, because the deck
+      // cannot tell from the outside and its old comment claimed it could:
+      // "only this write failing means the swipe is not stored" was true of the
+      // line above it and of nothing after.
+      //
+      // The distinction is not cosmetic. Putting the card back invites a second,
+      // contradictory decision, and a recorded swipe stands — the store would
+      // keep the first one and silently drop the second, leaving the deck
+      // showing a choice the account no longer has.
+      try {
+        return await recordMatchFor(fromUid, toUid, effective);
+      } catch (err) {
+        if (err && typeof err === 'object') err.swipeStored = true;
+        throw err;
       }
-
-      // Mutual like — create the match doc only when it is not already there.
-      const matchId = pairId(fromUid, toUid);
-      const matchRef = db().collection('matches').doc(matchId);
-      const matchSnap = await matchRef.get();
-      let created = false;
-      if (!matchSnap.exists) {
-        const unread = {};
-        unread[fromUid] = 0;
-        unread[toUid] = 0;
-        try {
-          await matchRef.set({
-            id: matchId,
-            users: [String(fromUid), String(toUid)].sort(),
-            createdAt: nowIso(),
-            lastMessage: null,
-            lastMessageAt: null,
-            unread: unread
-          });
-        } catch (err) {
-          // Only a rules refusal becomes a quiet no-match, and the expected reason for
-          // one is the block rule: the other person has blocked this account, and the
-          // rule refuses the write because the client cannot — their block list is
-          // private and this client never sees it. The answer has to be a plain "no
-          // match" rather than an error, because the swipe itself is already stored and
-          // the deck must not take the card back.
-          //
-          // Everything else propagates. A first version caught every rejection here,
-          // which turned an offline write, an exhausted quota or a transient failure
-          // into a confident "you did not match" — a claim this function cannot make,
-          // since the pair may well be mutual and the document may land on a retry.
-          // Those are the caller's to see, exactly as they were before any of this.
-          if (!isPermissionDenied(err)) throw err;
-
-          // The rejection is deliberately *not* logged with it. The whole point of this
-          // path is not telling a blocked account that it was blocked, and a console
-          // line carrying `permission-denied` does precisely that. This is not a seal —
-          // a refused write is a 403 in the network tab whatever this line does, and
-          // anyone driving the SDK directly sees the denial — it removes the casual
-          // tell, not the determined one. What is left is a breadcrumb naming the
-          // document that was not written, which is what the UI shows anyway.
-          console.warn('[zc.store] No match document was created for ' + matchId + '.');
-          return { matched: false, matchId: null, created: false };
-        }
-        created = true;
-      }
-      return { matched: true, matchId: matchId, created: created };
     },
+
 
     async undoSwipe(fromUid, toUid) {
       const swipeRef = db().collection('swipes').doc(swipeId(fromUid, toUid));
