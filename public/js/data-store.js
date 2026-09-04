@@ -58,6 +58,11 @@
   const REPORT_REASON_SLUGS = REPORT_REASONS.map(function (r) { return r.slug; });
   const DEFAULT_CANDIDATE_LIMIT = 60;
   const DEFAULT_MESSAGE_LIMIT = 200;
+  // How much of a conversation the live listener keeps in view. Bounded because
+  // every snapshot re-reads the window and this app lives inside a free tier's
+  // daily read quota; it tracks the newest end, so the bound is a cost ceiling
+  // rather than a point past which the chat stops working.
+  const LIVE_MESSAGE_WINDOW = 200;
   const TOUCH_THROTTLE_MS = 5 * 60 * 1000;
   const POLL_MS = 1500;
   const GENDERS = ['woman', 'man', 'nonbinary', 'other'];
@@ -1609,6 +1614,15 @@
       const snap = await matchRef.get();
       let removedMatch = false;
       if (snap.exists) {
+        // Messages first, for the reason unmatch() states two functions above:
+        // the message-delete rule proves membership through the parent match,
+        // so a match deleted with messages still under it leaves them not
+        // merely orphaned but permanently undeletable — the only rule that
+        // could authorise removing them checks a document that no longer
+        // exists. This function used to delete the match on its own, so a
+        // rewind across a conversation left its contents in the project for
+        // good. The demo adapter has always dropped them.
+        await deleteMatchMessages(matchRef);
         await matchRef.delete();
         removedMatch = true;
       }
@@ -1731,16 +1745,26 @@
 
     listenMessages(matchId, cb) {
       try {
+        // Descending, then reversed for display — the same shape getMessages
+        // uses twenty lines above, and for the same reason.
+        //
+        // This used to ask for the 500 *oldest* messages instead. Under 500
+        // that is indistinguishable; at 500 the window fills with the start of
+        // the conversation and never moves again, so every later message is
+        // written, stored, counted as unread by the other side, and never
+        // delivered to this listener. The chat simply stops updating, with no
+        // error anywhere, for as long as the conversation lives. The demo
+        // adapter delivers every message and so never had the ceiling.
         return db().collection('matches').doc(matchId).collection('messages')
-          .orderBy('createdAt', 'asc')
-          .limit(500)
+          .orderBy('createdAt', 'desc')
+          .limit(LIVE_MESSAGE_WINDOW)
           .onSnapshot(function (snap) {
             const out = [];
             snap.forEach(function (doc) {
               const data = doc.data() || {};
               out.push({ id: doc.id, from: data.from, text: String(data.text || ''), createdAt: toIso(data.createdAt) });
             });
-            cb(out);
+            cb(out.reverse());
           }, function (err) {
             console.warn('[zc.store] Live message stream failed.', err);
           });
