@@ -117,6 +117,10 @@ module.exports = {
       liked = before;
     }
     t.check('a like landed on somebody who had not already liked back', !!them, String(them));
+    // Everything below needs somebody to have liked. Stopping cleanly rather
+    // than throwing on a null uid keeps the failure readable — and the missing
+    // checks still fail the run, because the suite total is claimed.
+    if (!them) return;
 
     // Their device, a minute later. Nothing about the deck's state changes:
     // the history entry still says this swipe made no match, because when it

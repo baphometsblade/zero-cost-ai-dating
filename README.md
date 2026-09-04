@@ -537,7 +537,13 @@ These are real, and worth knowing before you show this to anyone:
     listens for `storage` events and supports several tabs of the same browser, and the demo
     adapter's bump is still a `localStorage` read-modify-write two of them can race. It shares
     the same pure decision function as the Firestore path, which buys agreement between the
-    two adapters — not a distributed guarantee.
+    two adapters — not a distributed guarantee. The same is true of the rewind's
+    matched-pair refusal: `localStorage` has no compare-and-swap, so a reciprocal like landing
+    in one tab between the check and the write in another is not excluded. It is bounded,
+    which is the part worth knowing — `undoSwipe` no longer deletes a match or its messages
+    under any circumstances, so losing that race costs a swipe row and a card back on the
+    deck, not somebody's conversation. The Firestore path has no such window: the read and
+    the delete are one transaction.
   - **The proof is an emulator over loopback**, not a claim about production latency.
     Contention windows are wider on a real network and the SDK's transaction retry budget is
     finite, so sustained contention can still exhaust it and fall back to the warn path.

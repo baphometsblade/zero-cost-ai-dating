@@ -819,13 +819,23 @@
     async undoSwipe(fromUid, toUid) {
       // The same refusal the Firebase adapter makes, for the same reason, and
       // stated here rather than shared because the two adapters diverging
-      // quietly is the failure this project keeps finding in itself. There is
-      // no race to close in a single tab, so the check is a plain read.
-      const matches = readMatches();
-      if (matches[pairId(fromUid, toUid)]) return { ok: false, reason: 'matched' };
-
+      // quietly is the failure this project keeps finding in itself.
+      //
+      // localStorage has no compare-and-swap, so this is a check followed by a
+      // write and cannot be anything else. The match is therefore read last,
+      // immediately before the write, leaving the smallest window a second tab
+      // could land a reciprocal like in — and the check stays unconditional:
+      // moving it inside `if (swipes[id])` would narrow the window by one more
+      // read at the cost of answering `ok: true` for a matched pair whose
+      // swipe row is already gone, which would put their card back on the deck.
+      // What survives the window is bounded and destroys nothing: the match and
+      // its messages are no longer deleted by this function at all, so the
+      // worst outcome is a swipe row removed a moment late. README's
+      // Limitations section says so out loud.
       const swipes = readSwipes();
       const id = swipeId(fromUid, toUid);
+      const matches = readMatches();
+      if (matches[pairId(fromUid, toUid)]) return { ok: false, reason: 'matched' };
       if (swipes[id]) {
         delete swipes[id];
         writeSwipes(swipes);
