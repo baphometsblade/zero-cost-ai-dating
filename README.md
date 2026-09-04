@@ -318,7 +318,7 @@ readable by other accounts, that nobody can mint a match with a stranger and the
 them, that the abuse queue cannot be enumerated — is a claim about one file,
 `firestore.rules`, because there is no server to enforce anything else. Reading it
 carefully is not evidence. `rules-tests/` executes it against the Firestore emulator:
-**130 checks**, including the attacks each rule exists to stop.
+**131 checks**, including the attacks each rule exists to stop.
 
 ```sh
 npm install --prefix /tmp/zc-rules @firebase/rules-unit-testing firebase-tools
@@ -336,13 +336,14 @@ The daily usage counter is the one piece of client logic where reading the code 
 as weak an argument as it was for the rules: whether two concurrent bumps collapse into one
 is a property of a real database, not of anything visible in the file. `store-tests/` loads
 the **shipped** `public/js/data-store.js` into Node — `window` aliased to `globalThis`,
-`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **49
+`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **54
 checks**, including 20 concurrent `bumpUsage` calls on one document storing exactly 20, the
 midnight roll-over happening inside the same transaction, a bump writing `usage` and nothing
 else, 30 swipes replaying the deck's real learning-save-then-bump ordering and storing exactly
-30, an account deletion that has to leave nothing of itself in any collection, and a 520-message
+30, an account deletion that has to leave nothing of itself in any collection, a 520-message
 conversation that has to stay live at its newest end, survive a rewind, and leave nothing
-underneath it when it is finally unmatched.
+underneath it when it is finally unmatched — and a background refresh whose bill is counted
+document by document and has to come out the same against a swipe history twice as long.
 
 ```sh
 npm install --prefix /tmp/zc-emu firebase @firebase/rules-unit-testing firebase-tools
@@ -497,6 +498,21 @@ deliberate local `npm run deploy`.
 
 These are real, and worth knowing before you show this to anyone:
 
+- **The background badge poll is the largest standing read cost, and it is not free.**
+  `app.js` refreshes the unread-message and pending-like badges every 20 seconds while the
+  tab is in the foreground (it skips ticks while it is hidden). A refresh costs about two
+  reads per match — the query, then the other person's profile — plus, on the premium plan,
+  two per account that has liked you and one profile for each of those still waiting. That
+  is bounded by the size of your social graph, which is the right shape, but a Spark project
+  gets 50,000 document reads a day and several people with tabs open will find the edge of
+  it. `store-tests/specs/09-read-cost.store.js` counts the exact figure document by document
+  and prints it on every run, so the number is measured rather than asserted here.
+  What it no longer does is grow with how long you have used the app. `getLikesReceived`
+  read the caller's **entire swipe history** on every one of those polls, to work out which
+  inbound likes were already answered: 437 reads for a month of ordinary use, 837 once that
+  history doubled, on a timer. It now looks up one document per person who liked you, which
+  the deterministic swipe id makes a plain lookup. Replacing the poll itself with a snapshot
+  listener, which bills only what changes, is the next thing worth doing here.
 - **Client-side gating is only as strong as the Firestore rules.** Daily like limits, premium
   features and rewinds are enforced in the browser because the free plan has no server to
   enforce them on. A determined user with devtools can bypass any of it. The rules stop data

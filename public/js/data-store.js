@@ -1655,15 +1655,27 @@
       });
       if (!senders.length) return [];
 
-      const [me, mySwipes] = await Promise.all([
-        firestoreAdapter.getUser(uid),
-        firestoreAdapter.getSwipes(uid)
-      ]);
-      const answered = swipedSet(mySwipes, uid);
+      const me = await firestoreAdapter.getUser(uid);
       const myBlocks = me ? me.blocked : [];
-      const pending = senders.filter(function (from) {
-        return !answered[from] && myBlocks.indexOf(from) === -1;
-      });
+      const unblocked = senders.filter(function (from) { return myBlocks.indexOf(from) === -1; });
+
+      // One point read per person who liked you, rather than the whole swipe
+      // history. This used to be `getSwipes(uid)`, which is one line and looks
+      // like one read; it is a read for every card this account has ever
+      // swiped, and app.js calls this function every twenty seconds on the
+      // premium plan. The history only ever grows, so the cost of a background
+      // refresh grew with how long somebody had used the app — measured at 437
+      // reads for a month's use and 837 once that history doubled, against a
+      // Spark quota of 50,000 a day. Swipe ids are derived from the pair, so
+      // the answer is a document lookup and needs no query and no index.
+      // `listCandidates` still reads the whole history and should: it excludes
+      // everyone already swiped from an unbounded walk of `discovery`, it
+      // cannot do that one id at a time, and it runs when a deck is loaded
+      // rather than on a timer.
+      const already = await Promise.all(unblocked.map(function (from) {
+        return db().collection('swipes').doc(swipeId(uid, from)).get();
+      }));
+      const pending = unblocked.filter(function (from, index) { return !already[index].exists; });
       const users = await fetchProfiles(pending);
       return pending
         .map(function (from) { return users[from]; })
