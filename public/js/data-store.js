@@ -955,17 +955,28 @@
           action: act,
           createdAt: nowIso()
         };
-        writeSwipes(swipes);
+        // Thrown, not ignored, and thrown BEFORE the try below so it is not marked
+        // `swipeStored` — which is what makes the deck put the card back, exactly as
+        // it does when the Firestore adapter's `set` rejects.
+        //
+        // `writeJson` catches its own failures: it detects a full quota, warns, calls
+        // `warnStorageOnce` and returns false. Nothing here throws. So ignoring this
+        // boolean meant that when demo storage was full, `recordSwipe` resolved
+        // normally, `demoMatchFor` then read the in-memory map — which does hold the
+        // un-persisted swipe — found the reciprocal like, and answered
+        // `{matched: true, created: true}` for a match that was never written either.
+        // The two adapters answered a storage failure in opposite ways.
+        if (!writeSwipes(swipes)) throw new Error('That swipe could not be saved.');
         // Before the early returns below, because a one-sided like is exactly
         // the write the who-liked-you badge is watching for and most swipes
         // never reach the match-creation path at the bottom.
         pollAll();
       }
 
-      // Same contract as the Firestore adapter, and not hypothetical here: the
-      // swipe is written before any of this, and `localStorage` throws when the
-      // profile's quota is full. A caller that read that as "the swipe is lost"
-      // would put the card back over a decision already stored.
+      // Same contract as the Firestore adapter: everything from here on runs AFTER
+      // the swipe is stored, so a failure in it must not read as "the swipe is lost"
+      // — a caller that read it that way would put the card back over a decision
+      // already recorded, and the rules forbid overwriting one.
       try {
         return demoMatchFor(fromUid, toUid, effective, swipes);
       } catch (err) {

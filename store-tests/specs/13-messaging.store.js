@@ -169,11 +169,19 @@ module.exports = {
 
     // The counterweights, so neither check above can pass against rules that
     // accept anything at all in this collection.
-    const forged = Object.assign({}, firstStored.data, { from: B });
+    // Its own fresh document id, and that is the whole point. Written to
+    // `firstStored.id` — which the check above has just created on this project — a
+    // `set` is evaluated as an update, and `allow update: if false` on the messages
+    // subcollection refuses it. Measured: with the authorship clause deleted from
+    // firestore.rules this check still passed, green for the immutability rule's
+    // reason rather than its own. `01-users` and `06-reports` both carry this
+    // warning; this spec walked into it anyway, and an audit found it, not the suite.
+    const forgedId = firstStored.id + '-forged';
+    const forged = Object.assign({}, firstStored.data, { id: forgedId, from: B });
     t.check('while a message claiming to be from the other person is refused',
       await k.ok(k.testing.assertFails(
-        setDoc(doc(author, 'matches', matchId, 'messages', firstStored.id), forged))),
-      'from: ' + forged.from);
+        setDoc(doc(author, 'matches', matchId, 'messages', forgedId), forged))),
+      'from: ' + forged.from + ', into a document that does not exist yet');
 
     const padded = Object.assign({}, afterRead, { lastMessage: 'x'.repeat(1001) });
     t.check('and a preview longer than a message may be is refused',

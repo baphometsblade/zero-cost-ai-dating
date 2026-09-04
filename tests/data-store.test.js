@@ -757,6 +757,47 @@ test('listenMatches delivers this account\'s unread counts and follows a message
   }
 });
 
+test('a swipe that browser storage refuses is reported as lost, not as stored', async function () {
+  // The Firestore adapter's contract: a failure BEFORE the swipe is written must
+  // reach the deck unmarked, so dashboard.js puts the card back; a failure after it
+  // must be marked `swipeStored`, so the deck keeps the card gone. The demo adapter
+  // is supposed to answer a storage failure the same way, and did not.
+  //
+  // `writeJson` catches its own errors — it detects a full quota, warns, and returns
+  // false. Nothing throws. `recordSwipe` ignored that boolean, so a full profile
+  // resolved normally and `demoMatchFor` went on to read the in-memory map, find the
+  // reciprocal like, and answer `{matched: true, created: true}` for a match no more
+  // written than the swipe was. Adapter divergence, on the one path where the two
+  // adapters had just been made to agree.
+  await resetWorld();
+  const me = 'demo-you';
+  const them = 'ava-nakamura';
+
+  const realSetItem = localStorageShim.setItem;
+  let failed = null;
+  try {
+    localStorageShim.setItem = function () {
+      const err = new Error('The quota has been exceeded.');
+      err.name = 'QuotaExceededError';
+      throw err;
+    };
+    await store.recordSwipe(me, them, 'like');
+  } catch (err) {
+    failed = err;
+  } finally {
+    localStorageShim.setItem = realSetItem;
+  }
+
+  assert.ok(failed, 'a swipe whose write was refused must not resolve as if it were stored');
+  assert.notEqual(failed.swipeStored, true,
+    'the rejection must NOT be marked swipeStored: the swipe was never written, so the ' +
+    'deck has to put the card back — marking it would strand a card over a decision ' +
+    'that does not exist');
+  const stored = JSON.parse(backing.get(KEYS.swipes) || '{}');
+  assert.equal(stored[me + '_' + them], undefined,
+    'and nothing was persisted, which is what the rejection is reporting');
+});
+
 test('listenLikesReceived counts only the likes still waiting for an answer', async function () {
   await resetWorld();
   await store.createUser('alice', {});

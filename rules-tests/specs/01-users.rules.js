@@ -94,6 +94,19 @@ module.exports = {
         { profile: prof({ interests: ['x'.repeat(400)] }) }],
       ['an interestedIn entry that is not one of the four words',
         { preferences: prefs({ interestedIn: ['x'.repeat(200)] }) }],
+      // The check the old bound was missing. `size() <= 4` was once replaced by
+      // `hasOnly([...])` alone, on the reasoning that naming the values bounded both
+      // the values and the length. It bounds only the values: `hasOnly` is a subset
+      // test and duplicates satisfy it, so twenty thousand copies of a legal word
+      // passed. The row above cannot see that — it uses an ILLEGAL word, so it would
+      // stay green with no length bound at all.
+      ['a legal interestedIn word repeated past the length cap',
+        { preferences: prefs({ interestedIn: new Array(5000).fill('woman') }) }],
+      // And the guard that is deliberately absent: `is list` was dropped because
+      // `.size()` and `.hasOnly()` raise on anything else, and a raised expression
+      // denies. That is a claim about the rules language, so it is executed.
+      ['an interestedIn that is not a list at all',
+        { preferences: prefs({ interestedIn: 'woman' }) }],
       ['a single blocked uid the size of a block list',
         { blocked: ['x'.repeat(48001)] }],
       ['an affinity keyed by a padded slug',

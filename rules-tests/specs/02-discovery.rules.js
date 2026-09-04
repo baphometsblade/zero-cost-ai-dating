@@ -124,6 +124,22 @@ module.exports = {
         }) })
       ))));
 
+    // The same pair in the world-readable copy, which is the one that matters: a
+    // padded projection is downloaded by every signed-in account building a deck.
+    t.check('a legal interestedIn word repeated past the length cap is refused here too',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).set(
+        h.discoveryDoc(ME, { preferences: Object.assign({}, h.discoveryDoc(ME).preferences, {
+          interestedIn: new Array(5000).fill('woman')
+        }) })
+      ))));
+
+    t.check('and an interestedIn that is not a list at all, which nothing spells out',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).set(
+        h.discoveryDoc(ME, { preferences: Object.assign({}, h.discoveryDoc(ME).preferences, {
+          interestedIn: 'woman'
+        }) })
+      ))));
+
     // The control, in the collection where a cap set too tight would be worst:
     // a projection nobody can publish is a deck nobody appears in.
     t.check('but six photo links at the length the editor allows still publish',

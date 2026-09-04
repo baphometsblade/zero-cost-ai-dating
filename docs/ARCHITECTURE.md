@@ -380,9 +380,17 @@ Weights, component formulas and the reason thresholds are documented in the
 ## 7. Pages and the shell
 
 `app.js` runs on every page. It mounts the toast host, applies the saved theme to
-`<html data-theme>`, renders the shared nav and bottom tab bar, wires sign-out, and polls the
-unread badge every 20 s — but only while `document.visibilityState === 'visible'`, so a
-backgrounded tab costs nothing.
+`<html data-theme>`, renders the shared nav and bottom tab bar, wires sign-out, and keeps the
+unread badges live through `ZC.store.listenMatches` — plus `listenLikesReceived` on the premium
+plan — held by `syncBadgeListeners()` and released by `stopBadgePolling()`. On Firestore those
+are `onSnapshot` streams that bill their first delivery and then only what changes; in demo mode
+they ride the store's shared 1.5 s storage poll.
+
+This section used to describe a 20-second badge poll gated on `document.visibilityState`, "so a
+backgrounded tab costs nothing". Both halves are gone: §6 was updated when the listeners landed
+and §7 was edited around and left contradicting it. The visibility claim would not hold now in
+either mode — a snapshot stream re-bills its first delivery on every reconnect, and the demo
+poll has no visibility gate at all.
 
 Page guards live in `auth.js` and run first in each controller:
 

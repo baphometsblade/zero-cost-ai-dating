@@ -887,7 +887,21 @@
       // Stored, but we never found out whether it was mutual. Say so without
       // claiming either answer, and carry on: the swipe was spent, so the daily
       // count below is owed either way.
-      toast('Saved. We could not check for a match just then — it will show up if there is one.', 'warn');
+      //
+      // The wording matters and the first version got it wrong. It said the match
+      // "will show up if there is one", and nothing anywhere makes that true: a
+      // match document is only ever written from inside `recordSwipe`, my swipe now
+      // exists so `listCandidates` filters this person out of my deck for good, and
+      // their swipe is answered so I drop off their who-liked-you list. Neither
+      // client will call `recordSwipe` for this pair again, so nothing retries. A
+      // sentence promising a match would arrive on its own also removed the one
+      // action that would actually recover it — swiping the same person again after
+      // a rewind — by telling the person there was nothing to do.
+      //
+      // This is a real gap and it is documented as one in README's Limitations
+      // rather than papered over here; what this line owes the reader is the truth
+      // about what just happened.
+      toast('Saved, but we could not check for a match just then. If you were expecting one, rewind and swipe again.', 'warn');
     }
 
     // Past here the swipe — and any match it created — is in storage. Nothing

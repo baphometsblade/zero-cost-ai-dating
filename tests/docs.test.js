@@ -92,12 +92,24 @@ test('every "N checks" in every document is a total some suite claims', function
   const claimed = Object.keys(claims.CLAIMS).map(function (key) { return claims.CLAIMS[key].total; });
   const stale = [];
   DOCS.forEach(function (doc) {
-    if (doc === 'README.md') return;
-    const pattern = /\*\*(\d+)\s+(?:more\s+)?checks\*\*/g;
+    // Every document, README included, and every form the number is written in.
+    //
+    // The first version of this test matched only the bolded `**N checks**` and skipped
+    // README.md outright, on the reasoning that README was already covered by the test
+    // above. It is — but only for the bolded form. Three stale totals sat inside that
+    // gap while this test's own comment claimed it "reads every document": README's
+    // "246-check total" (the run is 254) and, in a code comment where bold is not even
+    // possible, docs/DEPLOY.md's "9 suites, 201 checks" and "all 201 checks passing",
+    // 32 checks and 5 suites behind. An audit found them, not this test.
+    const pattern = /(?:\*\*)?(\d+)[ -](?:more )?checks?(?:\*\*)?/g;
     const text = read(doc);
     let match;
     while ((match = pattern.exec(text)) !== null) {
-      if (claimed.indexOf(Number(match[1])) === -1) stale.push(doc + ' → ' + match[0]);
+      // Under two is never a live total: `0/0 checks passed` is this project quoting the
+      // false green a runner refuses to report, and is deliberately not a claim.
+      const n = Number(match[1]);
+      if (n < 2) continue;
+      if (claimed.indexOf(n) === -1) stale.push(doc + ' → ' + match[0].trim());
     }
   });
   assert.deepEqual(stale, [],
