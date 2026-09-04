@@ -151,7 +151,20 @@ daily counter's transaction is proven — see [`store-tests/README.md`](../store
   to Firestore's 1 MiB ceiling, and a swipe is the cheapest write in the project — it needs
   only a signed-in account and a uid, uids are enumerable from `discovery`, and the daily
   limit that would slow it down is enforced in the browser. A Spark project gets 1 GiB.
-  `matches`, `messages` and `users/{uid}` are closed for the same reason. Read your own (either direction). Delete your own, or one aimed at you —
+  `matches`, `messages` and `users/{uid}` are closed for the same reason.
+
+  A closed key list bounds how *many* fields a document may have and not how big one may
+  be, which is a separate hole and was open in every collection: `createdAt` and its
+  siblings were checked as `is string`, so a swipe could still be a megabyte under a name
+  that reads like a timestamp. Every stamp is now capped, `matches.unread` may only be
+  keyed by the two participants with numeric counts, an `id` field must equal the document
+  id, and `discovery/{uid}`'s `location` — which was on its key list with **no validator at
+  all**, in the one world-readable collection — is held to a coordinate pair with a short
+  label. What is still unbounded, and is one document per account rather than one per
+  write: the string *elements* inside `profile.photos`, `profile.interests` and `blocked`,
+  and the values in `learning.interestAffinity`. Rules cannot iterate a list or a map, and
+  capping photo URLs needs a matching limit in the profile editor rather than a silent
+  rejection at save time. Read your own (either direction). Delete your own, or one aimed at you —
   account deletion purges inbound likes too. No updates. A read of a document that is *not
   there* is allowed only when the id names you, which the client needs (every first swipe
   reads its own unwritten record and the usually-absent reciprocal one) and an onlooker must

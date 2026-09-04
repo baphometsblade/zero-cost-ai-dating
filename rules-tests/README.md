@@ -85,6 +85,16 @@ another's preconditions and mask a missing rule.
   enumerate out of the world-readable `discovery` collection. A miss is now allowed only
   when the id names the caller, which is every read the client actually makes, and both
   specs check the other half — that a miss between two strangers is refused.
+- **Document size, as distinct from document shape** — a closed key list bounds how many
+  fields a document may have and says nothing about how big one may be. Every timestamp in
+  this project was checked as `is string`, which bounds nothing, so a swipe could be a
+  megabyte under a name that reads like `createdAt`. Every stamp is capped now; `unread`
+  may only be keyed by the two participants, with numeric counts; an `id` field must equal
+  the document id; and `discovery/{uid}`'s `location` — which sat on its key list with no
+  validator at all, in the only world-readable collection — is held to a coordinate pair.
+  Each of those has a check, and each check writes to its **own** document: they shared one
+  at first, and a whole-suite mutation run showed the first write succeeding and turning
+  the next into an update, refused by a different rule, green for the wrong reason.
 - **The catch-all** — undeclared collections, and undeclared subcollections under your own
   user document, are closed rather than open.
 

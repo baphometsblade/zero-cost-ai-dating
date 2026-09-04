@@ -51,6 +51,11 @@ module.exports = {
         Object.assign(h.messageDoc(ME, 'hello'), { padding: 'x'.repeat(64) })
       ))));
 
+    t.check('a message timestamp longer than a timestamp is refused',
+      await ok(assertFails(as(ME).collection('matches/' + mine + '/messages').add(
+        Object.assign(h.messageDoc(ME, 'hello'), { createdAt: 'x'.repeat(200) })
+      ))));
+
     t.check('a participant can send a message as themselves',
       await ok(assertSucceeds(as(ME).collection('matches/' + mine + '/messages').add(h.messageDoc(ME, 'hello')))));
 

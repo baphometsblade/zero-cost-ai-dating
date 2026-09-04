@@ -37,6 +37,19 @@ service cloud.firestore {
         && request.auth.uid in matchUsers(matchId);
     }
 
+    // An ISO-8601 timestamp, the way the store writes one: `new Date().toISOString()` is
+    // twenty-four characters and nothing here is longer.
+    //
+    // The cap is the point. Every document in this project carries at least one of these
+    // and each was checked only as `is string`, which bounds nothing — so a swipe, a
+    // match, a message or a profile could still be padded to Firestore's 1 MiB ceiling
+    // through a field called `createdAt`, with a closed key list in front of it doing
+    // exactly nothing about it. Closing the key list bounded how many fields a document
+    // may have; this bounds how big one may be.
+    function stampOk(v) {
+      return v is string && v.size() <= 40;
+    }
+
     // ---------------------------------------------------------------------------
     // users/{uid} — the profile documents that power discovery
     // ---------------------------------------------------------------------------
@@ -137,15 +150,15 @@ service cloud.firestore {
           && d.email is string && d.email.size() <= 320
           && d.displayName is string && d.displayName.size() <= 60
           && d.plan in ['free', 'premium']
-          && (!('planSince' in d) || d.planSince == null || d.planSince is string)
+          && (!('planSince' in d) || d.planSince == null || stampOk(d.planSince))
           && (!('profileComplete' in d) || d.profileComplete is bool)
-          && d.createdAt is string
-          && (!('updatedAt' in d) || d.updatedAt is string)
+          && stampOk(d.createdAt)
+          && (!('updatedAt' in d) || stampOk(d.updatedAt))
           // null is how the store spells "never active", exactly as it spells an
           // unset planSince above. Requiring a string here rejected any user
           // document created through updateUser's upsert path — the shape the
           // store has always written, and the demo adapter accepts.
-          && (!('lastActiveAt' in d) || d.lastActiveAt == null || d.lastActiveAt is string)
+          && (!('lastActiveAt' in d) || d.lastActiveAt == null || stampOk(d.lastActiveAt))
           && profileOk(d.profile)
           && prefsOk(d.preferences)
           && bookkeepingOk(d);
@@ -203,7 +216,25 @@ service cloud.firestore {
           && (!('pronouns' in p) || (p.pronouns is string && p.pronouns.size() <= 40))
           && (!('age' in p) || p.age == null || (p.age is number && p.age >= 18 && p.age <= 120))
           && (!('showAge' in p) || p.showAge is bool)
-          && (!('showDistance' in p) || p.showDistance is bool);
+          && (!('showDistance' in p) || p.showDistance is bool)
+          // `location` was on the key list above and had no validator at all, so the
+          // one world-readable collection in the project accepted a megabyte under that
+          // name. Every signed-in user reads these documents to build a deck.
+          && (!('location' in p) || locationOk(p.location));
+      }
+
+      // Either null or a real coordinate pair with a short label. Same shape the private
+      // document is held to; stated again because rules functions do not cross a match
+      // block, and a projection that drifted from the original is the failure this file
+      // has already had once.
+      function locationOk(loc) {
+        return loc == null || (
+          loc is map
+          && loc.keys().hasOnly(['label', 'lat', 'lng'])
+          && loc.lat is number && loc.lat >= -90 && loc.lat <= 90
+          && loc.lng is number && loc.lng >= -180 && loc.lng <= 180
+          && (!('label' in loc) || (loc.label is string && loc.label.size() <= 120))
+        );
       }
 
       // The public subset of preferences.* — just the mutual discovery filters.
@@ -224,7 +255,7 @@ service cloud.firestore {
           && d.uid == uid
           && d.displayName is string && d.displayName.size() <= 60
           && (!('profileComplete' in d) || d.profileComplete is bool)
-          && (!('lastActiveAt' in d) || d.lastActiveAt is string)
+          && (!('lastActiveAt' in d) || stampOk(d.lastActiveAt))
           && (!('profile' in d) || discoveryProfileOk(d.profile))
           && (!('preferences' in d) || discoveryPrefsOk(d.preferences));
       }
@@ -265,7 +296,8 @@ service cloud.firestore {
           && d.to is string && d.to.size() > 0
           && d.from != d.to
           && d.action in ['like', 'pass', 'super']
-          && d.createdAt is string
+          && stampOk(d.createdAt)
+          && (!('id' in d) || d.id == swipeId)
           && swipeId == d.from + '_' + d.to;
       }
 
@@ -332,10 +364,19 @@ service cloud.firestore {
           && d.users[0] < d.users[1]
           && matchId == d.users[0] + '_' + d.users[1]
           && request.auth.uid in d.users
-          && d.createdAt is string
+          && (!('id' in d) || d.id == matchId)
+          && stampOk(d.createdAt)
           && (!('lastMessage' in d) || d.lastMessage == null || (d.lastMessage is string && d.lastMessage.size() <= 1000))
-          && (!('lastMessageAt' in d) || d.lastMessageAt == null || d.lastMessageAt is string)
-          && (!('unread' in d) || (d.unread is map && d.unread.keys().size() <= 2));
+          && (!('lastMessageAt' in d) || d.lastMessageAt == null || stampOk(d.lastMessageAt))
+          // The unread map may be keyed only by the two participants, and each count is
+          // a number. `keys().size() <= 2` bounded the count of keys and neither their
+          // names nor their values, so two megabyte strings passed it.
+          && (!('unread' in d) || (
+            d.unread is map
+            && d.unread.keys().hasOnly(d.users)
+            && (!(d.users[0] in d.unread) || (d.unread[d.users[0]] is number && d.unread[d.users[0]] >= 0))
+            && (!(d.users[1] in d.unread) || (d.unread[d.users[1]] is number && d.unread[d.users[1]] >= 0))
+          ));
       }
 
       // The other side of a match document, from the caller's point of view.
@@ -441,7 +482,8 @@ service cloud.firestore {
           && request.resource.data.text is string
           && request.resource.data.text.size() >= 1
           && request.resource.data.text.size() <= 1000
-          && request.resource.data.createdAt is string;
+          && (!('id' in request.resource.data) || request.resource.data.id == msgId)
+          && stampOk(request.resource.data.createdAt);
 
         // Messages are never edited, so neither side can rewrite what was said.
         // Deletes are allowed to participants because unmatch and account
@@ -478,7 +520,7 @@ service cloud.firestore {
           && exists(/databases/$(database)/documents/discovery/$(d.about))
           && d.reason in ['fake-profile', 'inappropriate-content', 'harassment', 'underage', 'scam-or-spam', 'other']
           && (!('details' in d) || (d.details is string && d.details.size() <= 500))
-          && d.createdAt is string;
+          && stampOk(d.createdAt);
       }
 
       allow create: if isSignedIn() && reportOk(request.resource.data);

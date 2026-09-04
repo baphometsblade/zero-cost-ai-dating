@@ -82,6 +82,29 @@ module.exports = {
         h.discoveryDoc(ME, { profile: Object.assign({}, h.discoveryDoc(ME).profile, { bio: 'x'.repeat(501) }) })
       ))));
 
+    // This is the one world-readable collection in the project: every signed-in user
+    // pulls these documents to build a deck, so a megabyte here is a megabyte on
+    // everybody's bandwidth and on the project's egress, not just on its storage.
+    t.check('a timestamp longer than a timestamp is refused',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).set(
+        h.discoveryDoc(ME, { lastActiveAt: 'x'.repeat(200) })
+      ))));
+
+    // `location` was on the key list and validated by nothing at all, so this passed.
+    t.check('a location that is not a coordinate pair is refused',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).set(
+        h.discoveryDoc(ME, { profile: Object.assign({}, h.discoveryDoc(ME).profile, {
+          location: 'x'.repeat(200)
+        }) })
+      ))));
+
+    t.check('a location label longer than a label is refused',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).set(
+        h.discoveryDoc(ME, { profile: Object.assign({}, h.discoveryDoc(ME).profile, {
+          location: { label: 'x'.repeat(200), lat: 45.5, lng: -122.7 }
+        }) })
+      ))));
+
     t.check('the lastActiveAt-only refresh the store makes is allowed',
       await ok(assertSucceeds(as(ME).doc('discovery/' + ME).update({ lastActiveAt: '2026-02-02T00:00:00.000Z' }))));
 
