@@ -215,8 +215,25 @@ function reportDoc(from, about, over) {
   }, over || {});
 }
 
+/**
+ * Split FIRESTORE_EMULATOR_HOST, which emulators:exec sets for us.
+ *
+ * Lives here rather than in either suite so the two cannot disagree about where
+ * the emulator is, for the same reason package resolution does.
+ * @returns {{host:string, port:number}|null} null when the variable is absent
+ */
+function emulatorAddress() {
+  const raw = process.env.FIRESTORE_EMULATOR_HOST || '';
+  const at = raw.lastIndexOf(':');
+  if (at === -1) return null;
+  const port = Number(raw.slice(at + 1));
+  if (!port) return null;
+  return { host: raw.slice(0, at) || '127.0.0.1', port: port };
+}
+
 module.exports = {
   ROOT: ROOT,
+  emulatorAddress: emulatorAddress,
   RULES_PATH: RULES_PATH,
   INSTALL_HINT: INSTALL_HINT,
   moduleRoots: moduleRoots,

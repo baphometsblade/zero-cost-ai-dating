@@ -50,6 +50,41 @@ service cloud.firestore {
       return v is string && v.size() <= 40;
     }
 
+    // A list's *contents*, not just how many elements it holds.
+    //
+    // `size()` bounds the count and says nothing about what is inside, so
+    // `photos: ['x' repeated 300000]` satisfied every check in this file: one
+    // element, comfortably under six. Same for `interests`, `blocked` and the
+    // keys and values of `learning.interestAffinity`. `docs/DEPLOY.md` listed
+    // exactly those as the size hole that could not be closed, on the grounds
+    // that the rules language cannot iterate a list.
+    //
+    // It cannot. It does not need to: `join` concatenates a list into a string,
+    // and a string can be measured. One expression bounds every element at once,
+    // whatever the split between them — which is the property that matters,
+    // because the ceiling being defended is the document's, not any one field's.
+    // Non-strings are stringified rather than rejected, so a numeric list is
+    // measured too, and an element that is a map or a list makes `join` fail,
+    // which denies.
+    function listCharsOk(v, cap) {
+      return v.join('').size() <= cap;
+    }
+
+    // There are deliberately no strOk(v, cap) / numIn(v, lo, hi) helpers here, and
+    // the repetition below is not an oversight.
+    //
+    // A rules request may evaluate at most 1000 expressions, and this file's user
+    // document validator sits close enough to that ceiling that the margin is
+    // measured by a test (`rules-tests/specs/08-budget.rules.js`). Folding the
+    // repeated comparisons into helpers reads better and costs more: a function
+    // call is worth about 2.2 plain clauses, measured against this very file, so
+    // wrapping every bound in one spent the remaining margin and every user
+    // document write began failing — as a flat `permission-denied` naming no
+    // field, which is how running out of budget always looks.
+    //
+    // `stampOk` and `listCharsOk` stay because each is called for a construct
+    // there is no short way to write, and each earns its call.
+
     // ---------------------------------------------------------------------------
     // users/{uid} — the profile documents that power discovery
     // ---------------------------------------------------------------------------
@@ -85,14 +120,21 @@ service cloud.firestore {
       function profileOk(p) {
         return p is map
           && (!('bio' in p) || (p.bio is string && p.bio.size() <= 500))
-          && (!('interests' in p) || (p.interests is list && p.interests.size() <= 12))
-          && (!('photos' in p) || (p.photos is list && p.photos.size() <= 6))
-          && (!('gender' in p) || p.gender in ['woman', 'man', 'nonbinary', 'other'])
+          // 12 slugs from a fixed vocabulary whose longest entry is 12 characters,
+          // so 240 is nearly double what the editor can produce.
+          && (!('interests' in p) || (p.interests is list && p.interests.size() <= 12
+                                      && listCharsOk(p.interests, 240)))
+          // 6 links at 1024 characters each, which is what the profile editor
+          // now enforces one at a time so the refusal is visible there rather
+          // than arriving as an unexplained permission-denied on save.
+          && (!('photos' in p) || (p.photos is list && p.photos.size() <= 6
+                                   && listCharsOk(p.photos, 6144)))
+          && (!('gender' in p) || (p.gender in ['woman', 'man', 'nonbinary', 'other']))
           && (!('pronouns' in p) || (p.pronouns is string && p.pronouns.size() <= 40))
-          && (!('birthdate' in p) || p.birthdate == null || (p.birthdate is string && p.birthdate.size() == 10))
+          && (!('birthdate' in p) || (p.birthdate == null || (p.birthdate is string && p.birthdate.size() == 10)))
           && (!('age' in p) || p.age == null || (p.age is number && p.age >= 18 && p.age <= 120))
-          && (!('showAge' in p) || p.showAge is bool)
-          && (!('showDistance' in p) || p.showDistance is bool)
+          && (!('showAge' in p) || (p.showAge is bool))
+          && (!('showDistance' in p) || (p.showDistance is bool))
           && (!('personality' in p) || personalityOk(p.personality))
           && (!('location' in p) || locationOk(p.location));
       }
@@ -105,34 +147,65 @@ service cloud.firestore {
           && (!('ageMax' in f) || (f.ageMax is number && f.ageMax >= 18 && f.ageMax <= 100))
           && (!(('ageMin' in f) && ('ageMax' in f)) || f.ageMin <= f.ageMax)
           && (!('maxDistanceKm' in f) || (f.maxDistanceKm is number && f.maxDistanceKm >= 1 && f.maxDistanceKm <= 500))
-          && (!('interestedIn' in f) || (f.interestedIn is list && f.interestedIn.size() <= 4))
-          && (!('theme' in f) || f.theme in ['system', 'light', 'dark'])
-          && (!('notifications' in f) || f.notifications is bool)
+          // The same four words `profile.gender` allows, and nothing else. A cap of
+          // four *elements* bounded neither what they were nor how long they were;
+          // naming them bounds both, in one clause rather than two.
+          && (!('interestedIn' in f) || (f.interestedIn is list
+                                         && f.interestedIn.hasOnly(['woman', 'man', 'nonbinary', 'other'])))
+          && (!('theme' in f) || (f.theme in ['system', 'light', 'dark']))
+          && (!('notifications' in f) || (f.notifications is bool))
           && (!('discoverable' in f) || f.discoverable is bool);
       }
 
       // learning.* and usage.* — small bookkeeping maps; keep the counters sane so the
       // document cannot be grown without bound.
-      function bookkeepingOk(d) {
-        return (!('learning' in d) || (
-            d.learning is map
-            && (!('interestAffinity' in d.learning) || (d.learning.interestAffinity is map && d.learning.interestAffinity.keys().size() <= 60))
-            && (!('likeCount' in d.learning) || (d.learning.likeCount is number && d.learning.likeCount >= 0))
-            && (!('passCount' in d.learning) || (d.learning.passCount is number && d.learning.passCount >= 0))
-          ))
-          && (!('usage' in d) || (
-            d.usage is map
-            && (!('date' in d.usage) || (d.usage.date is string && d.usage.date.size() == 10))
-            && (!('likes' in d.usage) || (d.usage.likes is number && d.usage.likes >= 0))
-            && (!('superLikes' in d.usage) || (d.usage.superLikes is number && d.usage.superLikes >= 0))
-            && (!('rewinds' in d.usage) || (d.usage.rewinds is number && d.usage.rewinds >= 0))
-          ))
-          && (!('blocked' in d) || (d.blocked is list && d.blocked.size() <= 1000));
+      //
+      // Each sub-map is passed into its own function rather than reached through
+      // `d.learning.likeCount` at every mention. That is not tidiness: a rules
+      // request may evaluate at most 1000 expressions, every step of a path is
+      // one of them, and this validator walks the same three-deep paths two and
+      // three times per clause. `rules-tests/specs/08-budget.rules.js` measures
+      // what is left of that allowance.
+
+      // learning.interestAffinity — interest slugs mapped to weights the engine
+      // has already clamped to -1..1 and rounded to four places. Both sides are
+      // measured: a key list capped at 60 bounded neither the slugs nor what they
+      // mapped to, and one value could be a megabyte-long string under the name
+      // `hiking`.
+      function affinityOk(m) {
+        return m is map
+          && m.keys().size() <= 60
+          && listCharsOk(m.keys(), 1200)
+          && listCharsOk(m.values(), 1500);
       }
 
-      // The whole UserDoc: a closed top-level key list, the required ones among them, and
-      // every nested validator. `createdAt` is required so that the immutability check
-      // below can always compare it without tripping over a missing field.
+      function learningOk(l) {
+        return l is map
+          && (!('interestAffinity' in l) || affinityOk(l.interestAffinity))
+          && (!('likeCount' in l) || (l.likeCount is number && l.likeCount >= 0))
+          && (!('passCount' in l) || (l.passCount is number && l.passCount >= 0));
+      }
+
+      function usageOk(u) {
+        return u is map
+          && (!('date' in u) || (u.date is string && u.date.size() == 10))
+          && (!('likes' in u) || (u.likes is number && u.likes >= 0))
+          && (!('superLikes' in u) || (u.superLikes is number && u.superLikes >= 0))
+          && (!('rewinds' in u) || (u.rewinds is number && u.rewinds >= 0));
+      }
+
+      function bookkeepingOk(d) {
+        return (!('learning' in d) || learningOk(d.learning))
+          && (!('usage' in d) || usageOk(d.usage))
+          // 1000 uids at 48 characters each. A Firebase Auth uid is 28.
+          && (!('blocked' in d) || (d.blocked is list && d.blocked.size() <= 1000
+                                    && listCharsOk(d.blocked, 48000)));
+      }
+
+      // The whole UserDoc: a closed top-level key list and every nested validator.
+      // `createdAt` has to be present so that the immutability check below can always
+      // compare it without tripping over a missing field, which the unconditional
+      // `stampOk(d.createdAt)` a few lines down is what guarantees.
       //
       // Closed rather than merely complete: `hasAll` says the required keys are there and
       // nothing about the rest, so an account could pad its own document to the 1 MiB
@@ -145,20 +218,31 @@ service cloud.firestore {
         return d.keys().hasOnly(['uid', 'email', 'displayName', 'createdAt', 'updatedAt',
                                  'lastActiveAt', 'profileComplete', 'plan', 'planSince',
                                  'profile', 'preferences', 'learning', 'usage', 'blocked'])
-          && d.keys().hasAll(['uid', 'email', 'displayName', 'createdAt', 'plan', 'profile', 'preferences'])
-          && d.uid is string
+          // Two checks that used to be here are gone, and both were redundant
+          // rather than relaxed — this rule has an expression budget to answer to
+          // (`rules-tests/specs/08-budget.rules.js`), and a check that says nothing
+          // new is the first thing to spend.
+          //
+          // A `hasAll` naming seven required keys: every one of them is
+          // dereferenced unconditionally in the lines below, and reading a key a
+          // map does not have is an error that denies the write. `01-users`
+          // removes each of the seven in turn and confirms the write still fails.
+          //
+          // `d.uid is string`: create requires `request.resource.data.uid == uid`,
+          // which is the document id and therefore a string, and update freezes it
+          // against the stored value. Neither path could reach this line without it.
           && d.email is string && d.email.size() <= 320
           && d.displayName is string && d.displayName.size() <= 60
           && d.plan in ['free', 'premium']
-          && (!('planSince' in d) || d.planSince == null || stampOk(d.planSince))
-          && (!('profileComplete' in d) || d.profileComplete is bool)
+          && (!('planSince' in d) || (d.planSince == null || stampOk(d.planSince)))
+          && (!('profileComplete' in d) || (d.profileComplete is bool))
           && stampOk(d.createdAt)
           && (!('updatedAt' in d) || stampOk(d.updatedAt))
           // null is how the store spells "never active", exactly as it spells an
           // unset planSince above. Requiring a string here rejected any user
           // document created through updateUser's upsert path — the shape the
           // store has always written, and the demo adapter accepts.
-          && (!('lastActiveAt' in d) || d.lastActiveAt == null || stampOk(d.lastActiveAt))
+          && (!('lastActiveAt' in d) || (d.lastActiveAt == null || stampOk(d.lastActiveAt)))
           && profileOk(d.profile)
           && prefsOk(d.preferences)
           && bookkeepingOk(d);
@@ -210,13 +294,17 @@ service cloud.firestore {
           && p.keys().hasOnly(['age', 'gender', 'pronouns', 'bio', 'photos', 'interests',
                                'personality', 'location', 'showAge', 'showDistance'])
           && (!('bio' in p) || (p.bio is string && p.bio.size() <= 500))
-          && (!('interests' in p) || (p.interests is list && p.interests.size() <= 12))
-          && (!('photos' in p) || (p.photos is list && p.photos.size() <= 6))
-          && (!('gender' in p) || p.gender in ['woman', 'man', 'nonbinary', 'other'])
+          // The same content bounds as the private document, and this is the copy
+          // every signed-in account downloads to build a deck.
+          && (!('interests' in p) || (p.interests is list && p.interests.size() <= 12
+                                      && listCharsOk(p.interests, 240)))
+          && (!('photos' in p) || (p.photos is list && p.photos.size() <= 6
+                                   && listCharsOk(p.photos, 6144)))
+          && (!('gender' in p) || (p.gender in ['woman', 'man', 'nonbinary', 'other']))
           && (!('pronouns' in p) || (p.pronouns is string && p.pronouns.size() <= 40))
           && (!('age' in p) || p.age == null || (p.age is number && p.age >= 18 && p.age <= 120))
-          && (!('showAge' in p) || p.showAge is bool)
-          && (!('showDistance' in p) || p.showDistance is bool)
+          && (!('showAge' in p) || (p.showAge is bool))
+          && (!('showDistance' in p) || (p.showDistance is bool))
           // `location` was on the key list above and had no validator at all, so the
           // one world-readable collection in the project accepted a megabyte under that
           // name. Every signed-in user reads these documents to build a deck.
@@ -244,7 +332,8 @@ service cloud.firestore {
           && (!('ageMin' in f) || (f.ageMin is number && f.ageMin >= 18 && f.ageMin <= 100))
           && (!('ageMax' in f) || (f.ageMax is number && f.ageMax >= 18 && f.ageMax <= 100))
           && (!('maxDistanceKm' in f) || (f.maxDistanceKm is number && f.maxDistanceKm >= 1 && f.maxDistanceKm <= 500))
-          && (!('interestedIn' in f) || (f.interestedIn is list && f.interestedIn.size() <= 4))
+          && (!('interestedIn' in f) || (f.interestedIn is list
+                                         && f.interestedIn.hasOnly(['woman', 'man', 'nonbinary', 'other'])))
           && (!('discoverable' in f) || f.discoverable is bool);
       }
 
@@ -254,7 +343,7 @@ service cloud.firestore {
                                  'profile', 'preferences'])
           && d.uid == uid
           && d.displayName is string && d.displayName.size() <= 60
-          && (!('profileComplete' in d) || d.profileComplete is bool)
+          && (!('profileComplete' in d) || (d.profileComplete is bool))
           && (!('lastActiveAt' in d) || stampOk(d.lastActiveAt))
           && (!('profile' in d) || discoveryProfileOk(d.profile))
           && (!('preferences' in d) || discoveryPrefsOk(d.preferences));
@@ -297,7 +386,7 @@ service cloud.firestore {
           && d.from != d.to
           && d.action in ['like', 'pass', 'super']
           && stampOk(d.createdAt)
-          && (!('id' in d) || d.id == swipeId)
+          && (!('id' in d) || (d.id == swipeId))
           && swipeId == d.from + '_' + d.to;
       }
 
@@ -364,10 +453,10 @@ service cloud.firestore {
           && d.users[0] < d.users[1]
           && matchId == d.users[0] + '_' + d.users[1]
           && request.auth.uid in d.users
-          && (!('id' in d) || d.id == matchId)
+          && (!('id' in d) || (d.id == matchId))
           && stampOk(d.createdAt)
-          && (!('lastMessage' in d) || d.lastMessage == null || (d.lastMessage is string && d.lastMessage.size() <= 1000))
-          && (!('lastMessageAt' in d) || d.lastMessageAt == null || stampOk(d.lastMessageAt))
+          && (!('lastMessage' in d) || (d.lastMessage == null || (d.lastMessage is string && d.lastMessage.size() <= 1000)))
+          && (!('lastMessageAt' in d) || (d.lastMessageAt == null || stampOk(d.lastMessageAt)))
           // The unread map may be keyed only by the two participants, and each count is
           // a number. `keys().size() <= 2` bounded the count of keys and neither their
           // names nor their values, so two megabyte strings passed it.

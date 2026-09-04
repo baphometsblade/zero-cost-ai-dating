@@ -78,7 +78,30 @@ module.exports = {
       ['an out-of-range personality axis', { profile: prof({ personality: { openness: 101 } }) }],
       ['an impossible latitude', { profile: prof({ location: { label: 'X', lat: 91, lng: 0 } }) }],
       ['an affinity map over 60 keys', { learning: { interestAffinity: bigMap(61), likeCount: 0, passCount: 0 } }],
-      ['a negative usage counter', { usage: { date: '2026-01-01', likes: -1, superLikes: 0, rewinds: 0 } }]
+      ['a negative usage counter', { usage: { date: '2026-01-01', likes: -1, superLikes: 0, rewinds: 0 } }],
+
+      // Contents rather than counts. Every one of these satisfies the size()
+      // cap above it — one photo is not more than six — and every one of them
+      // was accepted until `listCharsOk` was added. `docs/DEPLOY.md` listed
+      // them by name as the hole that could not be closed, because the rules
+      // language cannot iterate a list. It does not have to: `join` makes the
+      // whole list one string and a string can be measured.
+      ['one photo link padded to a quarter of a megabyte',
+        { profile: prof({ photos: ['https://e/' + 'x'.repeat(250000) + '.png'] }) }],
+      ['six photo links that are legal apart and too much together',
+        { profile: prof({ photos: Array.from({ length: 6 }, function (_, i) { return 'https://e/' + i + 'x'.repeat(1200); }) }) }],
+      ['an interest slug longer than the whole interest list may be',
+        { profile: prof({ interests: ['x'.repeat(400)] }) }],
+      ['an interestedIn entry that is not one of the four words',
+        { preferences: prefs({ interestedIn: ['x'.repeat(200)] }) }],
+      ['a single blocked uid the size of a block list',
+        { blocked: ['x'.repeat(48001)] }],
+      ['an affinity keyed by a padded slug',
+        { learning: { interestAffinity: padKey(1300), likeCount: 0, passCount: 0 } }],
+      // The one that mattered most: a map's *values* were never looked at, so
+      // `{ hiking: <a megabyte of x> }` was one key, well inside the cap of 60.
+      ['an affinity whose value is a string rather than a weight',
+        { learning: { interestAffinity: { hiking: 'x'.repeat(2000) }, likeCount: 0, passCount: 0 } }]
     ];
     for (const [label, over] of bad) {
       t.check('write rejected: ' + label,
@@ -108,6 +131,42 @@ module.exports = {
         h.userDoc('bad-active', { lastActiveAt: 1767225600000 })
       ))));
 
+    // Controls. A bound nobody can reach is not a bound, it is a broken feature,
+    // and every refusal above would read identically against a cap of zero.
+    t.check('but six photo links at the length the editor allows are accepted',
+      await ok(assertSucceeds(as(ME).doc('users/' + ME).set(h.userDoc(ME, {
+        profile: prof({ photos: Array.from({ length: 6 }, function (_, i) {
+          // 1024 characters each, which is public/js/profile.js's MAX_PHOTO_URL,
+          // and exactly the rule's allowance across all six. tests/limits.test.js
+          // is what keeps those two numbers the same one.
+          return ('https://example.com/' + i + '/').padEnd(1024, 'x');
+        }) })
+      })))));
+
+    t.check('and a full 60-slug affinity map of real weights is accepted',
+      await ok(assertSucceeds(as(ME).doc('users/' + ME).set(h.userDoc(ME, {
+        learning: { interestAffinity: bigMap(60, -0.1234), likeCount: 0, passCount: 0 }
+      })))));
+
+    t.check('and a block list of a thousand real uids is accepted',
+      await ok(assertSucceeds(as(ME).doc('users/' + ME).set(h.userDoc(ME, {
+        // 28 characters is what Firebase Auth issues.
+        blocked: Array.from({ length: 1000 }, function (_, i) { return String(i).padStart(28, 'u'); })
+      })))));
+
+    // `userDocOk` used to carry a `hasAll` naming seven required keys, and it was
+    // removed to buy back evaluation budget (see `08-budget`) on the grounds that
+    // every one of those keys is dereferenced unconditionally below, and reading a
+    // key a map does not have is an error that denies. That is a claim about the
+    // rules language, so it is executed rather than asserted: each key is removed
+    // in turn and the write must still be refused.
+    for (const key of ['uid', 'email', 'displayName', 'createdAt', 'plan', 'profile', 'preferences']) {
+      const missing = h.userDoc('missing-' + key);
+      delete missing[key];
+      t.check('a user document with no ' + key + ' is refused, with no hasAll to say so',
+        await ok(assertFails(as('missing-' + key).doc('users/missing-' + key).set(missing))));
+    }
+
     t.check('a valid profile edit is still allowed',
       await ok(assertSucceeds(as(ME).doc('users/' + ME).set(h.userDoc(ME, { profile: prof({ bio: 'An edited bio.' }) })))));
 
@@ -123,9 +182,16 @@ module.exports = {
     /** Merge overrides into the fixture's preferences block. */
     function prefs(over) { return Object.assign({}, h.userDoc(ME).preferences, over); }
     /** An affinity map with `n` keys, to exercise the size cap. */
-    function bigMap(n) {
+    function bigMap(n, value) {
       const out = {};
-      for (let i = 0; i < n; i++) out['tag' + i] = 0.5;
+      const v = value === undefined ? 0.5 : value;
+      for (let i = 0; i < n; i++) out['tag' + i] = v;
+      return out;
+    }
+    /** An affinity map whose single key is `n` characters long. */
+    function padKey(n) {
+      const out = {};
+      out['x'.repeat(n)] = 0.5;
       return out;
     }
   }

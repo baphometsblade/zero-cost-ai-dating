@@ -40,6 +40,12 @@
   const MAX_INTERESTS = 12;
   const MIN_INTERESTS = 3;
   const MAX_PHOTOS = 6;
+  // Per link, and the reason it exists is `firestore.rules`: the photo list is
+  // bounded there by the total characters across all six, because rules can
+  // measure a joined list but cannot walk one. Without a limit here, pasting one
+  // enormous link would be accepted by this form and then refused on save with
+  // nothing to explain it. Six of these fit inside the rule's allowance exactly.
+  const MAX_PHOTO_URL = 1024;
   const MIN_AGE = 18;
   const MAX_AGE = 120;
   const PREVIEW_TAGS = 6;
@@ -691,6 +697,12 @@
       refs.photoInput.focus();
       return;
     }
+    if (raw.length > MAX_PHOTO_URL) {
+      setError('photo', 'That link is ' + (raw.length - MAX_PHOTO_URL) + ' characters too long — keep it under ' +
+        MAX_PHOTO_URL + '.');
+      refs.photoInput.focus();
+      return;
+    }
     if (state.photos.indexOf(raw) !== -1) {
       setError('photo', 'That photo is already on your profile.');
       return;
@@ -1014,6 +1026,11 @@
 
     if (state.photos.some(function (url) { return !/^https:\/\//i.test(url); })) {
       errors.photo = 'Every photo link has to start with https://.';
+    } else if (state.photos.some(function (url) { return url.length > MAX_PHOTO_URL; })) {
+      // addPhoto refuses these one at a time, so reaching here means the list
+      // came from storage rather than from this form. Saying so beats letting
+      // the save fail at the rules layer with nothing to point at.
+      errors.photo = 'One of your photo links is over ' + MAX_PHOTO_URL + ' characters. Remove it to save.';
     }
 
     return errors;

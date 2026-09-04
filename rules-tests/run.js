@@ -86,10 +86,10 @@ async function main() {
     firestoreSdk.setLogLevel('silent');
   }
 
-  const [host, port] = process.env.FIRESTORE_EMULATOR_HOST.split(':');
+  const address = harness.emulatorAddress();
   const testEnv = await testing.initializeTestEnvironment({
     projectId: PROJECT_ID,
-    firestore: { rules: harness.readRules(), host: host, port: Number(port) }
+    firestore: { rules: harness.readRules(), host: address.host, port: address.port }
   });
 
   const results = [];
