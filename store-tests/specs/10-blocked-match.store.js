@@ -36,9 +36,10 @@
  * @param {Object} real the emulator-backed compat Firestore
  * @param {{denied:number}} tally counts refusals, so a spec cannot pass because
  *   the injection silently stopped working
+ * @param {Function} rejection builds the error each refused write rejects with
  * @returns {Object} a stand-in for ZC.firebase.db
  */
-function refusingMatchWrites(real, tally) {
+function refusingMatchWrites(real, tally, rejection) {
   function bound(obj, key) {
     const value = obj[key];
     return typeof value === 'function' ? value.bind(obj) : value;
@@ -59,9 +60,7 @@ function refusingMatchWrites(real, tally) {
                   if (inner !== 'set') return bound(r, inner);
                   return function () {
                     tally.denied += 1;
-                    const err = new Error('PERMISSION_DENIED: Missing or insufficient permissions.');
-                    err.code = 'permission-denied';
-                    return Promise.reject(err);
+                    return Promise.reject(rejection());
                   };
                 }
               });
@@ -71,6 +70,20 @@ function refusingMatchWrites(real, tally) {
       };
     }
   });
+}
+
+/** What a rules refusal looks like coming back from the compat SDK. */
+function denial() {
+  const err = new Error('PERMISSION_DENIED: Missing or insufficient permissions.');
+  err.code = 'permission-denied';
+  return err;
+}
+
+/** Anything else: offline, an exhausted quota, a transient failure. */
+function outage() {
+  const err = new Error('Failed to get document because the client is offline.');
+  err.code = 'unavailable';
+  return err;
 }
 
 module.exports = {
@@ -91,7 +104,7 @@ module.exports = {
 
     const real = k.ctx.ZC.firebase.db;
     const tally = { denied: 0 };
-    k.ctx.ZC.firebase.db = refusingMatchWrites(real, tally);
+    k.ctx.ZC.firebase.db = refusingMatchWrites(real, tally, denial);
 
     let outcome = null;
     let threw = null;
@@ -122,10 +135,42 @@ module.exports = {
     t.check('and no match document exists', (await k.admin.get('matches', matchId)) === null,
       'matches/' + matchId);
 
-    // Swallowing the rejection silently would hide a real fault behind a
-    // feature. One warning, carrying the rejection.
-    t.check('the refusal is warned about exactly once, with the reason attached',
-      warnings.length === 1 && warnings[0].indexOf(matchId) !== -1,
-      k.show(warnings));
+    // A breadcrumb, so a real fault does not vanish behind a feature — but not the
+    // reason. A console line carrying `permission-denied` tells a blocked account it
+    // was blocked, which is the one thing this whole path exists to avoid. It is not a
+    // seal: the refused write is still a 403 in the network tab.
+    t.check('the refusal is warned about exactly once, naming the document',
+      warnings.length === 1 && warnings[0].indexOf(matchId) !== -1, k.show(warnings));
+
+    t.check('and the warning does not carry the reason it was refused',
+      warnings.length === 1 && !/permission|denied/i.test(warnings[0]), k.show(warnings));
+
+    /* ---- and everything that is not a refusal still surfaces --------------- */
+
+    // The first version of this caught every rejection, which turned an offline write
+    // or an exhausted quota into a confident "you did not match" — a claim it cannot
+    // make, since the pair may be mutual and the write may land on a retry. Only the
+    // rules refusal is answerable; the rest belong to the caller.
+    const other = 'refused-other';
+    await k.admin.set('users', other, k.h.userDoc(other));
+    await k.admin.set('swipes', other + '_' + me, {
+      id: other + '_' + me, from: other, to: me, action: 'like', createdAt: '2026-01-02T00:00:00.000Z'
+    });
+
+    const outageTally = { denied: 0 };
+    k.ctx.ZC.firebase.db = refusingMatchWrites(real, outageTally, outage);
+    let outageError = null;
+    try {
+      await k.store.recordSwipe(me, other, 'like');
+    } catch (err) {
+      outageError = err;
+    } finally {
+      k.ctx.ZC.firebase.db = real;
+    }
+    k.ctx.drainWarnings();
+
+    t.check('a failure that is not a refusal is not answered as "no match"',
+      outageError !== null && outageError.code === 'unavailable',
+      outageError ? outageError.code + ': ' + outageError.message : 'resolved instead of throwing');
   }
 };
