@@ -1533,6 +1533,34 @@
     return unblocked.filter(function (from, index) { return !already[index].exists; });
   }
 
+  /**
+   * Live like-count watchers, so a swipe written by this client can correct one
+   * without spending a read to discover what it already knows.
+   *
+   * The listener's query is `swipes where to == me`, which never fires when
+   * *I* answer somebody: my swipe is aimed the other way. Without this the
+   * badge kept counting a person after I had passed on them, until something
+   * unrelated moved or the page reloaded — a regression the twenty-second poll
+   * did not have, because it recomputed everything every twenty seconds.
+   */
+  const likeWatchers = [];
+
+  /**
+   * Record that this client has answered (or un-answered) somebody, and
+   * re-deliver every live count that cares.
+   * @param {string} fromUid the swiper
+   * @param {string} toUid the person swiped on
+   * @param {boolean} answered true for a new swipe, false for a rewind
+   * @returns {void}
+   */
+  function noteAnswered(fromUid, toUid, answered) {
+    likeWatchers.forEach(function (watcher) {
+      if (watcher.uid !== fromUid) return;
+      watcher.answered[toUid] = answered;
+      watcher.deliver();
+    });
+  }
+
   /** The `from` uids of a snapshot of inbound swipes, positives only, deduped. */
   function positiveSenders(snap) {
     const senders = [];
@@ -1776,6 +1804,11 @@
           action: act,
           createdAt: nowIso()
         });
+        // The who-liked-you listener watches swipes aimed *at* this account, so
+        // it never hears about this one. Telling it directly costs no read and
+        // is the difference between a badge that goes down when you answer
+        // somebody and one that does not.
+        noteAnswered(fromUid, toUid, true);
       }
 
       if (!isPositive(effective)) return { matched: false, matchId: null, created: false };
@@ -1855,12 +1888,15 @@
       // created in between would be missed the same way, for the same reason.
       // Firestore replays a transaction whose read has moved, so the retry
       // sees the match that appeared.
-      return db().runTransaction(async function (tx) {
+      const outcome = await db().runTransaction(async function (tx) {
         const snap = await tx.get(matchRef);
         if (snap.exists) return { ok: false, reason: 'matched' };
         tx.delete(swipeRef);
         return { ok: true };
       });
+      // An answered like becomes unanswered again, and the badge counts it.
+      if (outcome.ok) noteAnswered(fromUid, toUid, false);
+      return outcome;
     },
 
     async getLikesReceived(uid) {
@@ -2000,19 +2036,60 @@
     },
 
     listenLikesReceived(uid, cb) {
-      let stopped = false;
+      // Whether each sender has been answered is remembered rather than
+      // recomputed. The first delivery has to look them all up; after that only
+      // a sender this account has not seen before costs a read, and a sender it
+      // answers itself costs none at all — `recordSwipe` says so directly
+      // through noteAnswered, because it already knows.
+      const watcher = {
+        uid: uid,
+        senders: [],
+        answered: {},
+        blocks: [],
+        stopped: false,
+        deliver: function () {
+          if (watcher.stopped) return;
+          const count = watcher.senders.filter(function (from) {
+            return watcher.answered[from] === false && watcher.blocks.indexOf(from) === -1;
+          }).length;
+          try {
+            cb(count);
+          } catch (err) {
+            console.warn('[zc.store] A live like listener threw.', err);
+          }
+        }
+      };
+      likeWatchers.push(watcher);
+
       let stop = function () { /* nothing to unsubscribe */ };
       try {
         stop = db().collection('swipes')
           .where('to', '==', uid)
           .where('action', 'in', ['like', 'super'])
           .onSnapshot(function (snap) {
-            // The point reads happen per delivery rather than per tick, and a
-            // delivery only happens when somebody's swipe on this account
-            // actually changes. `getLikesReceived` also fetches a profile for
-            // each pending liker; this does not, because a badge is a number.
-            pendingOf(uid, positiveSenders(snap)).then(function (pending) {
-              if (!stopped) cb(pending.length);
+            const senders = positiveSenders(snap);
+            watcher.senders = senders;
+            // Forget anybody who has gone, so the map cannot grow forever.
+            Object.keys(watcher.answered).forEach(function (from) {
+              if (senders.indexOf(from) === -1) delete watcher.answered[from];
+            });
+            const unknown = senders.filter(function (from) {
+              return watcher.answered[from] === undefined;
+            });
+            if (!unknown.length) {
+              watcher.deliver();
+              return;
+            }
+            // The block list is re-read only when there is a new sender to
+            // judge, so a delivery that adds nobody costs nothing.
+            firestoreAdapter.getUser(uid).then(function (me) {
+              watcher.blocks = me ? me.blocked : [];
+              return Promise.all(unknown.map(function (from) {
+                return db().collection('swipes').doc(swipeId(uid, from)).get();
+              }));
+            }).then(function (snaps) {
+              unknown.forEach(function (from, index) { watcher.answered[from] = snaps[index].exists; });
+              watcher.deliver();
             }, function (err) {
               console.warn('[zc.store] Live like count failed.', err);
             });
@@ -2027,7 +2104,12 @@
       } catch (err) {
         console.warn('[zc.store] Could not open the live like stream.', err);
       }
-      return function () { stopped = true; stop(); };
+      return function () {
+        watcher.stopped = true;
+        const index = likeWatchers.indexOf(watcher);
+        if (index !== -1) likeWatchers.splice(index, 1);
+        stop();
+      };
     },
 
     listenMessages(matchId, cb) {

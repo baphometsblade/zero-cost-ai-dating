@@ -336,7 +336,7 @@ The daily usage counter is the one piece of client logic where reading the code 
 as weak an argument as it was for the rules: whether two concurrent bumps collapse into one
 is a property of a real database, not of anything visible in the file. `store-tests/` loads
 the **shipped** `public/js/data-store.js` into Node — `window` aliased to `globalThis`,
-`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **69
+`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **76
 checks**, including 20 concurrent `bumpUsage` calls on one document storing exactly 20, the
 midnight roll-over happening inside the same transaction, a bump writing `usage` and nothing
 else, 30 swipes replaying the deck's real learning-save-then-bump ordering and storing exactly
@@ -536,10 +536,17 @@ These are real, and worth knowing before you show this to anyone:
   `store-tests/specs/11-live-cost.store.js` counts it rather than quoting the
   documentation: twelve matches cost twelve reads to subscribe, **nothing at all** while
   nothing happens, and **one** read when one conversation changes.
+  The who-liked-you count has a blind spot the poll did not, and closing it is why that
+  listener remembers rather than recomputes. Its query watches swipes aimed *at* you, so it
+  never fires when *you* answer somebody — the badge kept counting a person after you had
+  passed on them. `recordSwipe` already knows it answered them, so it says so directly,
+  which costs no read at all; a stranger newly liking you costs three, whether eight people
+  were already waiting or eight hundred.
   What is left is not zero and is worth knowing: the first subscription costs one read per
-  match, and every reconnect — a dropped network, a browser discarding a background tab —
-  pays that again. That is bounded by the size of a social graph and spent when something
-  actually happened, which is the shape a free tier can carry.
+  match and two per person waiting, and every reconnect — a dropped network, a browser
+  discarding a background tab — pays that again. That is bounded by the size of a social
+  graph and spent when something actually happened, which is the shape a free tier can
+  carry.
 - **Client-side gating is only as strong as the Firestore rules.** Daily like limits, premium
   features and rewinds are enforced in the browser because the free plan has no server to
   enforce them on. A determined user with devtools can bypass any of it. The rules stop data
