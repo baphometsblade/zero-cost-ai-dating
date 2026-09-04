@@ -145,8 +145,13 @@ daily counter's transaction is proven — see [`store-tests/README.md`](../store
   Readable by any signed-in user, writable only by the owner, and the key list is **closed**
   (`hasOnly`), so a tampered client cannot smuggle private fields into the readable copy. The
   app mirrors it automatically on every profile save.
-- `swipes/{swipeId}` — create only when you are the `from` user **and** the document id is
-  exactly `from_to`. Read your own (either direction). Delete your own, or one aimed at you —
+- `swipes/{swipeId}` — create only when you are the `from` user, the document id is
+  exactly `from_to`, **and** the key list is closed (`hasOnly`). That last part is not
+  tidiness: `hasAll` bounds the keys it names and nothing else, so a swipe could be padded
+  to Firestore's 1 MiB ceiling, and a swipe is the cheapest write in the project — it needs
+  only a signed-in account and a uid, uids are enumerable from `discovery`, and the daily
+  limit that would slow it down is enforced in the browser. A Spark project gets 1 GiB.
+  `matches`, `messages` and `users/{uid}` are closed for the same reason. Read your own (either direction). Delete your own, or one aimed at you —
   account deletion purges inbound likes too. No updates. A read of a document that is *not
   there* is allowed only when the id names you, which the client needs (every first swipe
   reads its own unwritten record and the usually-absent reciprocal one) and an onlooker must

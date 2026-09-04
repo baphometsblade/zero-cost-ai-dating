@@ -38,6 +38,15 @@ module.exports = {
     t.check('an account can create its own document',
       await ok(assertSucceeds(as('fresh').doc('users/fresh').set(h.userDoc('fresh')))));
 
+    // One unexpected key is the whole test. `hasAll` admitted any number of them at any
+    // size, so an account could pad its own document to Firestore's 1 MiB ceiling with
+    // fields nothing reads; a spec that wrote a real megabyte would prove the same thing
+    // and take a hundred times as long.
+    t.check('a user document carrying a field the shape does not name is refused',
+      await ok(assertFails(as(ME).doc('users/' + ME).set(
+        h.userDoc(ME, { padding: 'x'.repeat(64) })
+      ))));
+
     t.check('the embedded uid must match the document id',
       await ok(assertFails(as('fresh2').doc('users/fresh2').set(h.userDoc('somebody-else')))));
 

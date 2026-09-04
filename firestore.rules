@@ -117,11 +117,22 @@ service cloud.firestore {
           && (!('blocked' in d) || (d.blocked is list && d.blocked.size() <= 1000));
       }
 
-      // The whole UserDoc: required top-level keys plus every nested validator.
-      // `createdAt` is required so that the immutability check below can always compare
-      // it without tripping over a missing field.
+      // The whole UserDoc: a closed top-level key list, the required ones among them, and
+      // every nested validator. `createdAt` is required so that the immutability check
+      // below can always compare it without tripping over a missing field.
+      //
+      // Closed rather than merely complete: `hasAll` says the required keys are there and
+      // nothing about the rest, so an account could pad its own document to the 1 MiB
+      // ceiling with fields no part of this app reads. That is a smaller lever than the
+      // swipe collection — one document per account rather than one per swipe — but it is
+      // the same lever, and there is no reason to leave it. The list is the fourteen keys
+      // the store's own DEFAULT_USER carries, and tests/projection.test.js compares the
+      // two so neither can drift without the other.
       function userDocOk(d) {
-        return d.keys().hasAll(['uid', 'email', 'displayName', 'createdAt', 'plan', 'profile', 'preferences'])
+        return d.keys().hasOnly(['uid', 'email', 'displayName', 'createdAt', 'updatedAt',
+                                 'lastActiveAt', 'profileComplete', 'plan', 'planSince',
+                                 'profile', 'preferences', 'learning', 'usage', 'blocked'])
+          && d.keys().hasAll(['uid', 'email', 'displayName', 'createdAt', 'plan', 'profile', 'preferences'])
           && d.uid is string
           && d.email is string && d.email.size() <= 320
           && d.displayName is string && d.displayName.size() <= 60
@@ -237,8 +248,19 @@ service cloud.firestore {
 
       // A swipe is a tiny immutable record; the doc id encodes both parties so a client
       // cannot create two conflicting swipes for the same pair.
+      //
+      // `hasOnly`, not `hasAll`. `hasAll` says the required keys are present and says
+      // nothing about the rest, so a swipe could carry any number of extra fields and be
+      // padded to the 1 MiB document ceiling. Nothing about this record is worth a
+      // megabyte, and this is the cheapest such write in the project: creating one needs
+      // only a signed-in account and a uid, and uids are enumerable from the
+      // world-readable discovery collection. A Spark project gets 1 GiB of storage, which
+      // is a thousand documents at that size — and the daily swipe limit that would
+      // otherwise slow it down is enforced in the browser, so it does not apply to a
+      // client that has stopped cooperating. Bounding the shape is what bounds the write.
       function swipeOk(d) {
-        return d.keys().hasAll(['from', 'to', 'action', 'createdAt'])
+        return d.keys().hasOnly(['id', 'from', 'to', 'action', 'createdAt'])
+          && d.keys().hasAll(['from', 'to', 'action', 'createdAt'])
           && d.from is string && d.from.size() > 0
           && d.to is string && d.to.size() > 0
           && d.from != d.to
@@ -301,7 +323,8 @@ service cloud.firestore {
       // Exactly two participants, sorted, and the doc id derived from them. The caller
       // must be one of them, so nobody can invent a match between two other people.
       function matchOk(d) {
-        return d.keys().hasAll(['users', 'createdAt'])
+        return d.keys().hasOnly(['id', 'users', 'createdAt', 'lastMessage', 'lastMessageAt', 'unread'])
+          && d.keys().hasAll(['users', 'createdAt'])
           && d.users is list
           && d.users.size() == 2
           && d.users[0] is string
@@ -407,7 +430,12 @@ service cloud.firestore {
         allow read: if isParticipant(matchId);
 
         // Create: a participant, writing as themselves, with 1..1000 chars of text.
+        // The 1000-character cap bounds `text` and, with `hasAll`, bounded nothing else:
+        // the document could carry any other field at any size, so a capped message could
+        // still be a megabyte. Closing the key list is what makes the cap mean what it
+        // reads as.
         allow create: if isParticipant(matchId)
+          && request.resource.data.keys().hasOnly(['id', 'from', 'text', 'createdAt'])
           && request.resource.data.keys().hasAll(['from', 'text', 'createdAt'])
           && request.resource.data.from == request.auth.uid
           && request.resource.data.text is string
