@@ -78,6 +78,14 @@ module.exports = {
     t.check('a signed-in user can probe a match document that does not exist, which rewind depends on',
       await ok(assertSucceeds(as(ME).doc('matches/' + h.pairId(ME, THIRD)).get())));
 
+    // And only their own. Allowing every miss would mean the difference between
+    // an empty snapshot and a denial answers "have those two matched?" for any
+    // pair somebody cares to name, which in a dating app is the fact worth
+    // hiding. The id is the sorted pair, so a probe is confined to matches the
+    // caller would be in.
+    t.check('but not a missing match between two other people, which would tell them it is missing',
+      await ok(assertFails(as(ME).doc('matches/' + h.pairId(THIRD, 'unmatched-stranger')).get())));
+
     t.check('a query constrained to your own matches is allowed',
       await ok(assertSucceeds(as(ME).collection('matches').where('users', 'array-contains', ME).get())));
 

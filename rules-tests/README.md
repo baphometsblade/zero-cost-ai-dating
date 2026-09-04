@@ -50,8 +50,8 @@ without a row here.
 | --- | --- |
 | `specs/01-users.rules.js` | `users/{uid}` — owner-only, and shape-validated on write |
 | `specs/02-discovery.rules.js` | `discovery/{uid}` — world-readable, but only the public shape |
-| `specs/03-swipes.rules.js` | `swipes/{from_to}` — authored by you, immutable, id-pinned |
-| `specs/04-matches.rules.js` | `matches/{a_b}` — participants only, and only with a reciprocal like |
+| `specs/03-swipes.rules.js` | `swipes/{from_to}` — authored by you, immutable, id-pinned, and probeable when absent only by the pair named in the id |
+| `specs/04-matches.rules.js` | `matches/{a_b}` — participants only, only with a reciprocal like, and the same id-bounded probe when absent |
 | `specs/05-messages.rules.js` | `matches/{id}/messages` — participants only, append-only, self-authored |
 | `specs/06-reports.rules.js` | `reports/{from_about}` — bounded, author-only, unprobeable |
 | `specs/07-default-deny.rules.js` | everything else — denied by default |
@@ -76,6 +76,15 @@ another's preconditions and mask a missing rule.
 - **`reports/{from_about}`** — the id that bounds the queue, the subject having to exist,
   author-only visibility, and that a *missing* report also denies so its existence cannot
   be probed.
+- **Absent documents, in all three of those** — the reports rule was alone in getting this
+  right, and said so in a comment while the swipes rule two hundred lines above claimed a
+  bare `resource == null` "leaks nothing". It does: an empty snapshot and a denial are
+  different answers, so allowing every miss tells any signed-in caller whether the document
+  they named exists. Swipes and matches carry deterministic ids built from the pair, so a
+  probe answers "has Alice swiped on Bob" and "have those two matched" for uids anyone can
+  enumerate out of the world-readable `discovery` collection. A miss is now allowed only
+  when the id names the caller, which is every read the client actually makes, and both
+  specs check the other half — that a miss between two strangers is refused.
 - **The catch-all** — undeclared collections, and undeclared subcollections under your own
   user document, are closed rather than open.
 
