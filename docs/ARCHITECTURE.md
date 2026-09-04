@@ -309,8 +309,13 @@ apart.
 - `recordSwipe(from, to, action)` writes `swipes/{from}_{to}`; if the reciprocal swipe exists
   and both are positive (`like`/`super`), it creates `matches/{sortedPair}` and returns
   `{ matched: true, matchId }`. Idempotent in both adapters.
-- `undoSwipe` deletes the swipe and, if that swipe created a match, the match with it — which
-  is why the dashboard refuses to rewind across a match.
+- `undoSwipe` deletes the swipe, and refuses — `{ ok: false, reason: 'matched' }`, nothing
+  deleted — when the pair already have a match. A match is two people's: the other side can
+  have read it and written into it, so one of them pressing rewind may not take it away. The
+  dashboard checks too, from the `matched` flag on its history entry, but that flag is
+  stamped when the swipe is written and is blind to a reciprocal like arriving afterwards,
+  which is the ordinary case. The Firebase adapter reads and deletes in one transaction, so
+  a like landing between the read and the delete is caught on the replay rather than missed.
 - `getUsage` auto-resets when `usage.date` is not today, so daily limits need no scheduler.
 - `canSpend(uid, field)` returns `{ allowed, remaining, limit, plan }` by reading the plan
   limits out of `ZC.config`, and is called *before* every spend.

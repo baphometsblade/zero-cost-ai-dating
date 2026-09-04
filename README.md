@@ -248,7 +248,7 @@ npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.
 
 ### Unit suites
 
-Thirteen suites on Node's built-in runner — **223 checks**, no install, no browser, seconds:
+Thirteen suites on Node's built-in runner — **224 checks**, no install, no browser, seconds:
 
 | Suite | What it pins down |
 | --- | --- |
@@ -273,8 +273,8 @@ store and its daily counter, the auth backend, the pure half of the utilities, t
 schema, the static HTML. It cannot reach the flows that only exist in a DOM — signing in,
 the deck and its keyboard, the match burst, chat that persists, reporting someone, deleting
 your account, and the service worker serving the app with the network gone. Those live in
-`e2e/`: **200 checks** across the eleven specs that need nothing installed but a browser, each
-run at 390x844 and most of them at 1280x800 as well — plus a twelfth, `10-firebase.e2e.js`,
+`e2e/`: **222 checks** across the twelve specs that need nothing installed but a browser, each
+run at 390x844 and most of them at 1280x800 as well — plus a thirteenth, `10-firebase.e2e.js`,
 which needs the Firebase emulators and skips, by name and reason, when they are not running.
 
 Playwright drives them, and it is deliberately **not** a dependency: the promise that this
@@ -291,12 +291,12 @@ With no Playwright at all the runner exits 3 with a one-line install hint, so "n
 here" never reads as a failing test. See [`e2e/README.md`](e2e/README.md) for the spec
 layout and for running one flow or one viewport.
 
-That twelfth spec, `e2e/specs/10-firebase.e2e.js`, is the only one that runs the app against
+That thirteenth spec, `e2e/specs/10-firebase.e2e.js`, is the only one that runs the app against
 Firebase rather than `localStorage`: the real SDK, real Auth, real Firestore, and every result
 read back out of the emulator instead of off the page. It drives the pages **with their real
 CSP meta tag** — the emulators are reached through the page's own origin rather than by
 relaxing the policy, which is the whole reason it can exist; the Limitations section explains
-the constraint it is working around. With both emulators up the run is **218 checks**, all
+the constraint it is working around. With both emulators up the run is **240 checks**, all
 passing.
 
 It did not start that way. On its first run one check was red, and it had found a real bug:
@@ -308,7 +308,7 @@ fixture in `rules-tests/` ever used a null there. The rule now accepts null, and
 checks pin the shape.
 
 Without an emulator the runner prints `SKIP` and records nothing, so `npm run test:e2e` on a
-bare machine is still 200/200 — and CI runs it both ways, so the skip path and the emulator
+bare machine is still 222/222 — and CI runs it both ways, so the skip path and the emulator
 path are each exercised on every push.
 
 ### Security rules tests
@@ -318,7 +318,7 @@ readable by other accounts, that nobody can mint a match with a stranger and the
 them, that the abuse queue cannot be enumerated — is a claim about one file,
 `firestore.rules`, because there is no server to enforce anything else. Reading it
 carefully is not evidence. `rules-tests/` executes it against the Firestore emulator:
-**129 checks**, including the attacks each rule exists to stop.
+**130 checks**, including the attacks each rule exists to stop.
 
 ```sh
 npm install --prefix /tmp/zc-rules @firebase/rules-unit-testing firebase-tools
@@ -336,11 +336,13 @@ The daily usage counter is the one piece of client logic where reading the code 
 as weak an argument as it was for the rules: whether two concurrent bumps collapse into one
 is a property of a real database, not of anything visible in the file. `store-tests/` loads
 the **shipped** `public/js/data-store.js` into Node — `window` aliased to `globalThis`,
-`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **45
+`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **49
 checks**, including 20 concurrent `bumpUsage` calls on one document storing exactly 20, the
 midnight roll-over happening inside the same transaction, a bump writing `usage` and nothing
 else, 30 swipes replaying the deck's real learning-save-then-bump ordering and storing exactly
-30, and an account deletion that has to leave nothing of itself in any collection.
+30, an account deletion that has to leave nothing of itself in any collection, and a 520-message
+conversation that has to stay live at its newest end, survive a rewind, and leave nothing
+underneath it when it is finally unmatched.
 
 ```sh
 npm install --prefix /tmp/zc-emu firebase @firebase/rules-unit-testing firebase-tools
@@ -402,7 +404,7 @@ of its own, so a failed download reads as infrastructure rather than as a red te
 than either suite does. The `e2e` job runs the browser suite twice: once bare, which is what
 a contributor with nothing installed gets and which proves the Firebase spec skips rather
 than silently passing, and once inside `emulators:exec`, which is the only run in which every
-spec executes and therefore the only one that can hold the 218-check total to account. There are no secrets and no deploy step — deploying stays a
+spec executes and therefore the only one that can hold the 240-check total to account. There are no secrets and no deploy step — deploying stays a
 deliberate local `npm run deploy`.
 
 ---
@@ -535,7 +537,13 @@ These are real, and worth knowing before you show this to anyone:
     listens for `storage` events and supports several tabs of the same browser, and the demo
     adapter's bump is still a `localStorage` read-modify-write two of them can race. It shares
     the same pure decision function as the Firestore path, which buys agreement between the
-    two adapters — not a distributed guarantee.
+    two adapters — not a distributed guarantee. The same is true of the rewind's
+    matched-pair refusal: `localStorage` has no compare-and-swap, so a reciprocal like landing
+    in one tab between the check and the write in another is not excluded. It is bounded,
+    which is the part worth knowing — `undoSwipe` no longer deletes a match or its messages
+    under any circumstances, so losing that race costs a swipe row and a card back on the
+    deck, not somebody's conversation. The Firestore path has no such window: the read and
+    the delete are one transaction.
   - **The proof is an emulator over loopback**, not a claim about production latency.
     Contention windows are wider on a real network and the SDK's transaction retry budget is
     finite, so sustained contention can still exhaust it and fall back to the warn path.

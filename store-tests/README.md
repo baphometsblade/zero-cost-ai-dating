@@ -133,7 +133,7 @@ One spec per property. `tests/docs.test.js` fails if a spec exists without a row
 | `specs/05-swipe-race.store.js` | a document save in flight cannot eat the counter, or be eaten by it |
 | `specs/06-projection-order.store.js` | a racing save cannot leave the public `discovery/{uid}` projection behind the private document |
 | `specs/07-deletion.store.js` | deleting an account leaves nothing of it behind — every collection enumerated, not just the ids the test knows about, plus the match's message subcollection; a report *about* the account is the documented exception and stays in the queue |
-| `specs/08-conversation.store.js` | a conversation stays live past the listener's window — seeded beyond both the current 200 and the 500 the listener used to ask for — and a rewind takes its messages with the match, which the message-delete rule stops being able to authorise once the parent is gone |
+| `specs/08-conversation.store.js` | a conversation stays live past the listener's window — seeded beyond both the current 200 and the 500 the listener used to ask for — survives a rewind of the swipe that led to it, because the reciprocal like can arrive after the swipe the caller remembers, and leaves nothing underneath it when `unmatch` finally removes it, which the message-delete rule stops being able to authorise once the parent is gone |
 
 Each spec starts from a cleared database, but the store itself is loaded once per process
 (the IIFE returns early on a second load, and `require` caches), so specs use their own

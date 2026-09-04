@@ -817,28 +817,30 @@
     },
 
     async undoSwipe(fromUid, toUid) {
+      // The same refusal the Firebase adapter makes, for the same reason, and
+      // stated here rather than shared because the two adapters diverging
+      // quietly is the failure this project keeps finding in itself.
+      //
+      // localStorage has no compare-and-swap, so this is a check followed by a
+      // write and cannot be anything else. The match is therefore read last,
+      // immediately before the write, leaving the smallest window a second tab
+      // could land a reciprocal like in — and the check stays unconditional:
+      // moving it inside `if (swipes[id])` would narrow the window by one more
+      // read at the cost of answering `ok: true` for a matched pair whose
+      // swipe row is already gone, which would put their card back on the deck.
+      // What survives the window is bounded and destroys nothing: the match and
+      // its messages are no longer deleted by this function at all, so the
+      // worst outcome is a swipe row removed a moment late. README's
+      // Limitations section says so out loud.
       const swipes = readSwipes();
       const id = swipeId(fromUid, toUid);
+      const matches = readMatches();
+      if (matches[pairId(fromUid, toUid)]) return { ok: false, reason: 'matched' };
       if (swipes[id]) {
         delete swipes[id];
         writeSwipes(swipes);
       }
-      // A rewind also unwinds the match that swipe created.
-      const matches = readMatches();
-      const matchId = pairId(fromUid, toUid);
-      let removedMatch = false;
-      if (matches[matchId]) {
-        delete matches[matchId];
-        writeMatches(matches);
-        const messages = readMessages();
-        if (messages[matchId]) {
-          delete messages[matchId];
-          writeMessages(messages);
-        }
-        removedMatch = true;
-        pollAll();
-      }
-      return { ok: true, removedMatch: removedMatch };
+      return { ok: true };
     },
 
     async getLikesReceived(uid) {
@@ -1608,25 +1610,33 @@
     },
 
     async undoSwipe(fromUid, toUid) {
-      await db().collection('swipes').doc(swipeId(fromUid, toUid)).delete();
-      const matchId = pairId(fromUid, toUid);
-      const matchRef = db().collection('matches').doc(matchId);
-      const snap = await matchRef.get();
-      let removedMatch = false;
-      if (snap.exists) {
-        // Messages first, for the reason unmatch() states two functions above:
-        // the message-delete rule proves membership through the parent match,
-        // so a match deleted with messages still under it leaves them not
-        // merely orphaned but permanently undeletable — the only rule that
-        // could authorise removing them checks a document that no longer
-        // exists. This function used to delete the match on its own, so a
-        // rewind across a conversation left its contents in the project for
-        // good. The demo adapter has always dropped them.
-        await deleteMatchMessages(matchRef);
-        await matchRef.delete();
-        removedMatch = true;
-      }
-      return { ok: true, removedMatch: removedMatch };
+      const swipeRef = db().collection('swipes').doc(swipeId(fromUid, toUid));
+      const matchRef = db().collection('matches').doc(pairId(fromUid, toUid));
+
+      // Read the match and delete the swipe in one transaction, and refuse if
+      // the match is there. Both halves matter.
+      //
+      // The refusal, because the caller cannot make this decision. dashboard.js
+      // does check — "Rewind cannot undo a match" — but against `entry.matched`,
+      // which is stamped when the swipe is written and never looked at again.
+      // It is true only for the swipe that completed the pair. Like somebody
+      // who has not liked you back and it is false, correctly; when they like
+      // you back a minute later the match exists, messages can already be in
+      // it, and the flag still says there is nothing to protect. Undoing then
+      // is not undoing your own action — it deletes a conversation from
+      // somebody who never touched the rewind button, and they are not told.
+      //
+      // The transaction, because the whole failure is a race. A get() followed
+      // by a delete() leaves exactly the window being closed here: a match
+      // created in between would be missed the same way, for the same reason.
+      // Firestore replays a transaction whose read has moved, so the retry
+      // sees the match that appeared.
+      return db().runTransaction(async function (tx) {
+        const snap = await tx.get(matchRef);
+        if (snap.exists) return { ok: false, reason: 'matched' };
+        tx.delete(swipeRef);
+        return { ok: true };
+      });
     },
 
     async getLikesReceived(uid) {
@@ -2111,10 +2121,16 @@
     },
 
     /**
-     * Undo a swipe, removing the match it created if there is one.
+     * Undo a swipe — unless it has since become a match.
+     *
+     * A match is two people's, so a rewind may not take one down: the other
+     * side can already have read it and written into it. Refusing is not the
+     * caller's job, because only storage knows whether the reciprocal like
+     * arrived after the swipe was recorded.
      * @param {string} fromUid swiper
      * @param {string} toUid swiped
-     * @returns {Promise<{ok:boolean, removedMatch:boolean}>}
+     * @returns {Promise<{ok:boolean, reason?:string}>} ok false with
+     *   reason 'matched' when the pair have matched and nothing was deleted
      */
     async undoSwipe(fromUid, toUid) {
       await ready;
