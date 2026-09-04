@@ -241,10 +241,15 @@ service cloud.firestore {
           // (`rules-tests/specs/08-budget.rules.js`), and a check that says nothing
           // new is the first thing to spend.
           //
-          // A `hasAll` naming seven required keys: every one of them is
-          // dereferenced unconditionally in the lines below, and reading a key a
-          // map does not have is an error that denies the write. `01-users`
-          // removes each of the seven in turn and confirms the write still fails.
+          // A `hasAll` naming seven required keys. Six of them — email, displayName,
+          // createdAt, plan, profile, preferences — are dereferenced unconditionally
+          // in the lines below, and reading a key a map does not have is an error
+          // that denies the write. The seventh, `uid`, is not dereferenced here at
+          // all any more (see the next paragraph); it is the `allow` rules that
+          // reach for it, and they deny for the same reason. `01-users` removes each
+          // of the seven in turn and confirms the write still fails, which is the
+          // claim that matters — this paragraph only says where each denial comes
+          // from, and it said "every one of them" while one of them was elsewhere.
           //
           // `d.uid is string`: create requires `request.resource.data.uid == uid`,
           // which is the document id and therefore a string, and update freezes it

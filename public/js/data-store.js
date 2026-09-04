@@ -34,7 +34,11 @@
     messages: 'zc.demo.messages',
     reports: 'zc.demo.reports',
     session: 'zc.demo.session',
-    seeded: 'zc.demo.seeded'
+    seeded: 'zc.demo.seeded',
+    // Not a `demo` key, because this one matters most in firebase mode: it is the
+    // client-side memory behind touchActive's throttle, and the write it prevents
+    // is a Firestore write. See `touchActive`.
+    lastTouch: 'zc.lastTouch'
   };
 
   const SEED_VERSION = 1;
@@ -2494,7 +2498,35 @@
     }
   })();
 
-  const lastTouch = {};
+  /**
+   * When each uid last had its `lastActiveAt` written, in `localStorage` rather
+   * than in memory.
+   *
+   * This was a bare `{}`, and in a multi-page app that is not a throttle. Every
+   * page here is its own HTML document, so every navigation is a fresh JS context
+   * with an empty map — and `app.js` calls `touchActive` on every page that
+   * resolves a user. Six pages in a minute was six writes, while
+   * `docs/ARCHITECTURE.md` said "one write per five minutes". The bound held only
+   * within a single page, which is the one case it was not needed for.
+   *
+   * Storage failures are not an error here: a throttle that cannot remember is a
+   * throttle that lets the write through, which is the safe direction — the write
+   * is what keeps the activity score honest.
+   */
+  let touchMemo = {};
+
+  function readLastTouch() {
+    // Storage first, so the bound spans navigations; the in-memory copy is the
+    // fallback for a browser that has storage disabled or full, where the throttle
+    // should still hold within the page rather than vanishing entirely.
+    const stored = readJson(KEYS.lastTouch, null);
+    return isPlainObject(stored) ? stored : touchMemo;
+  }
+
+  function saveLastTouch(map) {
+    touchMemo = map;
+    writeJson(KEYS.lastTouch, map);
+  }
 
   function planLimits(plan) {
     const limits = (ZC.config && ZC.config.limits) || {};
@@ -2558,8 +2590,11 @@
       await ready;
       if (!uid) return false;
       const now = Date.now();
-      if (lastTouch[uid] && now - lastTouch[uid] < TOUCH_THROTTLE_MS) return false;
-      lastTouch[uid] = now;
+      const seen = readLastTouch();
+      const last = Number(seen[uid]);
+      if (last && now - last < TOUCH_THROTTLE_MS) return false;
+      seen[uid] = now;
+      saveLastTouch(seen);
       return adapter.setLastActive(uid, new Date(now).toISOString());
     },
 

@@ -323,12 +323,21 @@ changes. `store-tests/specs/11-live-cost.store.js` measures that.
 - `getUsage` auto-resets when `usage.date` is not today, so daily limits need no scheduler.
 - `canSpend(uid, field)` returns `{ allowed, remaining, limit, plan }` by reading the plan
   limits out of `ZC.config`, and is called *before* every spend.
-- `touchActive` is throttled to one write per five minutes, because `lastActiveAt` feeds the
-  activity score but is not worth a write per navigation. It is called on every auth
-  resolution and on every page that resolves a user, so without the throttle a browsing
-  session is one Firestore write per navigation. `store-tests/specs/03-writes.store.js`
-  executes the sentence — the second touch must not write, and a touch after the window
-  must, which is what pins the five minutes rather than merely "some throttle".
+- `touchActive` is throttled to one write per five minutes **across page loads**, because
+  `lastActiveAt` feeds the activity score but is not worth a write per navigation. It is
+  called on every auth resolution and on every page that resolves a user, so without the
+  throttle a browsing session is one Firestore write per navigation.
+  "Across page loads" is the load-bearing part and was not true until it was measured:
+  the last-write times lived in a module-level object, and every page here is its own
+  HTML document, so each navigation started with an empty map and wrote again. The bound
+  held only within a single page — the one case it was not needed for. They live in
+  `localStorage` now (`zc.lastTouch`), with the in-memory copy kept as a fallback for a
+  browser that has storage disabled, where a throttle that cannot remember should still
+  hold within the page rather than disappear.
+  `store-tests/specs/03-writes.store.js` executes all of it: the second touch must not
+  write, a touch after the window must — which pins the five minutes rather than merely
+  "some throttle" — and ageing the *stored* stamp must change the answer, which is what a
+  fresh page with fresh memory and the same storage actually does.
 
 ---
 

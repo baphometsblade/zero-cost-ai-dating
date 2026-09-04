@@ -698,7 +698,9 @@
       return;
     }
     if (raw.length > MAX_PHOTO_URL) {
-      setError('photo', 'That link is ' + (raw.length - MAX_PHOTO_URL) + ' characters too long — keep it under ' +
+      // "under 1024" was wrong by one: the test is `> MAX_PHOTO_URL`, so exactly
+      // 1024 is accepted — and the hint beside this field says "up to 1024".
+      setError('photo', 'That link is ' + (raw.length - MAX_PHOTO_URL) + ' characters too long — the limit is ' +
         MAX_PHOTO_URL + '.');
       refs.photoInput.focus();
       return;

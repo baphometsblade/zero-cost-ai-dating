@@ -200,5 +200,30 @@ module.exports = {
     t.check('but once the five minutes are up it writes again',
       advanced === true && afterJump !== afterFirst,
       k.show({ returned: advanced, moved: afterJump !== afterFirst }));
+
+    // And the half that makes the throttle a throttle in THIS app. Every page here
+    // is its own HTML document, so every navigation is a fresh JS context. While
+    // the last-write times lived in a module-level `{}`, that map was empty again
+    // on each page and `app.js` calls `touchActive` on every page that resolves a
+    // user: six pages in a minute was six writes, against a documented bound of one
+    // per five minutes. The bound held only within a single page — the one case it
+    // was not needed for.
+    //
+    // They live in `localStorage` now, so the proof is that changing what is STORED
+    // changes the answer. A fresh page has fresh memory and the same storage, which
+    // is exactly this.
+    const KEY = k.ctx.ZC.store.KEYS.lastTouch;
+    const held = JSON.parse(globalThis.localStorage.getItem(KEY) || '{}');
+    t.check('the throttle remembers in storage, not only in memory',
+      typeof held[touchUid] === 'number',
+      KEY + ' = ' + k.show(held));
+
+    held[touchUid] = Date.now() - (5 * 60 * 1000 + 1000);
+    globalThis.localStorage.setItem(KEY, JSON.stringify(held));
+    const afterAging = await k.store.touchActive(touchUid);
+    t.check('and reads it back, so a new page throttles on what the last one wrote',
+      afterAging === true,
+      'aged the stored stamp past the window and the next touch ' +
+      (afterAging ? 'wrote, as a fresh page would' : 'did NOT write — memory won over storage'));
   }
 };
