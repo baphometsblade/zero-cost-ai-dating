@@ -86,6 +86,16 @@ function outage() {
   return err;
 }
 
+/**
+ * A failure that is not a refusal but says the words anyway — a wrapped error,
+ * a proxy, a log line quoted into a message. The refusal test used to fall back
+ * to matching the message when no code was present, which would have swallowed
+ * this and answered "no match" for a write whose outcome is unknown.
+ */
+function impostor() {
+  return new Error('Upstream request failed: PERMISSION_DENIED reported by the gateway.');
+}
+
 module.exports = {
   title: 'A match document the rules refuse does not read as a lost swipe',
 
@@ -172,5 +182,31 @@ module.exports = {
     t.check('a failure that is not a refusal is not answered as "no match"',
       outageError !== null && outageError.code === 'unavailable',
       outageError ? outageError.code + ': ' + outageError.message : 'resolved instead of throwing');
+
+    // And the refusal is decided by the code, not by the words. A rejection that
+    // merely *says* permission denied — a wrapped error, a gateway message quoted
+    // into one — is still a failure of unknown outcome, and answering "no match"
+    // for it would be the same false confidence in a different disguise.
+    const third = 'refused-third';
+    await k.admin.set('users', third, k.h.userDoc(third));
+    await k.admin.set('swipes', third + '_' + me, {
+      id: third + '_' + me, from: third, to: me, action: 'like', createdAt: '2026-01-02T00:00:00.000Z'
+    });
+
+    const impostorTally = { denied: 0 };
+    k.ctx.ZC.firebase.db = refusingMatchWrites(real, impostorTally, impostor);
+    let impostorError = null;
+    try {
+      await k.store.recordSwipe(me, third, 'like');
+    } catch (err) {
+      impostorError = err;
+    } finally {
+      k.ctx.ZC.firebase.db = real;
+    }
+    k.ctx.drainWarnings();
+
+    t.check('a failure that only says "permission denied" is not treated as one',
+      impostorError !== null && !impostorError.code,
+      impostorError ? String(impostorError.message) : 'resolved instead of throwing');
   }
 };

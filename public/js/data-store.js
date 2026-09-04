@@ -1248,18 +1248,25 @@
   /**
    * Whether a Firestore rejection is the rules refusing the write.
    *
-   * The compat SDK sets `code` to 'permission-denied'; the message is checked
-   * as well because a rejection that reaches here without a code — a wrapped
-   * error, a future SDK — should still be recognised rather than treated as an
-   * unknown failure and re-thrown at the user.
+   * The code, and only the code. This also matched the *message* at first —
+   * belt and braces for a rejection that arrived wrapped or from some future
+   * SDK — and that is a guess dressed as a fallback: any error text may contain
+   * those two words, and a wrapped outage that quoted them would have been
+   * swallowed and answered as "no match", which is the one thing the caller
+   * must not be told when the write's outcome is unknown.
+   *
+   * The trade is deliberate and it is not free. If an SDK ever stops setting
+   * `code`, a refusal will surface as a failed swipe rather than a quiet
+   * no-match. That is the safer direction — a visible wrong answer beats a
+   * silent one — and unlike a message change it is a specific, detectable
+   * break that the emulator suite would show.
    * @param {*} err a rejection from a Firestore write
    * @returns {boolean}
    */
   function isPermissionDenied(err) {
     if (!err) return false;
     const code = String(err.code || '');
-    if (code === 'permission-denied' || code === 'firestore/permission-denied') return true;
-    return /permission[\s_-]?denied/i.test(String(err.message || ''));
+    return code === 'permission-denied' || code === 'firestore/permission-denied';
   }
 
   async function deleteMatchMessages(matchRef) {
