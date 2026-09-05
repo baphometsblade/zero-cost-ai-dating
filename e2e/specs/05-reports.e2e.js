@@ -89,6 +89,62 @@ module.exports = {
     });
     t.check('the retraction reaches the store, not just the DOM', remaining === 0, 'stored=' + remaining);
 
+    /* ---- a filing that fails must not also take away the block ---- */
+
+    // The catch used to `return`, so the one person whose report did not go through
+    // was also the one denied the protective action they could still take. Nothing in
+    // the suite reached this branch, because the store's report write does not fail on
+    // its own — so the failure is injected at the facade, which is the seam both
+    // adapters share.
+    await page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#match-list .match-row');
+    await page.locator('#match-list .match-row').first().click();
+    await page.waitForSelector('#chat:not(.hidden)');
+    // matches.js logs the rejection, which is the correct behaviour and would
+    // otherwise fail this spec's own zero-console-error check. Declared narrowly and
+    // closed again below, so nothing else can hide inside the window.
+    ctx.session.expectConsoleError(/Could not file the report/);
+    await page.evaluate(function () {
+      window.ZC.store.reportUser = function () {
+        return Promise.reject(new Error('That report could not be filed.'));
+      };
+    });
+    await page.click('#chat-menu');
+    await h.clickModalAction(page, 'Report');
+    await page.waitForSelector('.modal-backdrop select.select');
+    await page.selectOption('.modal-backdrop select.select', { index: 1 });
+    await page.fill('.modal-backdrop textarea.textarea', DETAILS);
+    await h.clickModalAction(page, 'Send report');
+
+    // The toast is read BEFORE the dialog wait, not after: toasts fade, and with the
+    // early `return` restored the dialog wait burns five seconds first, so a check that
+    // read it afterwards would fail for the wrong reason and say nothing useful.
+    await page.waitForSelector('.toast-host .toast');
+    const failToast = await page.evaluate(function () {
+      const host = document.querySelector('.toast-host');
+      return host ? host.textContent.trim() : '';
+    });
+    t.check('a failed filing says so rather than claiming the report went through',
+      /could not be filed/i.test(failToast), failToast);
+
+    // Bounded, and the absence is the finding: with the early `return` back in place
+    // the dialog never opens, and an unbounded wait would report that as a 20-second
+    // timeout on "spec ran to completion" rather than as the check that names it.
+    const offered = await page.waitForSelector('.modal-backdrop .modal-title', { timeout: 5000 })
+      .then(function () { return true; }, function () { return false; });
+    const offerTitle = offered ? (await page.textContent('.modal-backdrop .modal-title')).trim() : '';
+    t.check('a report that could not be filed still offers the block',
+      offered && /^Block /.test(offerTitle),
+      offered ? offerTitle : 'no dialog opened — the failure branch returned early, so the ' +
+        'one person whose report did not go through is also the one denied the block');
+    if (offered) {
+      await h.clickModalAction(page, 'Cancel');
+      await page.waitForSelector('.modal-backdrop', { state: 'detached' });
+    }
+    ctx.session.expectConsoleError(null);
+    // No reload here: the block below navigates to matches.html itself, and a fresh
+    // document is what drops the injected `reportUser` along with everything else.
+
     /* ---- the other branch: report, then accept the block ---- */
     await page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#match-list .match-row');

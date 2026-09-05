@@ -80,6 +80,14 @@ Two consequences of folding Firestore onto the page's origin, both handled in
   it, which is a console error in a browser even though nothing is wrong. The spec accounts
   for that shape explicitly rather than the harness widening its rule for everyone.
 
+A spec that deliberately MAKES the app fail — injecting a rejected store call to reach a
+failure branch — has the same problem from the other side: the `console.error` it provokes
+is the app behaving correctly, and every session treats a console error as a failure of the
+whole spec. `session.expectConsoleError(/pattern/)` opens a window for exactly that message
+and `expectConsoleError(null)` closes it again. A pattern rather than a boolean, so arming
+it cannot swallow a second, unrelated error that happens to land inside the window — the
+same reasoning as `expectNetworkErrors`, which is deliberately narrow for the same reason.
+
 If the machine cannot reach `www.gstatic.com`, point `E2E_FIREBASE_SDK` at a directory
 holding the CDN's own bundles (`firebase-app-compat.js`, `firebase-auth-compat.js`,
 `firebase-firestore-compat.js` for the version the pages pin) and the session serves those

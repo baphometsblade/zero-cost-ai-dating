@@ -212,10 +212,28 @@ test('every key a closed allowlist admits is one something validates', function 
 
   // Every closed key list in the file, wherever it is written — inside a validator
   // or inline in an `allow` statement.
-  const sites = [...RULES_CODE.matchAll(/(\w+(?:\.\w+)*)\.keys\(\)\.hasOnly\(\[([\s\S]*?)\]\)/g)];
-  assert.ok(sites.length >= 10,
-    'found only ' + sites.length + ' closed key lists in firestore.rules — the pattern ' +
-    'is no longer finding them, which would make this test vacuous');
+  // `\s*` before the `[`, because the list is allowed to start on the next line and a
+  // pure reformat must not change what this test covers. It did: wrapping one
+  // `keys().hasOnly(` onto two lines took that whole key list out of scope, and the
+  // floor below absorbed the loss without a word.
+  const sites = [...RULES_CODE.matchAll(/(\w+(?:\.\w+)*)\.keys\(\)\.hasOnly\(\s*\[([\s\S]*?)\]\)/g)];
+
+  // Named, not counted. `>= 10` over 11 real sites meant one could always leave — by
+  // being deleted, renamed, moved, or merely rewrapped — and the check would still
+  // report itself healthy while every key that list admitted went unexamined. Two
+  // `personalityOk` entries are correct: one per match block, because a rules function
+  // cannot cross one.
+  const OWNERS = ['allow statement', 'discoveryOk', 'discoveryPrefsOk', 'discoveryProfileOk',
+    'locationOk', 'matchOk', 'personalityOk', 'personalityOk', 'reportOk', 'swipeOk',
+    'userDocOk'];
+  assert.deepEqual(sites.map(function (list) {
+    const owner = decls.filter(function (d) { return list.index > d.start && list.index < d.end; })[0];
+    return owner ? owner.name : 'allow statement';
+  }).sort(), OWNERS,
+    'the closed key lists firestore.rules writes are no longer the ones this test knows ' +
+    'about. A list that has moved, been renamed, been reformatted so the pattern misses ' +
+    'it, or been deleted takes every key it admitted out of the scan below with it — ' +
+    'silently, which is the whole reason this is an inventory and not a floor.');
 
   const unexamined = [];
   sites.forEach(function (list) {
@@ -381,32 +399,84 @@ test('every list the rules accept is bounded in length AND in contents', functio
   // to add it here. The two together mean: known lists can never leave, new lists
   // arrive automatically.
   const KNOWN = ['p.interests', 'p.photos', 'd.blocked', 'f.interestedIn', 'd.users',
-    'm.keys()', 'm.values()'];
+    'm.keys()', 'm.values()', 'd.unread.keys()'];
 
-  /** Every expression firestore.rules treats as a list. */
-  const lists = new Set(KNOWN);
-  for (const m of RULES_CODE.matchAll(/([A-Za-z][\w.]*)\s+is list/g)) lists.add(m[1]);
-  for (const m of RULES_CODE.matchAll(/(?<!function )listCharsOk\(([^,]+),/g)) lists.add(m[1].trim());
+  /** Every expression firestore.rules treats as a list, found rather than named. */
+  const derived = new Set();
+  for (const m of RULES_CODE.matchAll(/([A-Za-z][\w.]*)\s+is list/g)) derived.add(m[1]);
+  for (const m of RULES_CODE.matchAll(/(?<!function )listCharsOk\(([^,]+),/g)) derived.add(m[1].trim());
   for (const m of RULES_CODE.matchAll(/([A-Za-z][\w.]*(?:\(\))?)\.hasOnly\(\[/g)) {
-    // `keys().hasOnly` is a map's key list, policed by the check above; a bare
-    // `X.hasOnly` is a value constraint on a list.
-    if (!m[1].endsWith('keys()')) lists.add(m[1]);
+    // `keys().hasOnly([...])` is a map's key list against a literal, policed by the
+    // check above; a bare `X.hasOnly([...])` is a value constraint on a list.
+    if (!m[1].endsWith('keys()')) derived.add(m[1]);
   }
 
-  assert.ok(lists.size >= 6,
-    'found only ' + lists.size + ' list-typed expressions in firestore.rules — the ' +
-    'patterns are no longer finding them, which would make this test vacuous');
+  // `A.keys().hasOnly(B)` — a key list pinned to ANOTHER list rather than to a literal.
+  // `d.unread.keys().hasOnly(d.users)` is the only one today, and it is both bounds at
+  // once: map keys are unique, so there cannot be more of them than `d.users` has
+  // elements, and each one IS one of those elements. That reasoning only holds while
+  // `d.users` is itself inventoried, so the delegation is RECORDED rather than waved
+  // through — rewriting the clause takes the delegation with it and the expression
+  // falls back to needing bounds of its own.
+  const pinnedTo = new Map();
+  for (const m of RULES_CODE.matchAll(/([A-Za-z][\w.]*\.keys\(\))\.hasOnly\(([A-Za-z][\w.]*)\)/g)) {
+    derived.add(m[1]);
+    pinnedTo.set(m[1], m[2]);
+  }
+
+  const lists = new Set([...KNOWN, ...derived]);
+
+  // A floor under the DERIVATION, not under the union — `lists.size >= 6` could never
+  // fail, because KNOWN seeds it with more than six before a single pattern runs. It
+  // was written to catch a pattern going dark and could not have. Each of the four
+  // patterns above is the only finder of at least one KNOWN name, so this is exact
+  // without being a ratchet: a new list nobody typed here still arrives by derivation,
+  // which is the whole contract.
+  const undetected = KNOWN.filter(function (expr) { return !derived.has(expr); });
+  assert.deepEqual(undetected, [],
+    'firestore.rules no longer reads as treating these known lists as lists: ' +
+    JSON.stringify(undetected) + '. One of the derivation patterns (`is list`, ' +
+    '`listCharsOk(`, `.hasOnly([`, `.keys().hasOnly(`) has stopped matching, so any ' +
+    'list added from here on is outside this check.');
 
   const unbounded = [];
   lists.forEach(function (expr) {
     if (Object.prototype.hasOwnProperty.call(EXEMPT, expr)) return;
+    // Delegated, and only to something this check is itself watching.
+    if (lists.has(pinnedTo.get(expr))) return;
     const q = expr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const length = new RegExp(q + '\\.size\\(\\) [<=]= \\d+').test(RULES_CODE);
-    const contents = new RegExp('listCharsOk\\(' + q + ',').test(RULES_CODE) ||
-      new RegExp(q + '\\.hasOnly\\(\\[').test(RULES_CODE);
-    if (!length || !contents) {
-      unbounded.push(expr + ' (length ' + (length ? 'yes' : 'NO') +
+
+    // COUNTED, not tested for presence. Every bound in this file is stated TWICE —
+    // once in `users/{uid}` and once in the world-readable `discovery/{uid}` — because
+    // a rules function cannot cross a match block. A boolean over the whole file is
+    // satisfied by either copy, so deleting a bound from the public one, or drifting
+    // its cap, left this green. What must hold is that the two KINDS of bound appear
+    // the same number of times and that every copy names the same number.
+    const lengths = [...RULES_CODE.matchAll(new RegExp(q + '\\.size\\(\\) [<=]= (\\d+)', 'g'))]
+      .map(function (m) { return m[1]; });
+    const chars = [...RULES_CODE.matchAll(new RegExp('listCharsOk\\(' + q + ', (\\d+)\\)', 'g'))]
+      .map(function (m) { return m[1]; });
+    const only = (RULES_CODE.match(new RegExp(q + '\\.hasOnly\\(\\[', 'g')) || []).length;
+    const contents = chars.length + only;
+
+    if (!lengths.length || !contents) {
+      unbounded.push(expr + ' (length ' + (lengths.length ? 'yes' : 'NO') +
         ', contents ' + (contents ? 'yes' : 'NO') + ')');
+      return;
+    }
+    // Counts rather than a fixed 2: `d.blocked` and `m.keys()` live in one match block
+    // only and are stated once. What is not allowed is for the two kinds to disagree.
+    if (lengths.length !== contents) {
+      unbounded.push(expr + ' (bounded in length ' + lengths.length + ' time(s) but in ' +
+        'contents ' + contents + ' — one copy is carrying only half its bounds)');
+    }
+    if (new Set(lengths).size !== 1) {
+      unbounded.push(expr + ' (length capped at ' + JSON.stringify(lengths) +
+        ' — the copies disagree, and the loosest one is the one that applies there)');
+    }
+    if (new Set(chars).size > 1) {
+      unbounded.push(expr + ' (listCharsOk capped at ' + JSON.stringify(chars) +
+        ' — the copies disagree, and the loosest one is the one that applies there)');
     }
   });
 
@@ -420,7 +490,10 @@ test('every list the rules accept is bounded in length AND in contents', functio
   // The exemptions must stay real: an expression named here that the rules no
   // longer contain is a stale excuse, and the next list to need one will be
   // written next to it.
-  const stale = Object.keys(EXEMPT).filter(function (expr) { return !lists.has(expr); });
+  // Against `derived`, not `lists`: `lists` contains KNOWN, and both exempted names are
+  // in KNOWN, so this could never fire either. An exemption is a claim about what the
+  // RULES say, so it has to be checked against what the rules are found to say.
+  const stale = Object.keys(EXEMPT).filter(function (expr) { return !derived.has(expr); });
   assert.deepEqual(stale, [],
     'these expressions are exempted but firestore.rules no longer treats them as ' +
     'lists: ' + JSON.stringify(stale) + '. Remove the exemption.');
