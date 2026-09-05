@@ -248,7 +248,7 @@ npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.
 
 ### Unit suites
 
-Fourteen suites on Node's built-in runner — **239 checks**, no install, no browser, seconds:
+Fourteen suites on Node's built-in runner — **253 checks**, no install, no browser, seconds:
 
 | Suite | What it pins down |
 | --- | --- |
@@ -274,7 +274,7 @@ store and its daily counter, the auth backend, the pure half of the utilities, t
 schema, the static HTML. It cannot reach the flows that only exist in a DOM — signing in,
 the deck and its keyboard, the match burst, chat that persists, reporting someone, deleting
 your account, and the service worker serving the app with the network gone. Those live in
-`e2e/`: **240 checks** across the twelve specs that need nothing installed but a browser, each
+`e2e/`: **246 checks** across the twelve specs that need nothing installed but a browser, each
 run at 390x844 and most of them at 1280x800 as well — plus a thirteenth, `10-firebase.e2e.js`,
 which needs the Firebase emulators and skips, by name and reason, when they are not running.
 
@@ -297,7 +297,7 @@ Firebase rather than `localStorage`: the real SDK, real Auth, real Firestore, an
 read back out of the emulator instead of off the page. It drives the pages **with their real
 CSP meta tag** — the emulators are reached through the page's own origin rather than by
 relaxing the policy, which is the whole reason it can exist; the Limitations section explains
-the constraint it is working around. With both emulators up the run is **259 checks**, all
+the constraint it is working around. With both emulators up the run is **265 checks**, all
 passing.
 
 It did not start that way. On its first run one check was red, and it had found a real bug:
@@ -309,7 +309,7 @@ fixture in `rules-tests/` ever used a null there. The rule now accepts null, and
 checks pin the shape.
 
 Without an emulator the runner prints `SKIP` and records nothing, so `npm run test:e2e` on a
-bare machine is still 240/240 — and CI runs it both ways, so the skip path and the emulator
+bare machine is still 246/246 — and CI runs it both ways, so the skip path and the emulator
 path are each exercised on every push.
 
 ### Security rules tests
@@ -337,17 +337,17 @@ The daily usage counter is the one piece of client logic where reading the code 
 as weak an argument as it was for the rules: whether two concurrent bumps collapse into one
 is a property of a real database, not of anything visible in the file. `store-tests/` loads
 the **shipped** `public/js/data-store.js` into Node — `window` aliased to `globalThis`,
-`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **125
+`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **153
 checks**, including 20 concurrent `bumpUsage` calls on one document storing exactly 20, the
 midnight roll-over happening inside the same transaction, a bump writing `usage` and nothing
 else, 30 swipes replaying the deck's real learning-save-then-bump ordering and storing exactly
 30, an account deletion that has to leave nothing of itself in any collection, a 520-message
 conversation that has to stay live at its newest end, survive a rewind, and leave nothing
-underneath it when it is finally unmatched, a background refresh whose bill is counted
+underneath it when it is finally unmatched, a page load whose bill is counted
 document by document and has to come out the same against a swipe history twice as long — and
 a match document the rules refuse, which has to come back as "no match" rather than as a
 swipe the deck believes it lost, and the messaging and abuse-report paths — fifteen of the
-thirty-one facade methods had never run against a real Firestore at all, so the documents
+thirty-three facade methods had never run against a real Firestore at all, so the documents
 the adapter writes had never met the rules that judge them. And, in both directions, the two documents an account is
 split across: the counter the transaction stores and the projection the profile save
 publishes are each replayed against the real `firestore.rules` on a separate project, because
@@ -414,7 +414,7 @@ of its own, so a failed download reads as infrastructure rather than as a red te
 than either suite does. The `e2e` job runs the browser suite twice: once bare, which is what
 a contributor with nothing installed gets and which proves the Firebase spec skips rather
 than silently passing, and once inside `emulators:exec`, which is the only run in which every
-spec executes and therefore the only one that can hold the 259-check total to account. There are no secrets and no deploy step — deploying stays a
+spec executes and therefore the only one that can hold the 265-check total to account. There are no secrets and no deploy step — deploying stays a
 deliberate local `npm run deploy`.
 
 ---
@@ -529,18 +529,34 @@ These are real, and worth knowing before you show this to anyone:
   whether it *volunteers* the reason, and it no longer does — the console line names the
   document that was not written and nothing else. That removes the casual tell and not the
   determined one, which is the most a client-side project can claim.
-- **A match check that fails after the swipe is stored is not retried.** `recordSwipe`
-  writes the swipe and then looks for a reciprocal like; if that second half fails — a
-  dropped connection at the wrong moment — the swipe stands and no match document is
-  written. Nothing retries it. A match document is only ever created from inside
-  `recordSwipe`, and by then neither side will call it again for that pair: my swipe
-  exists, so the person is filtered out of my deck for good, and their like is answered,
-  so I leave their who-liked-you list. The result is a mutual like with no conversation,
-  in an app whose entire purpose is producing one. The deck says so plainly when it
-  happens and points at the only recovery there is — rewind and swipe again — rather
-  than claiming, as it briefly did, that the match will turn up on its own. The honest
-  fix is a reconciliation pass on load, and it has not been written.
-- **The badges are live now; the conversation list is not.** This used to
+- **A match check that fails after the swipe is stored is finished on the next page load,
+  but only by the device that lost it.** `recordSwipe` writes the swipe and then looks for
+  a reciprocal like; if that second half fails — a dropped connection at the wrong
+  moment — the swipe stands and no match document is written. Nothing used to retry it:
+  a match document was only ever created from inside `recordSwipe`, and by then neither
+  side would call it again for that pair, because my swipe exists so the person is
+  filtered out of my deck for good, and their like is answered so I leave their
+  who-liked-you list. A mutual like with no conversation, in an app whose entire purpose
+  is producing one.
+
+  What ships now is the reconciliation pass this bullet used to say had not been written.
+  It is a **note, not a sweep**, and the difference is the whole design: `unmatch` deletes
+  the match document and leaves *both* swipes, so "mutual like with no match document" is
+  byte-for-byte what a deliberately ended conversation looks like — a sweep would reopen
+  every one of them, on every page load. `store-tests/specs/16-reconcile.store.js` executes
+  that rather than arguing it: swap the note for the sweep and a conversation somebody
+  ended comes back. So the failing client writes a note before it starts, and the next page
+  load finishes what **this device** knows it began: three reads and one write, and **zero
+  reads on a page load that owes nothing**, which is what makes running it on every page
+  free. The repair reads the swipe rather than trusting the note, because the rules prove
+  only that the other person liked *me* and never look at my side — a note that outlived
+  its swipe would otherwise be a server-permitted resurrection.
+
+  The limit that remains, and it is real: it is **device-local**. A note lives in that
+  browser's `localStorage`, so a check lost on a phone is not finished by the same account
+  on a laptop, and a pair orphaned before this shipped stays orphaned. Repairing those would
+  need the sweep, and the sweep is wrong for the reason above.
+- **Both the badges and the conversation list are live now.** They used to
   be a 20-second poll that re-read every match *and a profile for each of them* — plus, on
   the premium plan, every inbound like and a profile for each of those — whether or not
   anything had changed. Two problems, one on top of the other. `getLikesReceived` read the
@@ -548,16 +564,28 @@ These are real, and worth knowing before you show this to anyone:
   already answered: 437 reads for a month of ordinary use, 837 once that history doubled,
   on a timer. And the poll spent the rest of it again every twenty seconds for as long as
   a tab stayed open, against a Spark project's 50,000 document reads a day.
-  What did NOT change, and the first version of this bullet wrongly implied had: `matches.js`
-  still refreshes the conversation list on its own 20-second timer (`LIST_POLL_MS`), and each
-  refresh calls `getMatches`, which bills one read per match plus one `discovery/{uid}` read for
-  each — precisely the "every match and a profile for each of them" shape described above. A tab
-  left open on `matches.html` therefore still has a standing cost; only the nav badges moved to
-  listeners. Moving that page onto `listenMatches` is the obvious next step and has not been done.
 
-  `app.js` now subscribes instead. A Firestore snapshot listener bills the documents it
-  first delivers and then only the ones that change, and the rows it delivers carry no
-  profiles, because a badge draws a number.
+  The badges moved first, and this bullet then said so in a way that implied the whole page
+  had — it had not, and the correction stayed here for several rounds while `matches.js` kept
+  its own `LIST_POLL_MS` timer. Measured against the emulator before removing it: **2N reads
+  a tick**, which at ten conversations is **3,600 an hour from one open tab, 86,400 a day —
+  1.7× the entire daily quota**, and the whole thing gone in fourteen hours from one person
+  leaving one tab open. Plus one more 2N on every window focus and one on every message sent.
+  It is now zero: `listenMatchViews` delivers the same conversation views, pushed. The page
+  calls `getMatches` **no times at all**, which `e2e/specs/03-matches.e2e.js` asserts by
+  wrapping the method and counting — one check covering all four call sites that were removed.
+
+  Both now subscribe. A Firestore snapshot listener bills the documents it
+  first delivers and then only the ones that change, and the rows `listenMatches` delivers
+  carry no profiles, because a badge draws a number — that contract is unchanged, which is
+  precisely why the list got a second method rather than an option on the first.
+  The two share **one** subscription: a second `onSnapshot` would have Firestore delivering
+  twice, and a delivery is what is billed, so one message arriving would cost two reads
+  instead of one for as long as the page stayed open.
+  `store-tests/specs/15-live-list.store.js` counts that too — the badge costs six, the list
+  costs six more for the faces and nothing for the rows, idle costs nothing, one conversation
+  changing costs **one read for both subscribers together**, and a new match with a stranger
+  costs two.
   `store-tests/specs/11-live-cost.store.js` counts it rather than quoting the
   documentation: twelve matches cost twelve reads to subscribe, **nothing at all** while
   nothing happens, and **one** read when one conversation changes.

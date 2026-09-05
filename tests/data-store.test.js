@@ -959,6 +959,305 @@ test('a backwards clock correction releases the presence throttle instead of lat
   }
 });
 
+test('a match check that never ran is finished on the next page load', async function () {
+  // `recordSwipe` writes the swipe and THEN looks for a reciprocal like. When the
+  // swipe lands and the match step does not, nothing anywhere retried: my swipe
+  // exists so that person leaves my deck for good, their like is answered so I
+  // leave their who-liked-you list, and neither client calls `recordSwipe` for
+  // the pair again. The two were matched and neither would ever be told.
+  await resetWorld();
+  const me = 'demo-you';
+  const them = 'ava-nakamura';
+  await store.recordSwipe(them, me, 'like');
+
+  let failed = null;
+  await withStorageRefusing([KEYS.matches], async function () {
+    try {
+      await store.recordSwipe(me, them, 'like');
+    } catch (err) {
+      failed = err;
+    }
+  });
+  assert.ok(failed && failed.swipeStored, 'the swipe landed and the match did not');
+  assert.equal(JSON.parse(backing.get(KEYS.matches) || '{}')[[me, them].sort().join('_')],
+    undefined, 'so there is no match document — which is the state being repaired');
+
+  const result = await store.reconcileMatches(me);
+  assert.deepEqual({ checked: result.checked, repaired: result.repaired, pending: result.pending },
+    { checked: 1, repaired: 1, pending: 0 },
+    'the next page load finishes the one check it knows it started');
+  const matches = await store.getMatches(me);
+  assert.ok(matches.some(function (m) { return m.otherUid === them; }),
+    'and the conversation is there');
+});
+
+test('and a page load with nothing owed does no work at all', async function () {
+  // The reason this can run on every page: the log is empty for anyone who has
+  // never lost a check, and an empty log is an early return before any read.
+  await resetWorld();
+  const before = await store.reconcileMatches('demo-you');
+  assert.deepEqual(before, { checked: 0, repaired: 0, pending: 0 }, 'nothing owed, nothing done');
+
+  await store.recordSwipe('demo-you', 'ava-nakamura', 'like');
+  const after = await store.reconcileMatches('demo-you');
+  assert.deepEqual(after, { checked: 0, repaired: 0, pending: 0 },
+    'and an ordinary swipe that succeeded leaves nothing behind either');
+});
+
+/**
+ * Put a note in the log by hand, as a device that failed mid-check would have.
+ *
+ * Staged rather than produced, and for a reason worth writing down: the failures
+ * that leave a note behind are narrow, so a check that tries to provoke one
+ * usually gets a run where the note was written and then cleared on success —
+ * and then passes whatever the code does. Three checks below were exactly that
+ * until the note was injected instead. Seeding it directly is the only way to
+ * exercise what happens to a note that is genuinely stale.
+ */
+function seedPendingMatch(fromUid, toUid) {
+  const map = JSON.parse(backing.get(KEYS.pendingMatch) || '{}');
+  if (!map[fromUid]) map[fromUid] = {};
+  map[fromUid][toUid] = { at: new Date().toISOString(), last: null };
+  backing.set(KEYS.pendingMatch, JSON.stringify(map));
+}
+
+test('a stored pass never becomes a match, whatever the note says', async function () {
+  // The repair reads the swipe rather than trusting the note, so an action that
+  // cannot produce a match does not produce one here either. This is the half of
+  // that rule a stale note can actually reach: a `pass` write never calls the
+  // match path at all, so a note for one can only ever arrive by being wrong.
+  await resetWorld();
+  const me = 'demo-you';
+  const them = 'ava-nakamura';
+  await store.recordSwipe(them, me, 'like');
+  await store.recordSwipe(me, them, 'pass');
+  seedPendingMatch(me, them);
+
+  const result = await store.reconcileMatches(me);
+  assert.equal(result.repaired, 0, 'nothing was repaired');
+  const matches = await store.getMatches(me);
+  assert.equal(matches.filter(function (m) { return m.otherUid === them; }).length, 0,
+    'and a stored pass must never become a match');
+});
+
+test('a rewind takes the unfinished check with it', async function () {
+  // Otherwise the next page load re-creates the match the rewind just removed
+  // the swipe for.
+  await resetWorld();
+  const me = 'demo-you';
+  const them = 'ava-nakamura';
+  await store.recordSwipe(them, me, 'like');
+  await withStorageRefusing([KEYS.matches], async function () {
+    try { await store.recordSwipe(me, them, 'like'); } catch (err) { /* expected */ }
+  });
+  const undone = await store.undoSwipe(me, them);
+  assert.ok(undone && undone.ok, 'the rewind went through');
+
+  const result = await store.reconcileMatches(me);
+  assert.equal(result.checked, 0, 'nothing is owed for a swipe that no longer exists');
+  const matches = await store.getMatches(me);
+  assert.equal(matches.filter(function (m) { return m.otherUid === them; }).length, 0,
+    'and no match was conjured from the note');
+});
+
+test('and so does ending the conversation', async function () {
+  // This is the failure a sweep could never avoid, and the reason there is a note
+  // rather than a sweep. `unmatch` deletes the match and leaves BOTH swipes — so
+  // "mutual like with no match document" is byte-for-byte what a deliberately
+  // ended conversation looks like. A note left behind after an unmatch would
+  // reopen that conversation on the person's next page load, with no way for them
+  // to tell why.
+  await resetWorld();
+  const me = 'demo-you';
+  const them = 'ava-nakamura';
+  await store.recordSwipe(them, me, 'like');
+  await store.recordSwipe(me, them, 'like');
+  const matchId = [me, them].sort().join('_');
+  seedPendingMatch(me, them);
+  await store.unmatch(matchId, me);
+
+  const result = await store.reconcileMatches(me);
+  assert.equal(result.repaired, 0, 'nothing is owed for a conversation that was ended');
+  const matches = await store.getMatches(me);
+  assert.equal(matches.filter(function (m) { return m.otherUid === them; }).length, 0,
+    'and it stays ended');
+});
+
+test('a note whose swipe was never written creates nothing', async function () {
+  // The note is written before the adapter is called, because a swipe write whose
+  // acknowledgement never arrives may still have committed — so a note written
+  // afterwards would not exist for the case that matters most. The price is a
+  // note that sometimes points at a swipe that never landed, and the repair reads
+  // the swipe rather than trusting the note for exactly that reason: the rules
+  // prove the other person liked me and never look at my side.
+  await resetWorld();
+  const me = 'demo-you';
+  const them = 'ava-nakamura';
+  await store.recordSwipe(them, me, 'like');
+  seedPendingMatch(me, them);
+
+  const result = await store.reconcileMatches(me);
+  const matches = await store.getMatches(me);
+  assert.equal(matches.filter(function (m) { return m.otherUid === them; }).length, 0,
+    'no swipe of mine, no match — whatever the note says');
+  assert.equal(result.repaired, 0, 'and nothing is reported as repaired');
+  assert.equal(JSON.parse(backing.get(KEYS.swipes) || '{}')[me + '_' + them], undefined,
+    'and no swipe was invented to justify it either');
+});
+
+test('two page loads at once finish each check once', async function () {
+  // `applyAuthState` fires twice on an ordinary sign-in, and two runs racing over
+  // the same notes would each read the same swipes.
+  await resetWorld();
+  const me = 'demo-you';
+  const them = 'ava-nakamura';
+  await store.recordSwipe(them, me, 'like');
+  await withStorageRefusing([KEYS.matches], async function () {
+    try { await store.recordSwipe(me, them, 'like'); } catch (err) { /* expected */ }
+  });
+
+  const both = await Promise.all([store.reconcileMatches(me), store.reconcileMatches(me)]);
+  assert.deepEqual(both[0], both[1], 'the second caller joins the first run rather than starting another');
+  assert.equal(both[0].checked, 1, 'one check, not two');
+});
+
+/** Resolve on a listener's first delivery, then unsubscribe. */
+function firstDelivery(subscribe) {
+  return new Promise(function (resolve, reject) {
+    const timer = setTimeout(function () { reject(new Error('nothing was delivered')); }, 2000);
+    const stop = subscribe(function (value) {
+      clearTimeout(timer);
+      // Deferred, because `stop` is not assigned yet when a synchronous
+      // delivery calls back — which is itself something a check below pins.
+      Promise.resolve().then(function () { if (typeof stop === 'function') stop(); });
+      resolve(value);
+    });
+  });
+}
+
+test('listenMatchViews delivers the same conversations getMatches does', async function () {
+  // The page it replaces called `getMatches` on a twenty-second timer. The live
+  // method has to answer the same question or the page is not the same page:
+  // same conversations, same order, same fields — everything except the profile,
+  // which the next check is about.
+  await resetWorld();
+  const polled = await store.getMatches(YOU);
+  const pushed = await firstDelivery(function (cb) { return store.listenMatchViews(YOU, cb); });
+
+  assert.deepEqual(pushed.map(function (v) { return v.matchId; }),
+    polled.map(function (v) { return v.matchId; }),
+    'the same conversations, in the same order');
+  pushed.forEach(function (view, i) {
+    const was = polled[i];
+    assert.deepStrictEqual(
+      { matchId: view.matchId, otherUid: view.otherUid, createdAt: view.createdAt,
+        lastMessage: view.lastMessage, lastMessageAt: view.lastMessageAt, unread: view.unread },
+      { matchId: was.matchId, otherUid: was.otherUid, createdAt: was.createdAt,
+        lastMessage: was.lastMessage, lastMessageAt: was.lastMessageAt, unread: was.unread },
+      'every non-profile field matches for ' + view.matchId);
+  });
+});
+
+test('and its views are built by the one builder, so even the key order matches', async function () {
+  // Key ORDER, not just values, and that is the whole point of the check.
+  // Composing a view by hand from a row is two lines shorter than round-tripping
+  // through `rowAsMatch` -> `toMatchView`, and an object literal with the same
+  // fields in a different order passes `deepStrictEqual` while being a different
+  // object to anything that iterates keys. This is the assertion that notices.
+  await resetWorld();
+  const polled = await store.getMatches(YOU);
+  const pushed = await firstDelivery(function (cb) { return store.listenMatchViews(YOU, cb); });
+
+  assert.deepEqual(Object.keys(pushed[0]), Object.keys(polled[0]),
+    'the MatchView keys, in the order toMatchView writes them');
+  assert.deepEqual(Object.keys(pushed[0].other), Object.keys(polled[0].other),
+    'and the same for the user document inside it');
+});
+
+test('and it never delivers synchronously', async function () {
+  // The Firestore side cannot deliver inline and the demo side must not either,
+  // or a caller that subscribes before it has finished wiring up gets a delivery
+  // it cannot handle — and only in one of the two modes.
+  await resetWorld();
+  let syncCalls = 0;
+  const stop = store.listenMatchViews(YOU, function () { syncCalls += 1; });
+  const during = syncCalls;
+  await settle();
+  stop();
+  assert.equal(during, 0, 'nothing may be delivered before the subscribe call returns');
+  assert.ok(syncCalls > 0, 'but something must arrive shortly after, or the check is vacuous');
+});
+
+test('the live views carry the public projection, not the private user document', async function () {
+  // Demo mode stores whole user documents, so composing a view from one hands
+  // the page the other person's email and block list — where firebase mode hands
+  // it `discovery/{uid}`, which has neither. Adapter divergence, in the direction
+  // that leaks. Both halves are asserted: the projection is applied here, AND
+  // `getMatches` in this mode still is not, which is what makes this a
+  // divergence check rather than a shape check.
+  await resetWorld();
+  const polled = await store.getMatches(YOU);
+  const pushed = await firstDelivery(function (cb) { return store.listenMatchViews(YOU, cb); });
+
+  assert.ok(polled[0].other.email, 'the polled path still hands over the private document');
+  assert.equal(pushed[0].other.email, '', 'the live view does not');
+  assert.deepEqual(pushed[0].other.blocked, [], 'nor the block list');
+  assert.equal(pushed[0].other.profile.birthdate, null, 'nor the birthdate');
+});
+
+test('and the projection keeps everything the conversation list scores on', async function () {
+  // The cheap version of the memo would hold a name and a photo. That would
+  // silently degrade the matches page's TF-IDF corpus to empty bios with no
+  // error anywhere — the icebreakers would just get worse.
+  await resetWorld();
+  const pushed = await firstDelivery(function (cb) { return store.listenMatchViews(YOU, cb); });
+  const p = pushed[0].other.profile;
+  assert.ok(p.bio.length > 0, 'a bio to score');
+  assert.ok(p.interests.length > 0, 'interests to overlap');
+  assert.equal(Object.keys(p.personality).length, 5, 'all five personality axes');
+  assert.ok(Number(p.age) > 0, 'and an age, which is what the row prints');
+});
+
+test('a match list that cannot be read is reported, not delivered as an empty one', async function () {
+  // What this replaces: `readJson` swallowed the failure and returned `{}`, so
+  // the demo adapter told a user with two conversations that they had none,
+  // while the Firestore adapter said nothing at all and left a skeleton. Same
+  // fault, opposite lies. A page cannot draw a retry button for either.
+  await resetWorld();
+  backing.set(KEYS.matches, '{not json at all');
+
+  const seen = [];
+  const errors = [];
+  const stop = store.listenMatchViews(YOU, function (v) { seen.push(v); }, function (err) { errors.push(err); });
+  await settle();
+  stop();
+
+  assert.equal(seen.length, 0, 'nothing may be delivered for a list that was not read');
+  assert.equal(errors.length, 1, 'and the failure is reported exactly once');
+});
+
+test('one subscriber leaving does not take the other one down with it', async function () {
+  // The page holds two: the nav badge and the conversation list. They share one
+  // underlying stream so a change costs one read rather than two, which is only
+  // safe if the refcount is right — otherwise navigating one component away
+  // silently kills the other.
+  await resetWorld();
+  const rows = [];
+  const views = [];
+  const stopRows = store.listenMatches(YOU, function (r) { rows.push(r); });
+  const stopViews = store.listenMatchViews(YOU, function (v) { views.push(v); });
+  await settle();
+  const rowsBefore = rows.length;
+  assert.ok(rowsBefore > 0 && views.length > 0, 'both are receiving to begin with');
+
+  stopViews();
+  await store.sendMessage(DEVIN_MATCH, 'devin-alvarez', 'still listening?');
+  await settle();
+  stopRows();
+
+  assert.ok(rows.length > rowsBefore, 'the badge kept receiving after the list unsubscribed');
+});
+
 test('listenLikesReceived counts only the likes still waiting for an answer', async function () {
   await resetWorld();
   await store.createUser('alice', {});

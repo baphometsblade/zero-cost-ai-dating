@@ -315,17 +315,41 @@ deliberate exception — it swallows, because the Firestore adapter swallows, an
 `listenMessages` in demo mode has no server to push from, so it does both of the things a
 browser can: it listens for the `storage` event (another tab in the same profile) and polls a
 cheap signature of the thread every 1.5 s (same tab). Callers cannot tell the two adapters
-apart. `listenMatches` and `listenLikesReceived` ride the same plumbing, and exist because
-the nav badges used to be a 20-second poll that re-read every match and a profile for each
-of them. They deliver rows and a count — no profiles, because a badge draws a number — and
+apart. `listenMatches`, `listenMatchViews` and `listenLikesReceived` ride the same plumbing, and
+exist because the nav badges AND the conversation list were both 20-second polls that
+re-read every match and a profile for each of them. They deliver rows and a count — no profiles, because a badge draws a number — and
 on Firestore they are `onSnapshot`, which bills its first delivery and then only what
 changes. `store-tests/specs/11-live-cost.store.js` measures that.
+
+`listenMatchViews` is the same stream with the faces on: the MatchViews `getMatches`
+returns, pushed. It exists separately rather than as an option on `listenMatches` because
+the badge's contract — rows, no profiles — is what makes the badge cheap, and one method
+that sometimes fetches profiles would make that contract untestable. Two things on a page
+want this account's matches, and both go through **one** subscription: a second
+`onSnapshot` would mean Firestore delivering twice, and a delivery is what is billed, so
+the same message arriving would cost two reads instead of one. Faces are fetched once per
+person per page load — not cached across navigations, so an edited name can never outlive
+the page it was read on. `store-tests/specs/15-live-list.store.js` counts all of it.
+
+Both listeners can now report a failure as well as a value. That is not decoration: before
+it, a stream that died left the demo adapter delivering an empty list — telling somebody
+with two conversations they had none — while the Firestore adapter delivered nothing at
+all, leaving a skeleton on screen. The same fault, and the two adapters lying about it in
+opposite directions, inside the one primitive a live list is built on.
 
 ### Shared semantics
 
 - `recordSwipe(from, to, action)` writes `swipes/{from}_{to}`; if the reciprocal swipe exists
   and both are positive (`like`/`super`), it creates `matches/{sortedPair}` and returns
   `{ matched: true, matchId }`. Idempotent in both adapters.
+- `reconcileMatches(uid)` finishes a match check that was started and never answered. The
+  facade notes the pair in `localStorage` before calling the adapter, clears the note on any
+  settled outcome, and keeps it only for a rejection that says the swipe itself landed;
+  `app.js` drains the log once per page. It is a note rather than a sweep because `unmatch`
+  leaves both swipes behind, so a mutual like with no match document is indistinguishable
+  from a conversation somebody ended — a sweep would reopen every one of them. Costs three
+  reads and one write per repair, and nothing at all when nothing is owed. Device-local: it
+  finishes what that browser began.
 - `undoSwipe` deletes the swipe, and refuses — `{ ok: false, reason: 'matched' }`, nothing
   deleted — when the pair already have a match. A match is two people's: the other side can
   have read it and written into it, so one of them pressing rewind may not take it away. The
@@ -425,6 +449,19 @@ backgrounded tab costs nothing". Both halves are gone: §6 was updated when the 
 and §7 was edited around and left contradicting it. The visibility claim would not hold now in
 either mode — a snapshot stream re-bills its first delivery on every reconnect, and the demo
 poll has no visibility gate at all.
+
+`matches.js` is the other listener holder, and until recently was the reason this whole section
+was only half true: it kept a 20-second `getMatches` poll of its own long after the badges had
+moved. It now subscribes with `listenMatchViews`, through the same shared stream `app.js` uses,
+and holds `listStop` released by `pagehide` and re-taken by `pageshow` and `visibilitychange`.
+The `pageshow` handler is the one this app did not have anywhere: a document restored from the
+back-forward cache re-runs none of the boot path, and the poll was quietly covering for that.
+The subscription is deliberately NOT gated on visibility — an idle listener costs nothing, and
+each detach and re-attach pays a fresh first delivery.
+
+Because the list arrives rather than being fetched, the first delivery is also where the page
+resolves `?m=`. Doing it any earlier resolves a deep link against a list that has not come, finds
+nothing, and clears the URL with nothing left to retry.
 
 Page guards live in `auth.js` and run first in each controller:
 
