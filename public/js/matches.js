@@ -38,7 +38,7 @@
   const COUNTER_FROM = 900;          // show the character counter this late
   const COMPOSER_ROWS = 5;           // the composer grows to five rows, then scrolls
   const NEAR_BOTTOM_PX = 80;         // "already at the bottom" tolerance
-  const LIST_POLL_MS = 20000;        // silent refresh of the conversation list
+  const FIRST_DELIVERY_MS = 12000;   // how long a live list may take before we say so
   const STAMP_TICK_MS = 60000;       // keep relative timestamps honest
   const LOCKED_AVATARS = 5;          // placeholder faces behind the Premium blur
   const NEW_MATCH_NAME_MAX = 14;     // the strip is 76px wide; keep labels short
@@ -91,9 +91,8 @@
     error: null,
     sending: false,
     firstPaint: true,    // suppresses "new message" announcements on open
-    refreshing: false,
-    refreshWarned: false,
-    emptyCheck: null     // match id whose empty delivery is being confirmed
+    gotFirst: false,     // whether the live list has delivered at least once
+    ended: false         // the open conversation was ended by the other side
   };
 
   // Wide enough for both panes at once — the same breakpoint .two-pane uses.
@@ -101,7 +100,8 @@
     ? window.matchMedia('(min-width: 900px)')
     : null;
 
-  let listTimer = null;
+  let listStop = null;
+  let listDeadline = null;
   let stampTimer = null;
 
   // Fingerprint of the left pane as it is currently painted. Rebuilding a row
@@ -660,41 +660,32 @@
    * @param {Object} match the MatchView the empty delivery belongs to
    * @returns {Promise<void>}
    */
-  async function confirmEmptyThread(match) {
-    if (!match || !state.me || state.emptyCheck === match.matchId) return;
-    state.emptyCheck = match.matchId;
-    let list = null;
-    try {
-      list = await ZC.store.getMatches(state.me.uid);
-    } catch (err) {
-      // A failed read is not evidence that anything was deleted.
-      console.warn('[zc] Could not confirm the conversation still exists:', err);
-    } finally {
-      state.emptyCheck = null;
-    }
+  function confirmEmptyThread(match) {
+    if (!match || !state.me) return;
     if (!state.active || state.active.matchId !== match.matchId) return;
 
-    // A delivery carrying real messages may have landed while this read was in
-    // flight. That is fresher — and stronger — evidence than the empty
-    // snapshot which started the check: messages cannot arrive from a match
-    // that no longer exists. Leave the painted conversation alone, or the
-    // openers would wipe a message the listener has already delivered and may
-    // never send again.
+    // A delivery carrying real messages may have landed in the meantime. That is
+    // fresher — and stronger — evidence than the empty snapshot which started
+    // the check: messages cannot arrive from a match that no longer exists.
+    // Leave the painted conversation alone, or the openers would wipe a message
+    // the listener has already delivered and may never send again.
     if (state.rendered.length) return;
+    if (state.ended) return;
 
-    const gone = Array.isArray(list) && !list.some(function (item) {
+    // No read. This used to call `getMatches` — one match document and a profile
+    // for each of them — every time an empty conversation was opened, to answer
+    // a question the live list already knows the answer to. A conversation that
+    // has ended leaves the list, and `onViews` is what notices; here, the row
+    // still being there means it is simply new.
+    const gone = state.gotFirst && !state.matches.some(function (item) {
       return item.matchId === match.matchId;
     });
-    if (!gone) {
-      // state.active carries the freshest copy of the same conversation.
-      showNoMessages(state.active);
+    if (gone) {
+      endActiveConversation();
       return;
     }
-    state.matches = list.slice().sort(byActivity);
-    state.corpus = null;
-    toast('That conversation has ended.', 'warn');
-    announce('That conversation has ended.');
-    closeMatch();
+    // state.active carries the freshest copy of the same conversation.
+    showNoMessages(state.active);
   }
 
   /**
@@ -857,8 +848,9 @@
     try {
       await ZC.store.sendMessage(match.matchId, state.me.uid, text);
       announce('Message sent.');
-      // The preview and the ordering on the left live on the match document.
-      refreshMatches();
+      // No refresh. The preview and the ordering live on the match document, and
+      // the live list is already watching it — this used to spend one read per
+      // match plus a profile for each of them on every message sent.
       if (ZC.app && typeof ZC.app.refreshBadges === 'function') ZC.app.refreshBadges(true);
     } catch (err) {
       console.warn('[zc] Message could not be sent:', err);
@@ -1033,8 +1025,51 @@
    * @param {boolean} [keepFocus=false] skip moving focus (used when unmatching)
    * @returns {void}
    */
+  /**
+   * The other side ended this conversation while it was open.
+   *
+   * Not `closeMatch()`, and the difference is three measured harms. `closeMatch`
+   * calls `setComposer('')`, which silently destroys a half-written reply for
+   * something the person did not do. It then tries to put focus back on the row
+   * they came from — a row that by definition no longer exists, so focus falls
+   * to `<body>`. And it leaves a live composer aimed at a match whose message
+   * write the rules will now refuse.
+   *
+   * So: keep the header, keep what they typed, stop the listener, say what
+   * happened, and disable sending. Back or Escape closes it normally from there.
+   * @returns {void}
+   */
+  function endActiveConversation() {
+    if (!state.active || state.ended) return;
+    state.ended = true;
+    stopListening();
+    stopStampTicker();
+    state.rendered = [];
+    state.lastDay = null;
+    if (dom.log) {
+      fill(dom.log, null);
+      // The same `.empty` block the openers use, so it inherits styling that
+      // already exists rather than introducing a class the CSS has never heard
+      // of — which `tests/static.test.js` would only catch in markup, not here.
+      dom.log.appendChild(el('div', { class: 'empty', attrs: { id: 'chat-ended' } }, [
+        el('span', { class: 'empty-icon', text: '🚪', attrs: { 'aria-hidden': 'true' } }),
+        el('h3', { text: 'This conversation has ended' }),
+        el('p', {
+          text: shortNameOf(state.active.other) + ' is no longer matched with you, so ' +
+            'nothing more can be sent here. What you had typed is still in the box.'
+        })
+      ]));
+    }
+    if (dom.send) dom.send.disabled = true;
+    if (dom.input) dom.input.disabled = true;
+    toast('That conversation has ended.', 'warn');
+    announce('That conversation has ended.');
+  }
+
   function closeMatch(keepFocus) {
     const had = state.active;
+    state.ended = false;
+    if (dom.input) dom.input.disabled = false;
     stopListening();
     stopStampTicker();
     state.active = null;
@@ -1381,69 +1416,49 @@
    * the listener owns those.
    * @returns {Promise<void>}
    */
-  async function refreshMatches() {
-    if (state.refreshing || !state.me) return;
-    state.refreshing = true;
-    try {
-      const list = await ZC.store.getMatches(state.me.uid);
-      state.matches = (Array.isArray(list) ? list : []).slice().sort(byActivity);
-      // Keep pointing at the same conversation, with its refreshed preview.
-      if (state.active) {
-        const still = state.matches.filter(function (item) {
-          return item.matchId === state.active.matchId;
-        })[0];
-        if (still) {
-          state.active = still;
-          renderHead(still);
-          // The open thread is read by definition while it is on screen.
-          if (document.visibilityState === 'visible') markRead();
-        } else {
-          toast('That conversation has ended.', 'warn');
-          closeMatch();
-        }
+  function onViews(views) {
+    if (!state.me) return;
+    state.matches = (Array.isArray(views) ? views : []).slice().sort(byActivity);
+    state.corpus = null;
+
+    // Keep pointing at the same conversation, with its refreshed preview.
+    if (state.active) {
+      const still = state.matches.filter(function (item) {
+        return item.matchId === state.active.matchId;
+      })[0];
+      if (still) {
+        state.active = still;
+        state.ended = false;
+        renderHead(still);
+        // The open thread is read by definition while it is on screen.
+        if (document.visibilityState === 'visible') markRead();
+      } else if (!state.ended) {
+        endActiveConversation();
       }
-      renderList();
-    } catch (err) {
-      if (!state.refreshWarned) {
-        state.refreshWarned = true;
-        console.warn('[zc] The match list could not refresh:', err);
-      }
-    } finally {
-      state.refreshing = false;
     }
+
+    if (!state.gotFirst) firstViews();
+    renderList();
   }
 
   /**
-   * First load: fetch every match, paint the list, then open whatever `?m=`
-   * asks for.
-   * @returns {Promise<void>}
+   * The first delivery, which is what `load()` used to be.
+   *
+   * `?m=` is resolved HERE and nowhere else, and the ordering is the reason: a
+   * deep link resolved against a list that has not arrived finds nothing, calls
+   * `syncUrl(null)`, and destroys a perfectly good link with nothing left to
+   * retry.
+   * @returns {void}
    */
-  async function load() {
-    state.loading = true;
+  function firstViews() {
+    state.gotFirst = true;
+    state.loading = false;
     state.error = null;
-    state.corpus = null;
-    renderList();
-    applyPanes();
+    stopListDeadline();
+    announce(state.matches.length
+      ? state.matches.length + (state.matches.length === 1 ? ' match' : ' matches') + ' loaded.'
+      : 'You have no matches yet.');
 
-    try {
-      const list = await ZC.store.getMatches(state.me.uid);
-      state.matches = (Array.isArray(list) ? list : []).slice().sort(byActivity);
-      state.loading = false;
-      renderList();
-      announce(state.matches.length
-        ? state.matches.length + (state.matches.length === 1 ? ' match' : ' matches') + ' loaded.'
-        : 'You have no matches yet.');
-    } catch (err) {
-      console.error('[zc] The match list failed to load:', err);
-      state.loading = false;
-      state.error = err;
-      renderList();
-      announce('Your matches could not load. Use the Try again button.');
-      toast('Your matches could not load.', 'error');
-      return;
-    }
-
-    // ?m= selects a conversation; anything unknown is quietly dropped.
     const wanted = ZC.util.qs('m');
     if (wanted) {
       const known = state.matches.filter(function (item) { return item.matchId === wanted; })[0];
@@ -1460,6 +1475,92 @@
     renderLikes();
   }
 
+  /**
+   * The stream died. Say so, rather than showing an empty list.
+   *
+   * The URL is deliberately left alone: `?m=` still names a conversation the
+   * retry may well be able to open, and clearing it would throw that away.
+   * @param {Error} err whatever the store reported
+   * @returns {void}
+   */
+  function onListError(err) {
+    console.error('[zc] The conversation list stopped:', err);
+    state.loading = false;
+    state.error = err || new Error('The conversation list stopped.');
+    stopListDeadline();
+    renderList();
+    announce('Your matches could not load. Use the Try again button.');
+  }
+
+  /**
+   * Subscribe to the live conversation list. Idempotent.
+   * @returns {void}
+   */
+  function subscribeList() {
+    if (listStop || !state.me) return;
+    listStop = ZC.store.listenMatchViews(state.me.uid, onViews, onListError);
+    startListDeadline();
+  }
+
+  /** Drop the subscription, if there is one. */
+  function unsubscribeList() {
+    if (!listStop) return;
+    const stop = listStop;
+    listStop = null;
+    stop();
+  }
+
+  /**
+   * Say something if the first delivery never arrives.
+   *
+   * Soft on purpose: a delivery that lands after the deadline is still the first
+   * list, so it clears the error, paints, and still opens `?m=`. And when the
+   * browser already knows it is offline there is nothing to wait for — with no
+   * offline persistence configured, `onSnapshot` simply never delivers, and the
+   * page would stare at a skeleton for twelve seconds where the fetch it
+   * replaces failed at once.
+   * @returns {void}
+   */
+  function startListDeadline() {
+    stopListDeadline();
+    if (state.gotFirst) return;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      onListError(new Error('This browser is offline.'));
+      return;
+    }
+    listDeadline = window.setTimeout(function () {
+      listDeadline = null;
+      if (state.gotFirst) return;
+      onListError(new Error('The conversation list did not arrive.'));
+    }, FIRST_DELIVERY_MS);
+  }
+
+  function stopListDeadline() {
+    if (!listDeadline) return;
+    window.clearTimeout(listDeadline);
+    listDeadline = null;
+  }
+
+  /**
+   * Open the conversation list, or re-open it after a failure.
+   *
+   * Everything that used to happen here — painting, announcing, opening `?m=` —
+   * now happens on the first delivery instead, in `firstViews`. It has to: this
+   * function no longer has a list to work from, and resolving a deep link
+   * against a list that has not arrived is how a valid `?m=` gets thrown away.
+   * @returns {void}
+   */
+  function load() {
+    unsubscribeList();
+    state.loading = true;
+    state.error = null;
+    state.corpus = null;
+    state.gotFirst = false;
+    renderList();
+    applyPanes();
+    subscribeList();
+  }
+
   /* ------------------------------------------------------------------------
      12. Wiring and boot
      ------------------------------------------------------------------------ */
@@ -1467,18 +1568,18 @@
   /** Re-read unread state whenever the tab comes back to the foreground. */
   function onVisible() {
     if (document.visibilityState !== 'visible') return;
-    refreshMatches();
+    // Idempotent, and here rather than on a timer: a tab restored from the
+    // back-forward cache has run `teardown` and needs its subscription back.
+    subscribeList();
     if (state.active) markRead();
   }
 
-  /** Release the message listener and the timers. */
+  /** Release the message listener, the subscription and the timers. */
   function teardown() {
     stopListening();
     stopStampTicker();
-    if (listTimer) {
-      window.clearInterval(listTimer);
-      listTimer = null;
-    }
+    stopListDeadline();
+    unsubscribeList();
   }
 
   /** Wire every control on the page exactly once. */
@@ -1528,11 +1629,11 @@
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('focus', onVisible);
     window.addEventListener('pagehide', teardown);
-
-    // A quiet poll so matches made in another tab turn up here too.
-    listTimer = window.setInterval(function () {
-      if (document.visibilityState === 'visible') refreshMatches();
-    }, LIST_POLL_MS);
+    // `pagehide` tears the subscription down and the back-forward cache can
+    // restore this document without re-running any of the boot path, so the
+    // page needs somewhere to pick it up again. There was no `pageshow` handler
+    // anywhere in this app before; the twenty-second poll was covering for it.
+    window.addEventListener('pageshow', function () { subscribeList(); });
   }
 
   /**

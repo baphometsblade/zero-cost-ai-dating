@@ -27,6 +27,13 @@
    call, against a history twice as long, must cost the same. A budget written
    as "at most N reads" ages into a lie the first time somebody adds a field; a
    budget written as "does not depend on how long you have used the app" cannot.
+
+   The caller has changed twice since this was written, and the property has not.
+   It was a badge poll every twenty seconds; then a conversation-list poll every
+   twenty seconds; and now nothing refreshes on a timer at all, so `renderLikes`
+   spends this on the first paint and after an unmatch. That is the reason to
+   pin a scaling property rather than a caller: what is measured here is still
+   exactly what a person pays to open the page, however often they open it.
    ========================================================================== */
 'use strict';
 
@@ -43,7 +50,7 @@ const PENDING = 12;
 const ANSWERED = 6;
 
 module.exports = {
-  title: 'A background refresh does not cost more the longer you have used the app',
+  title: 'Opening the page does not cost more the longer you have used the app',
 
   async run(t, k) {
     const me = 'cost-me';

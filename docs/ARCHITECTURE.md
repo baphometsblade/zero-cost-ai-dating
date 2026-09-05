@@ -315,9 +315,9 @@ deliberate exception — it swallows, because the Firestore adapter swallows, an
 `listenMessages` in demo mode has no server to push from, so it does both of the things a
 browser can: it listens for the `storage` event (another tab in the same profile) and polls a
 cheap signature of the thread every 1.5 s (same tab). Callers cannot tell the two adapters
-apart. `listenMatches` and `listenLikesReceived` ride the same plumbing, and exist because
-the nav badges used to be a 20-second poll that re-read every match and a profile for each
-of them. They deliver rows and a count — no profiles, because a badge draws a number — and
+apart. `listenMatches`, `listenMatchViews` and `listenLikesReceived` ride the same plumbing, and
+exist because the nav badges AND the conversation list were both 20-second polls that
+re-read every match and a profile for each of them. They deliver rows and a count — no profiles, because a badge draws a number — and
 on Firestore they are `onSnapshot`, which bills its first delivery and then only what
 changes. `store-tests/specs/11-live-cost.store.js` measures that.
 
@@ -441,6 +441,19 @@ backgrounded tab costs nothing". Both halves are gone: §6 was updated when the 
 and §7 was edited around and left contradicting it. The visibility claim would not hold now in
 either mode — a snapshot stream re-bills its first delivery on every reconnect, and the demo
 poll has no visibility gate at all.
+
+`matches.js` is the other listener holder, and until recently was the reason this whole section
+was only half true: it kept a 20-second `getMatches` poll of its own long after the badges had
+moved. It now subscribes with `listenMatchViews`, through the same shared stream `app.js` uses,
+and holds `listStop` released by `pagehide` and re-taken by `pageshow` and `visibilitychange`.
+The `pageshow` handler is the one this app did not have anywhere: a document restored from the
+back-forward cache re-runs none of the boot path, and the poll was quietly covering for that.
+The subscription is deliberately NOT gated on visibility — an idle listener costs nothing, and
+each detach and re-attach pays a fresh first delivery.
+
+Because the list arrives rather than being fetched, the first delivery is also where the page
+resolves `?m=`. Doing it any earlier resolves a deep link against a list that has not come, finds
+nothing, and clears the URL with nothing left to retry.
 
 Page guards live in `auth.js` and run first in each controller:
 
