@@ -206,6 +206,32 @@ test('the docs describe as many unit suites as tests/ actually holds', function 
     'docs/ARCHITECTURE.md counts the `tests/` suites as ' + JSON.stringify(wrong) +
     '; tests/ holds ' + files.length + ', so the word is "' + expected.toLowerCase() + '"');
 
+  // ...and the facade's own size, which the README states in words. It sat at
+  // "thirty-one" the moment a thirty-second method was added, and nothing would
+  // have noticed: the sentence is prose, and prose is where every stale number
+  // this suite exists to abolish has hidden.
+  const storeSrc = fs.readFileSync(path.join(ROOT, 'public/js/data-store.js'), 'utf8');
+  const facadeStart = storeSrc.indexOf('\n  const store = {');
+  const facadeEnd = storeSrc.indexOf('\n  ZC.store = store', facadeStart);
+  assert.ok(facadeStart > 0 && facadeEnd > facadeStart,
+    'could not find the facade object in public/js/data-store.js — this assertion is ' +
+    'anchored on `const store = {` and `ZC.store = store`, so a rename needs it updated ' +
+    'rather than left matching nothing');
+  const methods = storeSrc.slice(facadeStart, facadeEnd)
+    .match(/^ {4}(?:async )?[A-Za-z_$][\w$]*\s*\(/gm) || [];
+  const TENS = ['', '', 'twenty', 'thirty', 'forty', 'fifty'];
+  const ONES = ['', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+  const inWords = methods.length < 20
+    ? String(methods.length)
+    : TENS[Math.floor(methods.length / 10)] + (methods.length % 10 ? '-' + ONES[methods.length % 10] : '');
+  const facadeSaid = /([a-z]+(?:-[a-z]+)?) facade methods/.exec(read('README.md'));
+  assert.ok(facadeSaid,
+    'README no longer says "<n> facade methods"; either restore the phrase or delete ' +
+    'this assertion — do not leave it matching nothing');
+  assert.equal(facadeSaid[1], inWords,
+    'README counts the facade as "' + facadeSaid[1] + '" methods; public/js/data-store.js ' +
+    'exports ' + methods.length + ', which is "' + inWords + '"');
+
   // The numeric form, wherever a document states it beside `npm test`'s OWN total.
   // docs/DEPLOY.md carries "# 14 suites, 234 checks" in a code comment, where the bolded
   // form this suite's other checks look for is not even possible. The checks half of

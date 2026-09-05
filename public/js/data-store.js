@@ -430,21 +430,49 @@
    * @returns {*} parsed value or fallback
    */
   function readJson(key, fallback) {
+    return readJsonResult(key, fallback).value;
+  }
+
+  /**
+   * The same read, with the failure kept rather than swallowed.
+   *
+   * `readJson` returns the fallback for three different situations — nothing
+   * stored, storage unreadable, stored value corrupt — and for most callers that
+   * is right: an absent value and an unreadable one both mean "carry on with the
+   * default". It is wrong for a live listener. Delivering `{}` for a match map it
+   * could not read is how the demo adapter told a user with two conversations
+   * that they had none, while the Firestore adapter answered the same failure by
+   * saying nothing at all and leaving a skeleton on screen. Same fault, opposite
+   * lies, in the one primitive a live list is built on.
+   *
+   * One implementation of "is this stored value trustworthy", not two: `readJson`
+   * is this function with the answer thrown away.
+   * @param {string} key localStorage key
+   * @param {*} fallback value to use when the entry is unusable
+   * @returns {{ok: boolean, err: Error|null, value: *}} the read, and whether to believe it
+   */
+  function readJsonResult(key, fallback) {
     let raw = null;
     try {
       raw = window.localStorage.getItem(key);
     } catch (err) {
-      return cloneDeep(fallback);
+      return { ok: false, err: err, value: cloneDeep(fallback) };
     }
-    if (raw === null || raw === undefined || raw === '') return cloneDeep(fallback);
+    if (raw === null || raw === undefined || raw === '') {
+      return { ok: true, err: null, value: cloneDeep(fallback) };
+    }
     try {
       const parsed = JSON.parse(raw);
-      if (parsed === null || parsed === undefined) return cloneDeep(fallback);
-      return parsed;
+      if (parsed === null || parsed === undefined) {
+        return { ok: true, err: null, value: cloneDeep(fallback) };
+      }
+      return { ok: true, err: null, value: parsed };
     } catch (err) {
       console.warn('[zc.store] Corrupt JSON in ' + key + ' — resetting that entry.', err);
+      // Dropped on the way past, as before — so the fault reported here is not a
+      // sticky one: the retry after it succeeds, with a genuinely empty value.
       try { window.localStorage.removeItem(key); } catch (ignored) { /* nothing else to do */ }
-      return cloneDeep(fallback);
+      return { ok: false, err: err, value: cloneDeep(fallback) };
     }
   }
 
@@ -547,6 +575,25 @@
    */
   function deliver(rec, force) {
     const value = rec.snapshot();
+
+    // A snapshot that could not be taken is reported once and ends the
+    // subscription, rather than being delivered as an empty list. Terminal on
+    // purpose: it matches what the Firestore side does — `onSnapshot`'s error
+    // callback fires once and the stream is over — so the two adapters fail the
+    // same way as well as succeeding the same way.
+    if (isPlainObject(value) && value.fault) {
+      const index = listeners.indexOf(rec);
+      if (index !== -1) listeners.splice(index, 1);
+      teardownPlumbing();
+      try {
+        if (typeof rec.onError === 'function') rec.onError(value.fault);
+        else console.warn('[zc.store] A live listener could not read its data.', value.fault);
+      } catch (err) {
+        console.warn('[zc.store] A live listener\'s error handler threw.', err);
+      }
+      return;
+    }
+
     const sig = rec.signature(value);
     if (!force && sig === rec.sig) return;
     rec.sig = sig;
@@ -1153,11 +1200,18 @@
       });
     },
 
-    listenMatches(uid, cb) {
+    listenMatches(uid, cb, onError) {
       return listen({
         cb: cb,
-        snapshot: function () { return matchRows(readMatches(), uid); },
-        signature: rowsSignature
+        onError: onError,
+        snapshot: function () {
+          const read = readJsonResult(KEYS.matches, {});
+          if (!read.ok) return { fault: read.err || new Error('The stored matches could not be read.') };
+          return matchRows(isPlainObject(read.value) ? read.value : {}, uid);
+        },
+        signature: function (value) {
+          return isPlainObject(value) && value.fault ? 'fault' : rowsSignature(value);
+        }
       });
     },
 
@@ -1413,6 +1467,34 @@
       createdAt: match.createdAt || null,
       lastMessage: match.lastMessage || null,
       lastMessageAt: match.lastMessageAt || null,
+      unread: unread
+    };
+  }
+
+  /**
+   * The inverse of `matchRow`: a live badge row put back into the MatchDoc shape
+   * `toMatchView` consumes.
+   *
+   * Its whole reason for existing is that `toMatchView` stays the ONLY function
+   * that ever builds a MatchView. Composing a view by hand from a row would be
+   * two lines shorter and is the mistake: an object literal with the same fields
+   * in a different order passes `assert.deepStrictEqual` while being a different
+   * object to anything that iterates keys. Round-tripping through the one builder
+   * is what makes "the live list delivers what getMatches delivers" a fact rather
+   * than a resemblance.
+   * @param {Object} row a matchRow, whose `unread` is the viewer's own count
+   * @param {string} uid the viewer
+   * @returns {Object} a MatchDoc-shaped object
+   */
+  function rowAsMatch(row, uid) {
+    const unread = {};
+    unread[uid] = Math.max(0, Number(row.unread) || 0);
+    return {
+      id: row.id,
+      users: Array.isArray(row.users) ? row.users.slice() : [],
+      createdAt: row.createdAt || null,
+      lastMessage: row.lastMessage === undefined ? null : row.lastMessage,
+      lastMessageAt: row.lastMessageAt || null,
       unread: unread
     };
   }
@@ -2197,7 +2279,7 @@
       return message;
     },
 
-    listenMatches(uid, cb) {
+    listenMatches(uid, cb, onError) {
       try {
         // No `orderBy`, deliberately. An ordered query here would want a
         // composite index that `getMatches` has a documented fallback for, and
@@ -2215,10 +2297,19 @@
             snap.forEach(function (doc) { rows.push(matchRow(doc.data() || {}, doc.id, uid)); });
             cb(rows.sort(byRecency));
           }, function (err) {
+            // Warning and stopping there is what left a page staring at a
+            // skeleton with nothing to click: the caller was never told, so it
+            // could not tell "still loading" from "this will never arrive".
             console.warn('[zc.store] Live match stream failed.', err);
+            if (typeof onError === 'function') onError(err);
           });
       } catch (err) {
         console.warn('[zc.store] Could not open the live match stream.', err);
+        // Asynchronously, so a caller that has not finished wiring up yet still
+        // hears it — the same reason the demo adapter's first delivery is async.
+        if (typeof onError === 'function') {
+          Promise.resolve().then(function () { onError(err); });
+        }
         return function () { /* nothing to unsubscribe */ };
       }
     },
@@ -2628,6 +2719,144 @@
     return limits[plan === 'premium' ? 'premium' : 'free'] || { likesPerDay: 25, superLikesPerDay: 1, rewinds: 0 };
   }
 
+  /* ------------------------------------------------------------------------
+     7b. One match stream per account, shared
+     ------------------------------------------------------------------------ */
+
+  /**
+   * Open subscriptions, keyed by uid.
+   *
+   * Two things on the same page want this account's matches: `app.js` for the
+   * nav badge, and the conversation list. Two `onSnapshot` calls means Firestore
+   * delivers twice, and a delivery is what is billed — so the same message
+   * arriving would cost two reads instead of one, for as long as the page is
+   * open. Refcounting one stream is what makes "one conversation changing costs
+   * one read" a number a check can hold rather than a hope.
+   */
+  const matchStreams = Object.create(null);
+
+  /**
+   * Subscribe to this account's match rows through the shared stream.
+   * @param {string} uid the viewer
+   * @param {Function} cb called with the row list
+   * @param {Function} [onError] called once if the stream dies
+   * @returns {Function} unsubscribe
+   */
+  function shareMatchStream(uid, cb, onError) {
+    let rec = matchStreams[uid];
+    if (!rec) {
+      rec = { subs: [], rows: null, dead: false, stop: null };
+      matchStreams[uid] = rec;
+      rec.stop = adapter.listenMatches(uid, function (rows) {
+        rec.rows = rows;
+        rec.subs.slice().forEach(function (sub) {
+          sub.delivered = true;
+          try { sub.cb(rows); } catch (err) { console.warn('[zc.store] A match subscriber threw.', err); }
+        });
+      }, function (err) {
+        rec.dead = true;
+        // Deleted, not just flagged: the next subscription must be allowed to
+        // open a fresh stream, or a retry button is wired to nothing.
+        if (matchStreams[uid] === rec) delete matchStreams[uid];
+        const subs = rec.subs.slice();
+        rec.subs.length = 0;
+        subs.forEach(function (sub) {
+          try {
+            if (typeof sub.onError === 'function') sub.onError(err);
+          } catch (thrown) {
+            console.warn('[zc.store] A match subscriber\'s error handler threw.', thrown);
+          }
+        });
+      });
+    }
+
+    const sub = { cb: cb, onError: onError, delivered: false };
+    rec.subs.push(sub);
+
+    // A subscriber that arrives after the first delivery is caught up from the
+    // cached rows. Guarded on `delivered`, because without it the FIRST
+    // subscriber gets its delivery twice — once from the stream and once from
+    // this replay — and "the first delivery is the current state" goes red.
+    if (rec.rows !== null) {
+      Promise.resolve().then(function () {
+        if (sub.delivered || rec.subs.indexOf(sub) === -1) return;
+        sub.delivered = true;
+        try { sub.cb(rec.rows); } catch (err) { console.warn('[zc.store] A match subscriber threw.', err); }
+      });
+    }
+
+    return function unsubscribe() {
+      const index = rec.subs.indexOf(sub);
+      if (index !== -1) rec.subs.splice(index, 1);
+      if (rec.subs.length || rec.dead) return;
+      if (matchStreams[uid] === rec) delete matchStreams[uid];
+      if (typeof rec.stop === 'function') rec.stop();
+    };
+  }
+
+  /**
+   * Public profiles already fetched this page, by uid.
+   *
+   * Per page load, not per call: every page here is its own document, so this
+   * empties on navigation, which is honest — a name cached across pages could
+   * outlive an edit. What it does buy is the thing that matters, which is that a
+   * conversation changing costs ONE read for the row rather than one plus a
+   * profile for everyone in the list.
+   *
+   * Failures are deliberately not memoised. A cached failure is a permanent
+   * "Someone" for an account whose profile was momentarily unreadable.
+   */
+  const profileMemo = Object.create(null);
+
+  /**
+   * Reads already in flight, by uid — so two deliveries landing close together
+   * fetch a newcomer's face once rather than twice. Without it, a match arriving
+   * while the previous delivery's profiles were still resolving billed the same
+   * document again.
+   */
+  const profilePending = Object.create(null);
+
+  async function resolveProfiles(uids) {
+    const wanted = [];
+    uids.forEach(function (uid) {
+      if (uid && !(uid in profileMemo) && wanted.indexOf(uid) === -1) wanted.push(uid);
+    });
+    await Promise.all(wanted.map(function (uid) {
+      if (profilePending[uid]) return profilePending[uid];
+      const pending = Promise.resolve()
+        .then(function () { return adapter.getPublicProfile(uid); })
+        .then(function (doc) {
+          // Projected, so a live view carries the same public subset the
+          // Firestore path serves. Without this the demo adapter would hand the
+          // page the whole private document — the other person's email and block
+          // list — where firebase mode hands it `discovery/{uid}`. The two
+          // adapters agreeing is the point of composing here rather than in each.
+          if (doc) profileMemo[uid] = normalizeUser(projectDiscovery(normalizeUser(doc)));
+        })
+        .catch(function (err) {
+          console.warn('[zc.store] Could not load a profile for the conversation list.', err);
+        })
+        .then(function () { delete profilePending[uid]; });
+      profilePending[uid] = pending;
+      return pending;
+    }));
+    return profileMemo;
+  }
+
+  /**
+   * Badge rows plus the faces, in the shape `getMatches` returns.
+   * @param {Object[]} rows match rows
+   * @param {string} uid the viewer
+   * @returns {Promise<Object[]>} MatchViews, newest first
+   */
+  async function hydrateRows(rows, uid) {
+    const list = Array.isArray(rows) ? rows : [];
+    const profiles = await resolveProfiles(list.map(function (row) { return otherOf(row, uid); }));
+    return list
+      .map(function (row) { return toMatchView(rowAsMatch(row, uid), uid, profiles[otherOf(row, uid)]); })
+      .sort(byRecency);
+  }
+
   const store = {
     /** 'firebase' or 'demo' — which adapter is live. */
     mode: mode,
@@ -2872,9 +3101,53 @@
      * @param {Function} cb called with the row list on every change
      * @returns {Function} unsubscribe
      */
-    listenMatches(uid, cb) {
+    listenMatches(uid, cb, onError) {
       if (!uid || typeof cb !== 'function') return function () { /* nothing to do */ };
-      return adapter.listenMatches(uid, cb);
+      return shareMatchStream(uid, cb, onError);
+    },
+
+    /**
+     * The same stream, with the faces on: MatchViews in the shape `getMatches`
+     * returns, pushed instead of polled.
+     *
+     * This is what a conversation list wants and `listenMatches` deliberately is
+     * not. The page it replaces re-read every match AND a `discovery/{uid}` for
+     * each of them every twenty seconds — 2N reads a tick, 3,600 an hour with ten
+     * conversations, against a Spark project's 50,000 a day, whether or not
+     * anything had moved. Here the rows arrive on the badge's own subscription
+     * (so they cost nothing extra) and a face is fetched once per person per
+     * page, so an idle tab costs zero and a message costs one.
+     *
+     * `onError` is not optional decoration. Before it, a stream that died left
+     * the demo adapter saying "you have no matches" to someone with two, and the
+     * Firestore adapter saying nothing at all — so a page could not tell a slow
+     * load from one that will never arrive.
+     * @param {string} uid the viewer
+     * @param {Function} onViews called with the MatchView list on every change
+     * @param {Function} [onError] called once if the stream dies
+     * @returns {Function} unsubscribe
+     */
+    listenMatchViews(uid, onViews, onError) {
+      if (!uid || typeof onViews !== 'function') return function () { /* nothing to do */ };
+      let stopped = false;
+      let seq = 0;
+      const stop = shareMatchStream(uid, function (rows) {
+        const mine = ++seq;
+        hydrateRows(rows, uid).then(function (views) {
+          // Two guards, and both have already been needed elsewhere in this
+          // file. `seq`: profile reads resolve out of order, so a slow one from
+          // an older row list would otherwise put the older list back on screen.
+          // `stopped`: a hydration in flight when the page tears down would
+          // deliver into a dead page — the same reason `listenLikesReceived`
+          // carries `watcher.stopped`.
+          if (stopped || mine !== seq) return;
+          try { onViews(views); } catch (err) { console.warn('[zc.store] A match-view subscriber threw.', err); }
+        });
+      }, onError);
+      return function unsubscribe() {
+        stopped = true;
+        stop();
+      };
     },
 
     /**

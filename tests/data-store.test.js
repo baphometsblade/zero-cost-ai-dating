@@ -959,6 +959,143 @@ test('a backwards clock correction releases the presence throttle instead of lat
   }
 });
 
+/** Resolve on a listener's first delivery, then unsubscribe. */
+function firstDelivery(subscribe) {
+  return new Promise(function (resolve, reject) {
+    const timer = setTimeout(function () { reject(new Error('nothing was delivered')); }, 2000);
+    const stop = subscribe(function (value) {
+      clearTimeout(timer);
+      // Deferred, because `stop` is not assigned yet when a synchronous
+      // delivery calls back — which is itself something a check below pins.
+      Promise.resolve().then(function () { if (typeof stop === 'function') stop(); });
+      resolve(value);
+    });
+  });
+}
+
+test('listenMatchViews delivers the same conversations getMatches does', async function () {
+  // The page it replaces called `getMatches` on a twenty-second timer. The live
+  // method has to answer the same question or the page is not the same page:
+  // same conversations, same order, same fields — everything except the profile,
+  // which the next check is about.
+  await resetWorld();
+  const polled = await store.getMatches(YOU);
+  const pushed = await firstDelivery(function (cb) { return store.listenMatchViews(YOU, cb); });
+
+  assert.deepEqual(pushed.map(function (v) { return v.matchId; }),
+    polled.map(function (v) { return v.matchId; }),
+    'the same conversations, in the same order');
+  pushed.forEach(function (view, i) {
+    const was = polled[i];
+    assert.deepStrictEqual(
+      { matchId: view.matchId, otherUid: view.otherUid, createdAt: view.createdAt,
+        lastMessage: view.lastMessage, lastMessageAt: view.lastMessageAt, unread: view.unread },
+      { matchId: was.matchId, otherUid: was.otherUid, createdAt: was.createdAt,
+        lastMessage: was.lastMessage, lastMessageAt: was.lastMessageAt, unread: was.unread },
+      'every non-profile field matches for ' + view.matchId);
+  });
+});
+
+test('and its views are built by the one builder, so even the key order matches', async function () {
+  // Key ORDER, not just values, and that is the whole point of the check.
+  // Composing a view by hand from a row is two lines shorter than round-tripping
+  // through `rowAsMatch` -> `toMatchView`, and an object literal with the same
+  // fields in a different order passes `deepStrictEqual` while being a different
+  // object to anything that iterates keys. This is the assertion that notices.
+  await resetWorld();
+  const polled = await store.getMatches(YOU);
+  const pushed = await firstDelivery(function (cb) { return store.listenMatchViews(YOU, cb); });
+
+  assert.deepEqual(Object.keys(pushed[0]), Object.keys(polled[0]),
+    'the MatchView keys, in the order toMatchView writes them');
+  assert.deepEqual(Object.keys(pushed[0].other), Object.keys(polled[0].other),
+    'and the same for the user document inside it');
+});
+
+test('and it never delivers synchronously', async function () {
+  // The Firestore side cannot deliver inline and the demo side must not either,
+  // or a caller that subscribes before it has finished wiring up gets a delivery
+  // it cannot handle — and only in one of the two modes.
+  await resetWorld();
+  let syncCalls = 0;
+  const stop = store.listenMatchViews(YOU, function () { syncCalls += 1; });
+  const during = syncCalls;
+  await settle();
+  stop();
+  assert.equal(during, 0, 'nothing may be delivered before the subscribe call returns');
+  assert.ok(syncCalls > 0, 'but something must arrive shortly after, or the check is vacuous');
+});
+
+test('the live views carry the public projection, not the private user document', async function () {
+  // Demo mode stores whole user documents, so composing a view from one hands
+  // the page the other person's email and block list — where firebase mode hands
+  // it `discovery/{uid}`, which has neither. Adapter divergence, in the direction
+  // that leaks. Both halves are asserted: the projection is applied here, AND
+  // `getMatches` in this mode still is not, which is what makes this a
+  // divergence check rather than a shape check.
+  await resetWorld();
+  const polled = await store.getMatches(YOU);
+  const pushed = await firstDelivery(function (cb) { return store.listenMatchViews(YOU, cb); });
+
+  assert.ok(polled[0].other.email, 'the polled path still hands over the private document');
+  assert.equal(pushed[0].other.email, '', 'the live view does not');
+  assert.deepEqual(pushed[0].other.blocked, [], 'nor the block list');
+  assert.equal(pushed[0].other.profile.birthdate, null, 'nor the birthdate');
+});
+
+test('and the projection keeps everything the conversation list scores on', async function () {
+  // The cheap version of the memo would hold a name and a photo. That would
+  // silently degrade the matches page's TF-IDF corpus to empty bios with no
+  // error anywhere — the icebreakers would just get worse.
+  await resetWorld();
+  const pushed = await firstDelivery(function (cb) { return store.listenMatchViews(YOU, cb); });
+  const p = pushed[0].other.profile;
+  assert.ok(p.bio.length > 0, 'a bio to score');
+  assert.ok(p.interests.length > 0, 'interests to overlap');
+  assert.equal(Object.keys(p.personality).length, 5, 'all five personality axes');
+  assert.ok(Number(p.age) > 0, 'and an age, which is what the row prints');
+});
+
+test('a match list that cannot be read is reported, not delivered as an empty one', async function () {
+  // What this replaces: `readJson` swallowed the failure and returned `{}`, so
+  // the demo adapter told a user with two conversations that they had none,
+  // while the Firestore adapter said nothing at all and left a skeleton. Same
+  // fault, opposite lies. A page cannot draw a retry button for either.
+  await resetWorld();
+  backing.set(KEYS.matches, '{not json at all');
+
+  const seen = [];
+  const errors = [];
+  const stop = store.listenMatchViews(YOU, function (v) { seen.push(v); }, function (err) { errors.push(err); });
+  await settle();
+  stop();
+
+  assert.equal(seen.length, 0, 'nothing may be delivered for a list that was not read');
+  assert.equal(errors.length, 1, 'and the failure is reported exactly once');
+});
+
+test('one subscriber leaving does not take the other one down with it', async function () {
+  // The page holds two: the nav badge and the conversation list. They share one
+  // underlying stream so a change costs one read rather than two, which is only
+  // safe if the refcount is right — otherwise navigating one component away
+  // silently kills the other.
+  await resetWorld();
+  const rows = [];
+  const views = [];
+  const stopRows = store.listenMatches(YOU, function (r) { rows.push(r); });
+  const stopViews = store.listenMatchViews(YOU, function (v) { views.push(v); });
+  await settle();
+  const rowsBefore = rows.length;
+  assert.ok(rowsBefore > 0 && views.length > 0, 'both are receiving to begin with');
+
+  stopViews();
+  await store.sendMessage(DEVIN_MATCH, 'devin-alvarez', 'still listening?');
+  await settle();
+  stopRows();
+
+  assert.ok(rows.length > rowsBefore, 'the badge kept receiving after the list unsubscribed');
+});
+
 test('listenLikesReceived counts only the likes still waiting for an answer', async function () {
   await resetWorld();
   await store.createUser('alice', {});

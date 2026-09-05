@@ -321,6 +321,22 @@ of them. They deliver rows and a count — no profiles, because a badge draws a 
 on Firestore they are `onSnapshot`, which bills its first delivery and then only what
 changes. `store-tests/specs/11-live-cost.store.js` measures that.
 
+`listenMatchViews` is the same stream with the faces on: the MatchViews `getMatches`
+returns, pushed. It exists separately rather than as an option on `listenMatches` because
+the badge's contract — rows, no profiles — is what makes the badge cheap, and one method
+that sometimes fetches profiles would make that contract untestable. Two things on a page
+want this account's matches, and both go through **one** subscription: a second
+`onSnapshot` would mean Firestore delivering twice, and a delivery is what is billed, so
+the same message arriving would cost two reads instead of one. Faces are fetched once per
+person per page load — not cached across navigations, so an edited name can never outlive
+the page it was read on. `store-tests/specs/15-live-list.store.js` counts all of it.
+
+Both listeners can now report a failure as well as a value. That is not decoration: before
+it, a stream that died left the demo adapter delivering an empty list — telling somebody
+with two conversations they had none — while the Firestore adapter delivered nothing at
+all, leaving a skeleton on screen. The same fault, and the two adapters lying about it in
+opposite directions, inside the one primitive a live list is built on.
+
 ### Shared semantics
 
 - `recordSwipe(from, to, action)` writes `swipes/{from}_{to}`; if the reciprocal swipe exists
