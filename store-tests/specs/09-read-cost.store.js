@@ -6,13 +6,18 @@
    reads a day. Everything else in the README is a design choice; this one is
    an arithmetic fact about whether the app keeps working.
 
-   `app.js` polls every 20 seconds while the tab is visible, and for an account
-   on the premium plan each poll calls `getLikesReceived`. That function used to
-   read the caller's **entire swipe history** — every card they have ever passed
-   or liked — to work out which of the inbound likes they had already answered.
-   The history only grows. At 25 likes a day it is 750 documents inside a month,
-   and 180 polls an hour turns that into 135,000 reads an hour: the day's whole
-   quota inside half an hour, from one tab left open, doing nothing.
+   `getLikesReceived` backs the who-liked-you list on `matches.html`. It used to
+   read the caller's **entire swipe history** — every card they have ever passed or
+   liked — to work out which of the inbound likes they had already answered, and the
+   history only grows: 750 documents inside a month at 25 likes a day.
+
+   When this spec was written that function was also on a twenty-second timer in
+   `app.js`, which turned the same walk into 135,000 reads an hour from one idle tab.
+   That poll is gone — the badge moved to `listenLikesReceived`, measured by
+   `specs/12-live-likes.store.js` — so the caller is now a person opening a page by
+   hand. The scaling property is what survives that change and is why this spec still
+   matters: a list whose cost grows with how long somebody has used the app is a bill
+   that arrives later, whoever asks for it.
 
    Reading the code does not make that visible. `getSwipes(uid)` is one line and
    looks like one read. So this spec counts, by wrapping the Firestore the store

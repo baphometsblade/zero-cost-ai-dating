@@ -124,6 +124,34 @@ module.exports = {
         }) })
       ))));
 
+    // The same pair in the world-readable copy, which is the one that matters: a
+    // padded projection is downloaded by every signed-in account building a deck.
+    t.check('a legal interestedIn word repeated past the length cap is refused here too',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).set(
+        h.discoveryDoc(ME, { preferences: Object.assign({}, h.discoveryDoc(ME).preferences, {
+          interestedIn: new Array(5000).fill('woman')
+        }) })
+      ))));
+
+    // The value bound, which had NO test in this match block at all. The two checks
+    // above are both refused by `size() <= 4` — the 5000-element list obviously, and
+    // `'woman'` because `String.size()` is 5 — so neither ever reached `hasOnly`,
+    // and deleting `hasOnly` from the world-readable copy left the whole suite green.
+    // One element, inside the length bound, so only its VALUE can deny it.
+    t.check('an interestedIn holding a word outside the four is refused here too',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).set(
+        h.discoveryDoc(ME, { preferences: Object.assign({}, h.discoveryDoc(ME).preferences, {
+          interestedIn: ['everyone']
+        }) })
+      ))));
+
+    t.check('and an interestedIn that is a short string, not a list',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).set(
+        h.discoveryDoc(ME, { preferences: Object.assign({}, h.discoveryDoc(ME).preferences, {
+          interestedIn: 'man'
+        }) })
+      ))));
+
     // The control, in the collection where a cap set too tight would be worst:
     // a projection nobody can publish is a deck nobody appears in.
     t.check('but six photo links at the length the editor allows still publish',

@@ -34,7 +34,11 @@
     messages: 'zc.demo.messages',
     reports: 'zc.demo.reports',
     session: 'zc.demo.session',
-    seeded: 'zc.demo.seeded'
+    seeded: 'zc.demo.seeded',
+    // Not a `demo` key, because this one matters most in firebase mode: it is the
+    // client-side memory behind touchActive's throttle, and the write it prevents
+    // is a Firestore write. See `touchActive`.
+    lastTouch: 'zc.lastTouch'
   };
 
   const SEED_VERSION = 1;
@@ -955,17 +959,28 @@
           action: act,
           createdAt: nowIso()
         };
-        writeSwipes(swipes);
+        // Thrown, not ignored, and thrown BEFORE the try below so it is not marked
+        // `swipeStored` — which is what makes the deck put the card back, exactly as
+        // it does when the Firestore adapter's `set` rejects.
+        //
+        // `writeJson` catches its own failures: it detects a full quota, warns, calls
+        // `warnStorageOnce` and returns false. Nothing here throws. So ignoring this
+        // boolean meant that when demo storage was full, `recordSwipe` resolved
+        // normally, `demoMatchFor` then read the in-memory map — which does hold the
+        // un-persisted swipe — found the reciprocal like, and answered
+        // `{matched: true, created: true}` for a match that was never written either.
+        // The two adapters answered a storage failure in opposite ways.
+        if (!writeSwipes(swipes)) throw new Error('That swipe could not be saved.');
         // Before the early returns below, because a one-sided like is exactly
         // the write the who-liked-you badge is watching for and most swipes
         // never reach the match-creation path at the bottom.
         pollAll();
       }
 
-      // Same contract as the Firestore adapter, and not hypothetical here: the
-      // swipe is written before any of this, and `localStorage` throws when the
-      // profile's quota is full. A caller that read that as "the swipe is lost"
-      // would put the card back over a decision already stored.
+      // Same contract as the Firestore adapter: everything from here on runs AFTER
+      // the swipe is stored, so a failure in it must not read as "the swipe is lost"
+      // — a caller that read it that way would put the card back over a decision
+      // already recorded, and the rules forbid overwriting one.
       try {
         return demoMatchFor(fromUid, toUid, effective, swipes);
       } catch (err) {
@@ -2483,7 +2498,48 @@
     }
   })();
 
-  const lastTouch = {};
+  /**
+   * When each uid last had its `lastActiveAt` written, in `localStorage` rather
+   * than in memory.
+   *
+   * This was a bare `{}`, and in a multi-page app that is not a throttle. Every
+   * page here is its own HTML document, so every navigation is a fresh JS context
+   * with an empty map — and `app.js` calls `touchActive` on every page that
+   * resolves a user. Six pages in a minute was six writes, while
+   * `docs/ARCHITECTURE.md` said "one write per five minutes". The bound held only
+   * within a single page, which is the one case it was not needed for.
+   *
+   * Storage failures are not an error here: a throttle that cannot remember is a
+   * throttle that lets the write through, which is the safe direction — the write
+   * is what keeps the activity score honest.
+   */
+  let touchMemo = {};
+
+  function readLastTouch() {
+    // Storage first, so the bound spans navigations; the in-memory copy is the
+    // fallback for a browser that has storage disabled or full, where the throttle
+    // should still hold within the page rather than vanishing entirely.
+    const stored = readJson(KEYS.lastTouch, null);
+    return isPlainObject(stored) ? stored : touchMemo;
+  }
+
+  function saveLastTouch(map) {
+    touchMemo = map;
+    // Deliberately not `writeJson`: that reports a failed write to the user, and a
+    // failed write HERE is not something the user did or can act on. In Firebase
+    // mode its sentence — "Browser storage is unavailable, so changes will not be
+    // saved" — is simply false; every change is saved, to Firestore. And the toast
+    // fires once per session, so routing this through it spent that single warning
+    // on the one write in the app designed to be droppable, on the first page load,
+    // before the user had done anything. The in-memory copy above still bounds the
+    // throttle within this page, and losing the stamp lets the next touch through,
+    // which is the safe direction.
+    try {
+      window.localStorage.setItem(KEYS.lastTouch, JSON.stringify(map));
+    } catch (err) {
+      // Nothing to tell anyone. See above.
+    }
+  }
 
   function planLimits(plan) {
     const limits = (ZC.config && ZC.config.limits) || {};
@@ -2547,8 +2603,11 @@
       await ready;
       if (!uid) return false;
       const now = Date.now();
-      if (lastTouch[uid] && now - lastTouch[uid] < TOUCH_THROTTLE_MS) return false;
-      lastTouch[uid] = now;
+      const seen = readLastTouch();
+      const last = Number(seen[uid]);
+      if (last && now - last < TOUCH_THROTTLE_MS) return false;
+      seen[uid] = now;
+      saveLastTouch(seen);
       return adapter.setLastActive(uid, new Date(now).toISOString());
     },
 

@@ -248,7 +248,7 @@ npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.
 
 ### Unit suites
 
-Fourteen suites on Node's built-in runner — **233 checks**, no install, no browser, seconds:
+Fourteen suites on Node's built-in runner — **234 checks**, no install, no browser, seconds:
 
 | Suite | What it pins down |
 | --- | --- |
@@ -319,7 +319,7 @@ readable by other accounts, that nobody can mint a match with a stranger and the
 them, that the abuse queue cannot be enumerated — is a claim about one file,
 `firestore.rules`, because there is no server to enforce anything else. Reading it
 carefully is not evidence. `rules-tests/` executes it against the Firestore emulator:
-**175 checks**, including the attacks each rule exists to stop.
+**183 checks**, including the attacks each rule exists to stop.
 
 ```sh
 npm install --prefix /tmp/zc-rules @firebase/rules-unit-testing firebase-tools
@@ -337,7 +337,7 @@ The daily usage counter is the one piece of client logic where reading the code 
 as weak an argument as it was for the rules: whether two concurrent bumps collapse into one
 is a property of a real database, not of anything visible in the file. `store-tests/` loads
 the **shipped** `public/js/data-store.js` into Node — `window` aliased to `globalThis`,
-`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **119
+`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **123
 checks**, including 20 concurrent `bumpUsage` calls on one document storing exactly 20, the
 midnight roll-over happening inside the same transaction, a bump writing `usage` and nothing
 else, 30 swipes replaying the deck's real learning-save-then-bump ordering and storing exactly
@@ -414,7 +414,7 @@ of its own, so a failed download reads as infrastructure rather than as a red te
 than either suite does. The `e2e` job runs the browser suite twice: once bare, which is what
 a contributor with nothing installed gets and which proves the Firebase spec skips rather
 than silently passing, and once inside `emulators:exec`, which is the only run in which every
-spec executes and therefore the only one that can hold the 246-check total to account. There are no secrets and no deploy step — deploying stays a
+spec executes and therefore the only one that can hold the 254-check total to account. There are no secrets and no deploy step — deploying stays a
 deliberate local `npm run deploy`.
 
 ---
@@ -529,7 +529,18 @@ These are real, and worth knowing before you show this to anyone:
   whether it *volunteers* the reason, and it no longer does — the console line names the
   document that was not written and nothing else. That removes the casual tell and not the
   determined one, which is the most a client-side project can claim.
-- **The badges are live now, and an open tab is no longer a standing cost.** This used to
+- **A match check that fails after the swipe is stored is not retried.** `recordSwipe`
+  writes the swipe and then looks for a reciprocal like; if that second half fails — a
+  dropped connection at the wrong moment — the swipe stands and no match document is
+  written. Nothing retries it. A match document is only ever created from inside
+  `recordSwipe`, and by then neither side will call it again for that pair: my swipe
+  exists, so the person is filtered out of my deck for good, and their like is answered,
+  so I leave their who-liked-you list. The result is a mutual like with no conversation,
+  in an app whose entire purpose is producing one. The deck says so plainly when it
+  happens and points at the only recovery there is — rewind and swipe again — rather
+  than claiming, as it briefly did, that the match will turn up on its own. The honest
+  fix is a reconciliation pass on load, and it has not been written.
+- **The badges are live now; the conversation list is not.** This used to
   be a 20-second poll that re-read every match *and a profile for each of them* — plus, on
   the premium plan, every inbound like and a profile for each of those — whether or not
   anything had changed. Two problems, one on top of the other. `getLikesReceived` read the
@@ -537,6 +548,13 @@ These are real, and worth knowing before you show this to anyone:
   already answered: 437 reads for a month of ordinary use, 837 once that history doubled,
   on a timer. And the poll spent the rest of it again every twenty seconds for as long as
   a tab stayed open, against a Spark project's 50,000 document reads a day.
+  What did NOT change, and the first version of this bullet wrongly implied had: `matches.js`
+  still refreshes the conversation list on its own 20-second timer (`LIST_POLL_MS`), and each
+  refresh calls `getMatches`, which bills one read per match plus one `discovery/{uid}` read for
+  each — precisely the "every match and a profile for each of them" shape described above. A tab
+  left open on `matches.html` therefore still has a standing cost; only the nav badges moved to
+  listeners. Moving that page onto `listenMatches` is the obvious next step and has not been done.
+
   `app.js` now subscribes instead. A Firestore snapshot listener bills the documents it
   first delivers and then only the ones that change, and the rows it delivers carry no
   profiles, because a badge draws a number.

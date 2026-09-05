@@ -163,10 +163,26 @@ service cloud.firestore {
           && (!('ageMax' in f) || (f.ageMax is number && f.ageMax >= 18 && f.ageMax <= 100))
           && (!(('ageMin' in f) && ('ageMax' in f)) || f.ageMin <= f.ageMax)
           && (!('maxDistanceKm' in f) || (f.maxDistanceKm is number && f.maxDistanceKm >= 1 && f.maxDistanceKm <= 500))
-          // The same four words `profile.gender` allows, and nothing else. A cap of
-          // four *elements* bounded neither what they were nor how long they were;
-          // naming them bounds both, in one clause rather than two.
-          && (!('interestedIn' in f) || (f.interestedIn is list
+          // Four elements, and each one of the same four words `profile.gender` allows.
+          //
+          // BOTH bounds, and the reason is a regression this file shipped with for one
+          // round. `size() <= 4` was replaced by `hasOnly([...])` alone, on the reasoning
+          // that naming the values "bounds both, in one clause rather than two". It does
+          // not. `hasOnly` is a subset test over element VALUES and says nothing about how
+          // many there are, and duplicates satisfy it — so `['woman']` twenty thousand
+          // times passed, 157 KiB in the one collection every signed-in account downloads
+          // to build a deck. Measured against the emulator, not reasoned about.
+          // No `is list`, because no non-list can satisfy both halves. `.hasOnly()`
+          // exists only on a list, so it raises on anything else and a raised
+          // expression denies; `.size()` catches numbers and booleans before that,
+          // raising on them too. Note what `.size()` does NOT do: strings and maps
+          // have one, so it type-checks nothing on its own — a short string clears
+          // the length bound and is refused by `hasOnly` alone. Written the other way
+          // round at first ("both raise on anything that is not one"), which is false
+          // for exactly those two, and the specs cited here were choosing fixtures
+          // long enough that the length bound refused them before the type ever
+          // mattered. `01-users` and `02-discovery` now use short ones.
+          && (!('interestedIn' in f) || (f.interestedIn.size() <= 4
                                          && f.interestedIn.hasOnly(['woman', 'man', 'nonbinary', 'other'])))
           && (!('theme' in f) || (f.theme in ['system', 'light', 'dark']))
           && (!('notifications' in f) || (f.notifications is bool))
@@ -231,10 +247,15 @@ service cloud.firestore {
           // (`rules-tests/specs/08-budget.rules.js`), and a check that says nothing
           // new is the first thing to spend.
           //
-          // A `hasAll` naming seven required keys: every one of them is
-          // dereferenced unconditionally in the lines below, and reading a key a
-          // map does not have is an error that denies the write. `01-users`
-          // removes each of the seven in turn and confirms the write still fails.
+          // A `hasAll` naming seven required keys. Six of them — email, displayName,
+          // createdAt, plan, profile, preferences — are dereferenced unconditionally
+          // in the lines below, and reading a key a map does not have is an error
+          // that denies the write. The seventh, `uid`, is not dereferenced here at
+          // all any more (see the next paragraph); it is the `allow` rules that
+          // reach for it, and they deny for the same reason. `01-users` removes each
+          // of the seven in turn and confirms the write still fails, which is the
+          // claim that matters — this paragraph only says where each denial comes
+          // from, and it said "every one of them" while one of them was elsewhere.
           //
           // `d.uid is string`: create requires `request.resource.data.uid == uid`,
           // which is the document id and therefore a string, and update freezes it
@@ -371,7 +392,19 @@ service cloud.firestore {
           && (!('ageMin' in f) || (f.ageMin is number && f.ageMin >= 18 && f.ageMin <= 100))
           && (!('ageMax' in f) || (f.ageMax is number && f.ageMax >= 18 && f.ageMax <= 100))
           && (!('maxDistanceKm' in f) || (f.maxDistanceKm is number && f.maxDistanceKm >= 1 && f.maxDistanceKm <= 500))
-          && (!('interestedIn' in f) || (f.interestedIn is list
+          // Both bounds here too, and this is the copy that matters — see the note on
+          // prefsOk. A list bounded only by `hasOnly` is unbounded in length.
+          // No `is list`, because no non-list can satisfy both halves. `.hasOnly()`
+          // exists only on a list, so it raises on anything else and a raised
+          // expression denies; `.size()` catches numbers and booleans before that,
+          // raising on them too. Note what `.size()` does NOT do: strings and maps
+          // have one, so it type-checks nothing on its own — a short string clears
+          // the length bound and is refused by `hasOnly` alone. Written the other way
+          // round at first ("both raise on anything that is not one"), which is false
+          // for exactly those two, and the specs cited here were choosing fixtures
+          // long enough that the length bound refused them before the type ever
+          // mattered. `01-users` and `02-discovery` now use short ones.
+          && (!('interestedIn' in f) || (f.interestedIn.size() <= 4
                                          && f.interestedIn.hasOnly(['woman', 'man', 'nonbinary', 'other'])))
           && (!('discoverable' in f) || f.discoverable is bool);
       }

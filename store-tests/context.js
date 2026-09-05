@@ -64,10 +64,25 @@ function createContext() {
   if (!firebase) return null;
 
   // data-store.js addresses everything through `window.*`; aliasing window to
-  // globalThis lets the browser IIFEs run untouched under Node. No
-  // localStorage shim is needed — every access to it in the store is inside a
-  // try/catch, and firebase mode never reaches one.
+  // globalThis lets the browser IIFEs run untouched under Node.
   globalThis.window = globalThis;
+
+  // ...and a localStorage shim, because "firebase mode never reaches one" stopped
+  // being true. `touchActive`'s throttle keeps its last-write times in storage —
+  // it has to, since every page in this app is its own document and an in-memory
+  // map is empty again on every navigation. Without the shim the store falls back
+  // to that in-memory copy and the suite exercises the browser-with-storage-
+  // disabled path instead of the ordinary one. Same lesson as `globalThis.firebase`
+  // one round ago: a harness that withholds a global chooses which branch runs.
+  const cells = new Map();
+  globalThis.localStorage = {
+    getItem: function (k) { return cells.has(String(k)) ? cells.get(String(k)) : null; },
+    setItem: function (k, v) { cells.set(String(k), String(v)); },
+    removeItem: function (k) { cells.delete(String(k)); },
+    clear: function () { cells.clear(); },
+    key: function (i) { return Array.from(cells.keys())[i] || null; },
+    get length() { return cells.size; }
+  };
 
   // ...and `firebase` itself, which a page gets from its <script> tags. This is
   // not decoration: `fieldValue()` in the shipped store is guarded by

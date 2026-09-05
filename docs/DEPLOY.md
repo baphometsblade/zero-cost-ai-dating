@@ -129,9 +129,9 @@ Open [`firestore.rules`](../firestore.rules). It is the only server-side securit
 has, so it is worth the five minutes.
 
 Everything below is also *executed* — `npm run test:rules` runs the real rules file against
-the Firestore emulator, **175 checks** including the attacks each rule exists to stop. If you
+the Firestore emulator, **183 checks** including the attacks each rule exists to stop. If you
 change the data model, run it. See [`rules-tests/README.md`](../rules-tests/README.md).
-`npm run test:emulator` adds the store suite to the same emulator boot: **119 more checks** that
+`npm run test:emulator` adds the store suite to the same emulator boot: **123 more checks** that
 drive the shipped `public/js/data-store.js` against a real Firestore, which is where the
 daily counter's transaction is proven — see [`store-tests/README.md`](../store-tests/README.md).
 
@@ -242,7 +242,7 @@ firebase use --add          # pick your project, alias it "default"
 Then:
 
 ```bash
-npm test                    # 9 suites, 201 checks, no install required
+npm test                    # 14 suites, 234 checks, no install required
 npm run deploy              # firebase deploy --only hosting,firestore
 ```
 
@@ -418,7 +418,7 @@ Sign-up then completes and the console is clean. This is a local edit, never a c
 the two copies disagree, `npm test` fails *every page carries exactly one CSP meta equal to
 the header minus frame-ancestors* (`tests/csp-sync.test.js`), which is the reminder to revert.
 Be clear about what that guard does **not** catch — relax the header in `firebase.json` to
-match and the suite goes quiet again, all 201 checks passing, and the weakened policy deploys
+match and the suite goes quiet again, all 234 checks passing, and the weakened policy deploys
 to everyone. Change the meta copy only, and change it back.
 
 **Or stop crossing the origin.** Serve the emulator's paths *from the page's own origin* and

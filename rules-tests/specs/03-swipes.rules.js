@@ -95,9 +95,12 @@ module.exports = {
 
     // The absent case, which two shipped paths depend on and neither can work
     // around. Every first swipe reads its own not-yet-written document and the
-    // usually-absent reciprocal one; and `getLikesReceived` asks, once per
-    // person who liked you, whether `swipes/{me}_{them}` exists — on a timer,
-    // every twenty seconds. Dropping `resource == null` from the read rule
+    // usually-absent reciprocal one; and `getLikesReceived` asks, once per person
+    // who liked you, whether `swipes/{me}_{them}` exists — as does the live
+    // `listenLikesReceived` behind the badge, on every sender it has not seen
+    // before. (This comment said "on a timer, every twenty seconds" until the
+    // timer was replaced by a snapshot listener and the sentence was not.)
+    // Dropping `resource == null` from the read rule
     // looks like tightening it and would deny a read of a document that holds
     // nothing, breaking match detection and the who-liked-you badge together.
     t.check('a signed-in user can probe their own swipe document before it exists',

@@ -323,12 +323,21 @@ changes. `store-tests/specs/11-live-cost.store.js` measures that.
 - `getUsage` auto-resets when `usage.date` is not today, so daily limits need no scheduler.
 - `canSpend(uid, field)` returns `{ allowed, remaining, limit, plan }` by reading the plan
   limits out of `ZC.config`, and is called *before* every spend.
-- `touchActive` is throttled to one write per five minutes, because `lastActiveAt` feeds the
-  activity score but is not worth a write per navigation. It is called on every auth
-  resolution and on every page that resolves a user, so without the throttle a browsing
-  session is one Firestore write per navigation. `store-tests/specs/03-writes.store.js`
-  executes the sentence — the second touch must not write, and a touch after the window
-  must, which is what pins the five minutes rather than merely "some throttle".
+- `touchActive` is throttled to one write per five minutes **across page loads**, because
+  `lastActiveAt` feeds the activity score but is not worth a write per navigation. It is
+  called on every auth resolution and on every page that resolves a user, so without the
+  throttle a browsing session is one Firestore write per navigation.
+  "Across page loads" is the load-bearing part and was not true until it was measured:
+  the last-write times lived in a module-level object, and every page here is its own
+  HTML document, so each navigation started with an empty map and wrote again. The bound
+  held only within a single page — the one case it was not needed for. They live in
+  `localStorage` now (`zc.lastTouch`), with the in-memory copy kept as a fallback for a
+  browser that has storage disabled, where a throttle that cannot remember should still
+  hold within the page rather than disappear.
+  `store-tests/specs/03-writes.store.js` executes all of it: the second touch must not
+  write, a touch after the window must — which pins the five minutes rather than merely
+  "some throttle" — and ageing the *stored* stamp must change the answer, which is what a
+  fresh page with fresh memory and the same storage actually does.
 
 ---
 
@@ -380,9 +389,17 @@ Weights, component formulas and the reason thresholds are documented in the
 ## 7. Pages and the shell
 
 `app.js` runs on every page. It mounts the toast host, applies the saved theme to
-`<html data-theme>`, renders the shared nav and bottom tab bar, wires sign-out, and polls the
-unread badge every 20 s — but only while `document.visibilityState === 'visible'`, so a
-backgrounded tab costs nothing.
+`<html data-theme>`, renders the shared nav and bottom tab bar, wires sign-out, and keeps the
+unread badges live through `ZC.store.listenMatches` — plus `listenLikesReceived` on the premium
+plan — held by `syncBadgeListeners()` and released by `stopBadgePolling()`. On Firestore those
+are `onSnapshot` streams that bill their first delivery and then only what changes; in demo mode
+they ride the store's shared 1.5 s storage poll.
+
+This section used to describe a 20-second badge poll gated on `document.visibilityState`, "so a
+backgrounded tab costs nothing". Both halves are gone: §6 was updated when the listeners landed
+and §7 was edited around and left contradicting it. The visibility claim would not hold now in
+either mode — a snapshot stream re-bills its first delivery on every reconnect, and the demo
+poll has no visibility gate at all.
 
 Page guards live in `auth.js` and run first in each controller:
 

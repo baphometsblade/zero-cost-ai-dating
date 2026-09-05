@@ -69,7 +69,9 @@ const RULES_CODE = (function () {
  * @returns {number} its value
  */
 function editorConst(name) {
-  const found = new RegExp('\\bconst ' + name + ' = (\\d+);').exec(EDITOR);
+  // Anchored to the start of a line so a commented-out constant — `// const BIO_MAX = 600;`
+  // left behind by an edit — is not read as the live one.
+  const found = new RegExp('^\\s*const ' + name + ' = (\\d+);', 'm').exec(EDITOR);
   assert.ok(found, 'public/js/profile.js has no `const ' + name + ' = <number>;` — ' +
     'this test is comparing nothing. If the constant was renamed, rename it here too.');
   return Number(found[1]);
@@ -90,7 +92,12 @@ function editorConst(name) {
  * @returns {number} the agreed value
  */
 function ruleCap(what, pattern, expectCopies) {
-  const found = [...RULES.matchAll(pattern)].map(function (m) { return Number(m[1]); });
+  // RULES_CODE, not RULES. A bound deleted from the rule and left behind in a comment
+  // explaining the deletion still counts against the raw text — and this file's comments
+  // quote rule expressions verbatim all the time, so that is the ordinary shape of an
+  // edit here rather than an exotic one. The check two tests down was fixed for exactly
+  // this and these two were left scanning prose.
+  const found = [...RULES_CODE.matchAll(pattern)].map(function (m) { return Number(m[1]); });
   assert.equal(found.length, expectCopies,
     'expected ' + expectCopies + ' copies of the ' + what + ' bound in firestore.rules, found ' +
     found.length + '. Either a rule was removed, or its text changed and this pattern no ' +
@@ -179,49 +186,96 @@ test('every key a closed allowlist admits is one something validates', function 
   // eye. `personality` had the identical defect three lines away, survived that
   // pass and several since, and was found by this check — which is the argument
   // for asking the question mechanically rather than carefully.
-  const bodies = new Map();
-  const at = new Map();
-  for (const m of RULES_CODE.matchAll(/function\s+(\w+)\s*\(([^)]*)\)\s*\{([\s\S]*?)\n\s*\}/g)) {
-    bodies.set(m[1], m[3]);
-    at.set(m[1], m.index);
-  }
-  assert.ok(bodies.size >= 15, 'found only ' + bodies.size + ' rules functions — the pattern has ' +
-    'probably stopped matching, which would make this test vacuous');
+  //
+  // Three things the first version of this check got wrong, each found by an audit
+  // rather than by the check itself, and each fixed below:
+  //   1. it keyed declarations by NAME, so the two `personalityOk`s and the two
+  //      `locationOk`s (one per match block, because a rules function cannot cross
+  //      one) collapsed into one entry each and the private copies were never read;
+  //   2. it only looked inside `function` bodies, so the closed key list written
+  //      inline in the messages `allow create` was outside its scope entirely —
+  //      the one list standing between a 1000-character cap and a 1 MiB message;
+  //   3. it accepted a key as validated when the only place it appeared was a
+  //      sibling `hasAll([...])`, which asserts presence and bounds nothing.
+  const decls = [...RULES_CODE.matchAll(/function\s+(\w+)\s*\(([^)]*)\)\s*\{([\s\S]*?)\n\s*\}/g)]
+    .map(function (m) { return { name: m[1], body: m[3], start: m.index, end: m.index + m[0].length }; });
+
+  // Exact, not a floor. A floor of 15 sat happily at 25 while two declarations were
+  // being silently dropped; the count it should have been was 27.
+  const declared = (RULES_CODE.match(/^\s*function\s+\w+\s*\(/gm) || []).length;
+  assert.equal(decls.length, declared,
+    'captured ' + decls.length + ' rules function bodies but firestore.rules declares ' +
+    declared + '. The body pattern is not matching them all, which would leave this ' +
+    'test checking less than it says.');
+
+  const byName = new Map(decls.map(function (d) { return [d.name, d.body]; }));
+
+  // Every closed key list in the file, wherever it is written — inside a validator
+  // or inline in an `allow` statement.
+  const sites = [...RULES_CODE.matchAll(/(\w+(?:\.\w+)*)\.keys\(\)\.hasOnly\(\[([\s\S]*?)\]\)/g)];
+  assert.ok(sites.length >= 10,
+    'found only ' + sites.length + ' closed key lists in firestore.rules — the pattern ' +
+    'is no longer finding them, which would make this test vacuous');
 
   const unexamined = [];
-  let listsChecked = 0;
-  for (const [name, body] of bodies) {
-    for (const list of body.matchAll(/(\w+)\.keys\(\)\.hasOnly\(\[([\s\S]*?)\]\)/g)) {
-      listsChecked += 1;
-      const receiver = list[1];
-      const keys = [...list[2].matchAll(/'([^']+)'/g)].map(function (m) { return m[1]; });
+  sites.forEach(function (list) {
+    const receiver = list[1];
+    const keys = [...list[2].matchAll(/'([^']+)'/g)].map(function (m) { return m[1]; });
+    const owner = decls.filter(function (d) { return list.index > d.start && list.index < d.end; })[0];
+    const where = owner ? owner.name : 'allow statement';
 
-      // The validator's own text, minus the allowlist itself — plus the body of
-      // anything it hands the whole document to. `userDocOk` delegates `learning`,
-      // `usage` and `blocked` wholesale to `bookkeepingOk(d)`, and a check that did
-      // not follow that would report three fields as unexamined that are not.
-      let covering = body.split(list[0]).join('');
-      for (const call of body.matchAll(new RegExp('\\b(\\w+)\\(' + receiver + '\\)', 'g'))) {
-        if (bodies.has(call[1])) covering += bodies.get(call[1]);
+    // The text that may validate these keys: the enclosing validator if there is
+    // one, otherwise the enclosing `match` block, which is where an inline list
+    // lives and where its neighbouring clauses are.
+    let covering = owner ? owner.body : blockAround(list.index);
+
+    // Plus the body of anything the validator hands the WHOLE document to. No
+    // validator does that today — `bookkeepingOk(d)` was the one and it was
+    // inlined — so this contributes nothing at present. It is kept so that
+    // reintroducing a wrapper does not make three fields look unexamined.
+    if (owner) {
+      for (const call of owner.body.matchAll(new RegExp('\\b(\\w+)\\(' + receiver + '\\)', 'g'))) {
+        if (byName.has(call[1])) covering += byName.get(call[1]);
       }
-      // ...and the `allow` statements of the match block this validator lives in,
-      // which is where a constraint that cannot be written as a field test goes:
-      // `userDocOk` says nothing about `uid` because `allow create` pins it to the
-      // document id (`request.resource.data.uid == uid`) and `allow update` freezes
-      // it. The allow lines only, never the sibling functions — a key validated in
-      // some other function of the same block is not validated in this one.
-      covering += allowsAround(at.get(name));
-
-      keys.forEach(function (key) {
-        const named = covering.indexOf("'" + key + "'") !== -1;
-        const read = new RegExp('\\.' + key + '\\b').test(covering);
-        if (!named && !read) unexamined.push(name + ' → ' + key);
-      });
     }
-  }
 
-  assert.ok(listsChecked >= 6, 'found only ' + listsChecked + ' closed key lists — ' +
-    'the pattern is no longer finding them');
+    // ...and the `allow` statements of the match block, which is where a constraint
+    // that cannot be written as a field test goes: `userDocOk` says nothing about
+    // `uid` because `allow create` pins it to the document id and `allow update`
+    // freezes it. The allow lines only, never the sibling functions — a key
+    // validated in some other function of the same block is not validated here.
+    covering += allowsAround(list.index);
+
+    // The strips come LAST, after every append, and that ordering is the point.
+    // Done before them, the `allow` text appended above re-introduces the very
+    // allowlist just removed — because a list written inline in an `allow` IS part
+    // of that statement. Stripping first made this check blind to exactly the site
+    // it had just been widened to reach, which is the same shape of bug it exists
+    // to find, one level up.
+    //
+    // Minus the allowlist itself, and minus any `hasAll` beside it: `hasAll`
+    // asserts a key is PRESENT and says nothing about its type or size — exactly
+    // the hazard this check reports — so a key named only there is not validated.
+    covering = covering.split(list[0]).join('');
+    covering = covering.replace(/keys\(\)\.hasAll\(\[[\s\S]*?\]\)/g, '');
+
+    keys.forEach(function (key) {
+      const named = covering.indexOf("'" + key + "'") !== -1;
+      const read = new RegExp('\\.' + key + '\\b').test(covering);
+      if (!named && !read) unexamined.push(where + ' → ' + key);
+    });
+  });
+
+  assert.deepEqual(unexamined, [],
+    'these keys are on a closed allowlist and nothing in the validator looks at them:\n  ' +
+    unexamined.join('\n  ') + '\nA key the rules admit and never examine is a field of any ' +
+    'type and any size, up to Firestore\'s 1 MiB per document.');
+
+  /** The innermost `match` block containing an offset, whole. */
+  function blockAround(offset) {
+    const span = spanAround(offset);
+    return span ? RULES_CODE.slice(span[0], span[1]) : '';
+  }
 
   /**
    * The `allow` statements of the innermost `match` block containing an offset.
@@ -229,6 +283,33 @@ test('every key a closed allowlist admits is one something validates', function 
    * @returns {string} those statements, concatenated
    */
   function allowsAround(offset) {
+    const span = spanAround(offset);
+    if (!span) return '';
+    const block = RULES_CODE.slice(span[0], span[1]);
+
+    // A nested `match` block's `allow` statements belong to that block, not to this
+    // one, so they are cut out before the scan. Without this, `matchOk` — declared
+    // inside `matches/{matchId}`, which nests `messages/{msgId}` — was handed the
+    // subcollection's allow lines, and they mention enough field names that `id` and
+    // `createdAt` could not be reported unexamined however little the validator
+    // looked at them. A check that cannot fail is the shape of bug this file exists
+    // to find.
+    const nested = [];
+    for (const open of block.matchAll(/^[ \t]*match\s+[^\n]*\{[ \t]*$/gm)) {
+      if (open.index === 0) continue;                       // this block's own opening line
+      if (nested.some(function (s) { return open.index >= s[0] && open.index < s[1]; })) continue;
+      nested.push([open.index, closeIn(block, open.index + open[0].lastIndexOf('{')) + 1]);
+    }
+    let own = '';
+    let cursor = 0;
+    nested.forEach(function (s) { own += block.slice(cursor, s[0]); cursor = s[1]; });
+    own += block.slice(cursor);
+
+    return [...own.matchAll(/\ballow\s[^;]*;/g)].map(function (m) { return m[0]; }).join('\n');
+  }
+
+  /** [start, end) of the innermost `match` block containing an offset. */
+  function spanAround(offset) {
     let best = null;
     // Anchored on the block-opening brace at end of line: a path segment like
     // `/users/{uid}` carries braces of its own, and scanning from the first one
@@ -240,74 +321,117 @@ test('every key a closed allowlist admits is one something validates', function 
       const end = closeOf(start + open[0].lastIndexOf('{'));
       if (end > offset && (best === null || start > best[0])) best = [start, end];
     }
-    if (!best) return '';
-    const block = RULES_CODE.slice(best[0], best[1]);
-    return [...block.matchAll(/\ballow\s[^;]*;/g)].map(function (m) { return m[0]; }).join('\n');
+    return best;
   }
 
-  /** The offset just past the `}` closing the brace at `open`. */
+  /** The offset of the `}` closing the brace at `open`, within RULES_CODE. */
   function closeOf(open) {
+    return closeIn(RULES_CODE, open);
+  }
+
+  /** The offset of the `}` closing the brace at `open`, within any text. */
+  function closeIn(text, open) {
     let depth = 0;
-    for (let i = open; i < RULES_CODE.length; i += 1) {
-      if (RULES_CODE[i] === '{') depth += 1;
-      else if (RULES_CODE[i] === '}') {
+    for (let i = open; i < text.length; i += 1) {
+      if (text[i] === '{') depth += 1;
+      else if (text[i] === '}') {
         depth -= 1;
         if (depth === 0) return i;
       }
     }
-    return RULES_CODE.length;
+    return text.length;
   }
-  assert.deepEqual(unexamined, [],
-    'these keys are on a closed allowlist and nothing in the validator looks at them:\n  ' +
-    unexamined.join('\n  ') + '\nA key the rules admit and never examine is a field of any ' +
-    'type and any size, up to Firestore\'s 1 MiB per document.');
 });
 
-test('every list whose length the rules bound also has its contents bounded', function () {
+test('every list the rules accept is bounded in length AND in contents', function () {
   // `size()` counts elements and says nothing about what is in them, so a list
-  // capped at six could still carry a megabyte in one element and pass. Each of
-  // these was exactly that until `listCharsOk` was added, and the failure mode is
-  // silent: nothing breaks, the document just grows without limit.
+  // capped at six could still carry a megabyte in one element. `hasOnly` is the
+  // mirror: it pins what the elements ARE and says nothing about how many, so a
+  // list of four permitted words can be twenty thousand of them. A list needs
+  // both, and `preferences.interestedIn` shipped for a round with only the second
+  // — 157 KiB in the world-readable projection, measured against the emulator.
   //
-  // This is the check that keeps a *new* bounded list from being added with only
-  // half the bound. It finds every `X.size() <= n` in the file and asks whether
-  // the same expression is measured by listCharsOk somewhere too.
+  // The first version of this check looked for the literal shape
+  // `X is list && X.size() <= n` and policed only what matched. That made its
+  // scope an accident of how a clause happened to be written: dropping a
+  // redundant `is list` — which the fix for that very regression did — removed a
+  // field from the check without removing anything from the rules. A check whose
+  // coverage shrinks silently when you edit the file it checks is worse than none.
   //
-  // Only variable-length lists. `matches.users` is `size() == 2` and its two
-  // elements are addressed by index and pinned to the document id, so Firestore's
-  // own 1500-byte id limit bounds them; a list that names its elements does not
-  // need to be measured as a whole.
-  // Counted per occurrence, not per name. Most of these bounds appear twice —
-  // once for `users/{uid}` and once for the `discovery/{uid}` projection — and a
-  // set-membership test would call `f.interestedIn` measured on the strength of
-  // the copy in the *other* match block. Deleting one of the two was invisible
-  // when this check was first written, which is the drift it is here to catch.
-  const sized = tally(/([A-Za-z][\w.]*(?:\(\))?)\s+is list && \1\.size\(\) <= \d+/g);
-  const total = [...sized.values()].reduce(function (n, c) { return n + c; }, 0);
-  assert.ok(total >= 5, 'found only ' + total + ' bounded lists in firestore.rules — ' +
-    'the pattern has probably stopped matching, which would make this test vacuous');
+  // So the model is explicit now. Anything the rules treat as a list is
+  // enumerated, each one must carry both kinds of bound, and anything that
+  // legitimately cannot is named here with its reason rather than quietly
+  // falling outside a regex.
+  const EXEMPT = {
+    'd.users': 'fixed at size() == 2 and addressed by index, and both elements are ' +
+      'pinned to the document id by `matchId == d.users[0] + "_" + d.users[1]`, so ' +
+      "Firestore's own 1500-byte id limit bounds them.",
+    'm.values()': 'bounded by listCharsOk; its length is the length of m.keys(), ' +
+      'which is capped beside it — a map cannot have more values than keys.'
+  };
 
-  // Skipping listCharsOk's own definition, whose parameter is not a list anybody wrote.
-  const measured = tally(/(?<!function )listCharsOk\(([^,]+),/g);
+  // The lists this file is known to accept. Derivation alone cannot police them:
+  // every way of spotting a list — `is list`, `listCharsOk`, `hasOnly` — is itself
+  // one of the bounds, so a field whose bounds are ALL removed stops looking like a
+  // list and silently leaves the check's scope. That is not hypothetical: it is how
+  // the first rebuild of this check still passed when `interestedIn`'s `hasOnly` was
+  // deleted. Named here, a field cannot disappear by being broken badly enough.
+  //
+  // Derivation stays, so a list added tomorrow is policed without anyone remembering
+  // to add it here. The two together mean: known lists can never leave, new lists
+  // arrive automatically.
+  const KNOWN = ['p.interests', 'p.photos', 'd.blocked', 'f.interestedIn', 'd.users',
+    'm.keys()', 'm.values()'];
 
-  const short = [...sized.keys()]
-    .filter(function (expr) { return (measured.get(expr) || 0) < sized.get(expr); })
-    .map(function (expr) {
-      return expr + ' (bounded by length ' + sized.get(expr) + '×, by contents ' +
-        (measured.get(expr) || 0) + '×)';
-    });
-  assert.deepEqual(short, [],
-    'these lists have their length bounded but not their contents: ' + JSON.stringify(short) +
-    '. A list of six elements is not a bounded field — one element can be a megabyte. ' +
-    'Add listCharsOk(<the list>, <total characters>) beside the size() check.');
-
-  /** How many times each capture-group-1 value appears. */
-  function tally(pattern) {
-    const counts = new Map();
-    for (const m of RULES.matchAll(pattern)) {
-      const key = m[1].trim();
-      counts.set(key, (counts.get(key) || 0) + 1);
-    }
-    return counts;
+  /** Every expression firestore.rules treats as a list. */
+  const lists = new Set(KNOWN);
+  for (const m of RULES_CODE.matchAll(/([A-Za-z][\w.]*)\s+is list/g)) lists.add(m[1]);
+  for (const m of RULES_CODE.matchAll(/(?<!function )listCharsOk\(([^,]+),/g)) lists.add(m[1].trim());
+  for (const m of RULES_CODE.matchAll(/([A-Za-z][\w.]*(?:\(\))?)\.hasOnly\(\[/g)) {
+    // `keys().hasOnly` is a map's key list, policed by the check above; a bare
+    // `X.hasOnly` is a value constraint on a list.
+    if (!m[1].endsWith('keys()')) lists.add(m[1]);
   }
+
+  assert.ok(lists.size >= 6,
+    'found only ' + lists.size + ' list-typed expressions in firestore.rules — the ' +
+    'patterns are no longer finding them, which would make this test vacuous');
+
+  const unbounded = [];
+  lists.forEach(function (expr) {
+    if (Object.prototype.hasOwnProperty.call(EXEMPT, expr)) return;
+    const q = expr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const length = new RegExp(q + '\\.size\\(\\) [<=]= \\d+').test(RULES_CODE);
+    const contents = new RegExp('listCharsOk\\(' + q + ',').test(RULES_CODE) ||
+      new RegExp(q + '\\.hasOnly\\(\\[').test(RULES_CODE);
+    if (!length || !contents) {
+      unbounded.push(expr + ' (length ' + (length ? 'yes' : 'NO') +
+        ', contents ' + (contents ? 'yes' : 'NO') + ')');
+    }
+  });
+
+  assert.deepEqual(unbounded, [],
+    'these lists are not bounded in both directions:\n  ' + unbounded.join('\n  ') +
+    '\nA list needs a cap on how many elements it has AND a cap on what is in them: ' +
+    'six elements can hold a megabyte, and four permitted words can be twenty ' +
+    'thousand of them. Add the missing one, or add the expression to EXEMPT with ' +
+    'the reason it cannot need it.');
+
+  // The exemptions must stay real: an expression named here that the rules no
+  // longer contain is a stale excuse, and the next list to need one will be
+  // written next to it.
+  const stale = Object.keys(EXEMPT).filter(function (expr) { return !lists.has(expr); });
+  assert.deepEqual(stale, [],
+    'these expressions are exempted but firestore.rules no longer treats them as ' +
+    'lists: ' + JSON.stringify(stale) + '. Remove the exemption.');
+
+  // ...and the inventory must stay real too, in the other direction: a name in
+  // KNOWN that the rules no longer mention at all is a field that was deleted, and
+  // leaving it here would keep the check green over a list that is not there.
+  const gone = KNOWN.filter(function (expr) {
+    return RULES_CODE.indexOf(expr.replace(/\(\)$/, '')) === -1;
+  });
+  assert.deepEqual(gone, [],
+    'these lists are named in KNOWN but appear nowhere in firestore.rules: ' +
+    JSON.stringify(gone) + '. If the field was removed, remove it here too.');
 });
