@@ -102,11 +102,24 @@ module.exports = {
       // stay green with no length bound at all.
       ['a legal interestedIn word repeated past the length cap',
         { preferences: prefs({ interestedIn: new Array(5000).fill('woman') }) }],
-      // And the guard that is deliberately absent: `is list` was dropped because
-      // `.size()` and `.hasOnly()` raise on anything else, and a raised expression
-      // denies. That is a claim about the rules language, so it is executed.
-      ['an interestedIn that is not a list at all',
-        { preferences: prefs({ interestedIn: 'woman' }) }],
+      // And the guard that is deliberately absent: `is list` was dropped because a
+      // non-list cannot satisfy `.size() <= 4 && .hasOnly([...])`. That is a claim
+      // about the rules language, so it is executed — and the fixtures have to be
+      // chosen so that `hasOnly` is what refuses them.
+      //
+      // `'woman'` was the first attempt and proved nothing: `String` HAS a `size()`
+      // in this language (`stampOk` and `d.email.size() <= 320` both rely on it),
+      // so a five-character string is refused by `5 <= 4` and never reaches
+      // `hasOnly`. Each fixture below is short enough or small enough to pass the
+      // length bound, so only the type can deny it.
+      ['an interestedIn that is a short string, not a list',
+        { preferences: prefs({ interestedIn: 'man' }) }],
+      ['an interestedIn that is an empty map, not a list',
+        { preferences: prefs({ interestedIn: {} }) }],
+      ['an interestedIn that is a number',
+        { preferences: prefs({ interestedIn: 3 }) }],
+      ['an interestedIn that is a boolean',
+        { preferences: prefs({ interestedIn: true }) }],
       ['a single blocked uid the size of a block list',
         { blocked: ['x'.repeat(48001)] }],
       ['an affinity keyed by a padded slug',

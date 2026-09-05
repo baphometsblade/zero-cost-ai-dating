@@ -2525,7 +2525,20 @@
 
   function saveLastTouch(map) {
     touchMemo = map;
-    writeJson(KEYS.lastTouch, map);
+    // Deliberately not `writeJson`: that reports a failed write to the user, and a
+    // failed write HERE is not something the user did or can act on. In Firebase
+    // mode its sentence — "Browser storage is unavailable, so changes will not be
+    // saved" — is simply false; every change is saved, to Firestore. And the toast
+    // fires once per session, so routing this through it spent that single warning
+    // on the one write in the app designed to be droppable, on the first page load,
+    // before the user had done anything. The in-memory copy above still bounds the
+    // throttle within this page, and losing the stamp lets the next touch through,
+    // which is the safe direction.
+    try {
+      window.localStorage.setItem(KEYS.lastTouch, JSON.stringify(map));
+    } catch (err) {
+      // Nothing to tell anyone. See above.
+    }
   }
 
   function planLimits(plan) {

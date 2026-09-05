@@ -225,5 +225,55 @@ module.exports = {
       afterAging === true,
       'aged the stored stamp past the window and the next touch ' +
       (afterAging ? 'wrote, as a fresh page would' : 'did NOT write — memory won over storage'));
+
+    // Moving the throttle into storage gave it a way to fail that it did not have
+    // before, and for a round it reported that failure to the user. The write went
+    // through `writeJson`, which on a browser with storage disabled toasts
+    // "Browser storage is unavailable, so changes will not be saved." In THIS mode
+    // that sentence is false — every change is saved, to Firestore, which is what
+    // this whole suite is connected to — and the toast fires once per session, so
+    // the throttle spent the session's only warning on the one write designed to be
+    // droppable, on the first page load, before the user had done anything.
+    //
+    // The presence write itself must still land: a throttle that cannot remember is
+    // a throttle that lets the write through, which is the safe direction to fail.
+    const noToastUid = 'writes-touch-quiet';
+    await k.admin.set('users', noToastUid, k.h.userDoc(noToastUid, { lastActiveAt: null }));
+    // The projection too, because `setLastActive` refreshes it and warns — rightly —
+    // when it is not there. Without this the check would be asserting on that
+    // warning rather than on the one it is about.
+    await k.admin.set('discovery', noToastUid, k.h.discoveryDoc(noToastUid));
+
+    const realSetItem = globalThis.localStorage.setItem;
+    const hadUi = Object.prototype.hasOwnProperty.call(k.ctx.ZC, 'ui');
+    const realUi = k.ctx.ZC.ui;
+    const toasts = [];
+    let quietTouch = null;
+    let quietWarnings = [];
+    k.ctx.drainWarnings();
+    try {
+      // What a private window with site data blocked does to every storage call.
+      globalThis.localStorage.setItem = function () { throw new Error('storage is disabled'); };
+      // `warnStorageOnce` is a no-op without this — the store only toasts if the UI
+      // module is loaded, and under Node it is not. Withholding it would leave the
+      // check watching a branch that cannot speak.
+      k.ctx.ZC.ui = { toast: function (message) { toasts.push(String(message)); } };
+      quietTouch = await k.store.touchActive(noToastUid);
+      quietWarnings = k.ctx.drainWarnings();
+    } finally {
+      globalThis.localStorage.setItem = realSetItem;
+      if (hadUi) k.ctx.ZC.ui = realUi;
+      else delete k.ctx.ZC.ui;
+    }
+    const quietStored = (await k.admin.get('users', noToastUid) || {}).lastActiveAt;
+
+    t.check('a presence write still lands when storage refuses the throttle stamp',
+      quietTouch === true && typeof quietStored === 'string',
+      k.show({ returned: quietTouch, stored: quietStored }));
+
+    t.check('and it says nothing to the user, who is not the one storage failed',
+      toasts.length === 0 && quietWarnings.length === 0,
+      toasts.length + ' toast(s) ' + k.show(toasts) + ', ' +
+      quietWarnings.length + ' warning(s) ' + k.show(quietWarnings));
   }
 };

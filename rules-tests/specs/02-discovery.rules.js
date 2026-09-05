@@ -133,10 +133,22 @@ module.exports = {
         }) })
       ))));
 
-    t.check('and an interestedIn that is not a list at all, which nothing spells out',
+    // The value bound, which had NO test in this match block at all. The two checks
+    // above are both refused by `size() <= 4` — the 5000-element list obviously, and
+    // `'woman'` because `String.size()` is 5 — so neither ever reached `hasOnly`,
+    // and deleting `hasOnly` from the world-readable copy left the whole suite green.
+    // One element, inside the length bound, so only its VALUE can deny it.
+    t.check('an interestedIn holding a word outside the four is refused here too',
       await ok(assertFails(as(ME).doc('discovery/' + ME).set(
         h.discoveryDoc(ME, { preferences: Object.assign({}, h.discoveryDoc(ME).preferences, {
-          interestedIn: 'woman'
+          interestedIn: ['everyone']
+        }) })
+      ))));
+
+    t.check('and an interestedIn that is a short string, not a list',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).set(
+        h.discoveryDoc(ME, { preferences: Object.assign({}, h.discoveryDoc(ME).preferences, {
+          interestedIn: 'man'
         }) })
       ))));
 

@@ -286,7 +286,26 @@ test('every key a closed allowlist admits is one something validates', function 
     const span = spanAround(offset);
     if (!span) return '';
     const block = RULES_CODE.slice(span[0], span[1]);
-    return [...block.matchAll(/\ballow\s[^;]*;/g)].map(function (m) { return m[0]; }).join('\n');
+
+    // A nested `match` block's `allow` statements belong to that block, not to this
+    // one, so they are cut out before the scan. Without this, `matchOk` — declared
+    // inside `matches/{matchId}`, which nests `messages/{msgId}` — was handed the
+    // subcollection's allow lines, and they mention enough field names that `id` and
+    // `createdAt` could not be reported unexamined however little the validator
+    // looked at them. A check that cannot fail is the shape of bug this file exists
+    // to find.
+    const nested = [];
+    for (const open of block.matchAll(/^[ \t]*match\s+[^\n]*\{[ \t]*$/gm)) {
+      if (open.index === 0) continue;                       // this block's own opening line
+      if (nested.some(function (s) { return open.index >= s[0] && open.index < s[1]; })) continue;
+      nested.push([open.index, closeIn(block, open.index + open[0].lastIndexOf('{')) + 1]);
+    }
+    let own = '';
+    let cursor = 0;
+    nested.forEach(function (s) { own += block.slice(cursor, s[0]); cursor = s[1]; });
+    own += block.slice(cursor);
+
+    return [...own.matchAll(/\ballow\s[^;]*;/g)].map(function (m) { return m[0]; }).join('\n');
   }
 
   /** [start, end) of the innermost `match` block containing an offset. */
@@ -305,17 +324,22 @@ test('every key a closed allowlist admits is one something validates', function 
     return best;
   }
 
-  /** The offset of the `}` closing the brace at `open`. */
+  /** The offset of the `}` closing the brace at `open`, within RULES_CODE. */
   function closeOf(open) {
+    return closeIn(RULES_CODE, open);
+  }
+
+  /** The offset of the `}` closing the brace at `open`, within any text. */
+  function closeIn(text, open) {
     let depth = 0;
-    for (let i = open; i < RULES_CODE.length; i += 1) {
-      if (RULES_CODE[i] === '{') depth += 1;
-      else if (RULES_CODE[i] === '}') {
+    for (let i = open; i < text.length; i += 1) {
+      if (text[i] === '{') depth += 1;
+      else if (text[i] === '}') {
         depth -= 1;
         if (depth === 0) return i;
       }
     }
-    return RULES_CODE.length;
+    return text.length;
   }
 });
 

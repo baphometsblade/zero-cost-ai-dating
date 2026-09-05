@@ -172,10 +172,16 @@ service cloud.firestore {
           // many there are, and duplicates satisfy it — so `['woman']` twenty thousand
           // times passed, 157 KiB in the one collection every signed-in account downloads
           // to build a deck. Measured against the emulator, not reasoned about.
-          // No `is list`: `.size()` and `.hasOnly()` both raise on anything that is not
-          // one, and a raised expression denies. Measured against the emulator for
-          // strings, maps, numbers, booleans and null — all refused either way — and
-          // this rule has an expression budget to answer to. `02-discovery` executes it.
+          // No `is list`, because no non-list can satisfy both halves. `.hasOnly()`
+          // exists only on a list, so it raises on anything else and a raised
+          // expression denies; `.size()` catches numbers and booleans before that,
+          // raising on them too. Note what `.size()` does NOT do: strings and maps
+          // have one, so it type-checks nothing on its own — a short string clears
+          // the length bound and is refused by `hasOnly` alone. Written the other way
+          // round at first ("both raise on anything that is not one"), which is false
+          // for exactly those two, and the specs cited here were choosing fixtures
+          // long enough that the length bound refused them before the type ever
+          // mattered. `01-users` and `02-discovery` now use short ones.
           && (!('interestedIn' in f) || (f.interestedIn.size() <= 4
                                          && f.interestedIn.hasOnly(['woman', 'man', 'nonbinary', 'other'])))
           && (!('theme' in f) || (f.theme in ['system', 'light', 'dark']))
@@ -388,10 +394,16 @@ service cloud.firestore {
           && (!('maxDistanceKm' in f) || (f.maxDistanceKm is number && f.maxDistanceKm >= 1 && f.maxDistanceKm <= 500))
           // Both bounds here too, and this is the copy that matters — see the note on
           // prefsOk. A list bounded only by `hasOnly` is unbounded in length.
-          // No `is list`: `.size()` and `.hasOnly()` both raise on anything that is not
-          // one, and a raised expression denies. Measured against the emulator for
-          // strings, maps, numbers, booleans and null — all refused either way — and
-          // this rule has an expression budget to answer to. `02-discovery` executes it.
+          // No `is list`, because no non-list can satisfy both halves. `.hasOnly()`
+          // exists only on a list, so it raises on anything else and a raised
+          // expression denies; `.size()` catches numbers and booleans before that,
+          // raising on them too. Note what `.size()` does NOT do: strings and maps
+          // have one, so it type-checks nothing on its own — a short string clears
+          // the length bound and is refused by `hasOnly` alone. Written the other way
+          // round at first ("both raise on anything that is not one"), which is false
+          // for exactly those two, and the specs cited here were choosing fixtures
+          // long enough that the length bound refused them before the type ever
+          // mattered. `01-users` and `02-discovery` now use short ones.
           && (!('interestedIn' in f) || (f.interestedIn.size() <= 4
                                          && f.interestedIn.hasOnly(['woman', 'man', 'nonbinary', 'other'])))
           && (!('discoverable' in f) || f.discoverable is bool);
