@@ -888,20 +888,25 @@
       // claiming either answer, and carry on: the swipe was spent, so the daily
       // count below is owed either way.
       //
-      // The wording matters and the first version got it wrong. It said the match
-      // "will show up if there is one", and nothing anywhere makes that true: a
-      // match document is only ever written from inside `recordSwipe`, my swipe now
-      // exists so `listCandidates` filters this person out of my deck for good, and
-      // their swipe is answered so I drop off their who-liked-you list. Neither
-      // client will call `recordSwipe` for this pair again, so nothing retries. A
-      // sentence promising a match would arrive on its own also removed the one
-      // action that would actually recover it — swiping the same person again after
-      // a rewind — by telling the person there was nothing to do.
+      // The wording has been wrong twice, in opposite directions, and both times
+      // because the sentence described something the code did not do.
       //
-      // This is a real gap and it is documented as one in README's Limitations
-      // rather than papered over here; what this line owes the reader is the truth
-      // about what just happened.
-      toast('Saved, but we could not check for a match just then. If you were expecting one, rewind and swipe again.', 'warn');
+      // First it said the match "will show up if there is one". Nothing made that
+      // true: a match document was only ever written from inside `recordSwipe`, my
+      // swipe now exists so `listCandidates` filters this person out of my deck for
+      // good, and their swipe is answered so I drop off their who-liked-you list —
+      // neither client would call `recordSwipe` for this pair again.
+      //
+      // Then it said "rewind and swipe again", which was honest about the gap and
+      // named a recovery most of the people reading it did not have: rewinds are a
+      // premium feature, so `canSpend` refuses one on the free plan, and the deck's
+      // history is a per-page array that a navigation empties.
+      //
+      // Now the store keeps a note of the check it started and finishes it on the
+      // next page load, so the sentence can say what actually happens. It is
+      // device-local — this browser finishes what this browser began — and that
+      // limit is written down in README's Limitations rather than glossed here.
+      toast('Saved, but we could not check for a match just then. We will try again next time you open the app.', 'warn');
     }
 
     // Past here the swipe — and any match it created — is in storage. Nothing

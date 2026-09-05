@@ -41,7 +41,7 @@
  */
 const CLAIMS = {
   unit: {
-    total: 246,
+    total: 253,
     how: 'npm test',
     note: 'Node\'s built-in runner, no install'
   },
@@ -61,7 +61,7 @@ const CLAIMS = {
     note: 'firestore.rules executed against the emulator'
   },
   store: {
-    total: 141,
+    total: 153,
     how: 'npm run test:store',
     note: 'the shipped data-store.js driven against the emulator'
   }

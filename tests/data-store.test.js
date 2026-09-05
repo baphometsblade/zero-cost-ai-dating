@@ -959,6 +959,168 @@ test('a backwards clock correction releases the presence throttle instead of lat
   }
 });
 
+test('a match check that never ran is finished on the next page load', async function () {
+  // `recordSwipe` writes the swipe and THEN looks for a reciprocal like. When the
+  // swipe lands and the match step does not, nothing anywhere retried: my swipe
+  // exists so that person leaves my deck for good, their like is answered so I
+  // leave their who-liked-you list, and neither client calls `recordSwipe` for
+  // the pair again. The two were matched and neither would ever be told.
+  await resetWorld();
+  const me = 'demo-you';
+  const them = 'ava-nakamura';
+  await store.recordSwipe(them, me, 'like');
+
+  let failed = null;
+  await withStorageRefusing([KEYS.matches], async function () {
+    try {
+      await store.recordSwipe(me, them, 'like');
+    } catch (err) {
+      failed = err;
+    }
+  });
+  assert.ok(failed && failed.swipeStored, 'the swipe landed and the match did not');
+  assert.equal(JSON.parse(backing.get(KEYS.matches) || '{}')[[me, them].sort().join('_')],
+    undefined, 'so there is no match document — which is the state being repaired');
+
+  const result = await store.reconcileMatches(me);
+  assert.deepEqual({ checked: result.checked, repaired: result.repaired, pending: result.pending },
+    { checked: 1, repaired: 1, pending: 0 },
+    'the next page load finishes the one check it knows it started');
+  const matches = await store.getMatches(me);
+  assert.ok(matches.some(function (m) { return m.otherUid === them; }),
+    'and the conversation is there');
+});
+
+test('and a page load with nothing owed does no work at all', async function () {
+  // The reason this can run on every page: the log is empty for anyone who has
+  // never lost a check, and an empty log is an early return before any read.
+  await resetWorld();
+  const before = await store.reconcileMatches('demo-you');
+  assert.deepEqual(before, { checked: 0, repaired: 0, pending: 0 }, 'nothing owed, nothing done');
+
+  await store.recordSwipe('demo-you', 'ava-nakamura', 'like');
+  const after = await store.reconcileMatches('demo-you');
+  assert.deepEqual(after, { checked: 0, repaired: 0, pending: 0 },
+    'and an ordinary swipe that succeeded leaves nothing behind either');
+});
+
+/**
+ * Put a note in the log by hand, as a device that failed mid-check would have.
+ *
+ * Staged rather than produced, and for a reason worth writing down: the failures
+ * that leave a note behind are narrow, so a check that tries to provoke one
+ * usually gets a run where the note was written and then cleared on success —
+ * and then passes whatever the code does. Three checks below were exactly that
+ * until the note was injected instead. Seeding it directly is the only way to
+ * exercise what happens to a note that is genuinely stale.
+ */
+function seedPendingMatch(fromUid, toUid) {
+  const map = JSON.parse(backing.get(KEYS.pendingMatch) || '{}');
+  if (!map[fromUid]) map[fromUid] = {};
+  map[fromUid][toUid] = { at: new Date().toISOString(), last: null };
+  backing.set(KEYS.pendingMatch, JSON.stringify(map));
+}
+
+test('a stored pass never becomes a match, whatever the note says', async function () {
+  // The repair reads the swipe rather than trusting the note, so an action that
+  // cannot produce a match does not produce one here either. This is the half of
+  // that rule a stale note can actually reach: a `pass` write never calls the
+  // match path at all, so a note for one can only ever arrive by being wrong.
+  await resetWorld();
+  const me = 'demo-you';
+  const them = 'ava-nakamura';
+  await store.recordSwipe(them, me, 'like');
+  await store.recordSwipe(me, them, 'pass');
+  seedPendingMatch(me, them);
+
+  const result = await store.reconcileMatches(me);
+  assert.equal(result.repaired, 0, 'nothing was repaired');
+  const matches = await store.getMatches(me);
+  assert.equal(matches.filter(function (m) { return m.otherUid === them; }).length, 0,
+    'and a stored pass must never become a match');
+});
+
+test('a rewind takes the unfinished check with it', async function () {
+  // Otherwise the next page load re-creates the match the rewind just removed
+  // the swipe for.
+  await resetWorld();
+  const me = 'demo-you';
+  const them = 'ava-nakamura';
+  await store.recordSwipe(them, me, 'like');
+  await withStorageRefusing([KEYS.matches], async function () {
+    try { await store.recordSwipe(me, them, 'like'); } catch (err) { /* expected */ }
+  });
+  const undone = await store.undoSwipe(me, them);
+  assert.ok(undone && undone.ok, 'the rewind went through');
+
+  const result = await store.reconcileMatches(me);
+  assert.equal(result.checked, 0, 'nothing is owed for a swipe that no longer exists');
+  const matches = await store.getMatches(me);
+  assert.equal(matches.filter(function (m) { return m.otherUid === them; }).length, 0,
+    'and no match was conjured from the note');
+});
+
+test('and so does ending the conversation', async function () {
+  // This is the failure a sweep could never avoid, and the reason there is a note
+  // rather than a sweep. `unmatch` deletes the match and leaves BOTH swipes — so
+  // "mutual like with no match document" is byte-for-byte what a deliberately
+  // ended conversation looks like. A note left behind after an unmatch would
+  // reopen that conversation on the person's next page load, with no way for them
+  // to tell why.
+  await resetWorld();
+  const me = 'demo-you';
+  const them = 'ava-nakamura';
+  await store.recordSwipe(them, me, 'like');
+  await store.recordSwipe(me, them, 'like');
+  const matchId = [me, them].sort().join('_');
+  seedPendingMatch(me, them);
+  await store.unmatch(matchId, me);
+
+  const result = await store.reconcileMatches(me);
+  assert.equal(result.repaired, 0, 'nothing is owed for a conversation that was ended');
+  const matches = await store.getMatches(me);
+  assert.equal(matches.filter(function (m) { return m.otherUid === them; }).length, 0,
+    'and it stays ended');
+});
+
+test('a note whose swipe was never written creates nothing', async function () {
+  // The note is written before the adapter is called, because a swipe write whose
+  // acknowledgement never arrives may still have committed — so a note written
+  // afterwards would not exist for the case that matters most. The price is a
+  // note that sometimes points at a swipe that never landed, and the repair reads
+  // the swipe rather than trusting the note for exactly that reason: the rules
+  // prove the other person liked me and never look at my side.
+  await resetWorld();
+  const me = 'demo-you';
+  const them = 'ava-nakamura';
+  await store.recordSwipe(them, me, 'like');
+  seedPendingMatch(me, them);
+
+  const result = await store.reconcileMatches(me);
+  const matches = await store.getMatches(me);
+  assert.equal(matches.filter(function (m) { return m.otherUid === them; }).length, 0,
+    'no swipe of mine, no match — whatever the note says');
+  assert.equal(result.repaired, 0, 'and nothing is reported as repaired');
+  assert.equal(JSON.parse(backing.get(KEYS.swipes) || '{}')[me + '_' + them], undefined,
+    'and no swipe was invented to justify it either');
+});
+
+test('two page loads at once finish each check once', async function () {
+  // `applyAuthState` fires twice on an ordinary sign-in, and two runs racing over
+  // the same notes would each read the same swipes.
+  await resetWorld();
+  const me = 'demo-you';
+  const them = 'ava-nakamura';
+  await store.recordSwipe(them, me, 'like');
+  await withStorageRefusing([KEYS.matches], async function () {
+    try { await store.recordSwipe(me, them, 'like'); } catch (err) { /* expected */ }
+  });
+
+  const both = await Promise.all([store.reconcileMatches(me), store.reconcileMatches(me)]);
+  assert.deepEqual(both[0], both[1], 'the second caller joins the first run rather than starting another');
+  assert.equal(both[0].checked, 1, 'one check, not two');
+});
+
 /** Resolve on a listener's first delivery, then unsubscribe. */
 function firstDelivery(subscribe) {
   return new Promise(function (resolve, reject) {

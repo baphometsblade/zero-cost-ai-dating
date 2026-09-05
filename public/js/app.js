@@ -609,6 +609,29 @@
   }
 
   /**
+   * Finish any match check this device started and never got an answer to.
+   *
+   * Same shape as `touchActive` above, and for the same reason: it must never
+   * block the UI and must never surface. With nothing owed it costs no reads and
+   * no round trips, so running it on every page is free for everyone who has
+   * never lost a check — and the page that swipes is not the page that shows the
+   * conversation, so there is nowhere better to put it.
+   * @param {string} uid the signed-in account
+   * @returns {void}
+   */
+  function reconcileMatches(uid) {
+    if (!ZC.store || typeof ZC.store.reconcileMatches !== 'function') return;
+    try {
+      const result = ZC.store.reconcileMatches(uid);
+      if (result && typeof result.catch === 'function') {
+        result.catch(function () { /* the note stays; the next load tries again */ });
+      }
+    } catch (err) {
+      // A repair that cannot run is the state this started in, not a new failure.
+    }
+  }
+
+  /**
    * Apply everything that depends on who is signed in. Safe to call again on
    * every auth change.
    * @param {Object|null} doc UserDoc or null
@@ -623,6 +646,7 @@
 
     if (doc && doc.uid) {
       touchActive(doc.uid);
+      reconcileMatches(doc.uid);
       startBadgePolling();
     } else {
       stopBadgePolling();

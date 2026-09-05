@@ -38,7 +38,12 @@
     // Not a `demo` key, because this one matters most in firebase mode: it is the
     // client-side memory behind touchActive's throttle, and the write it prevents
     // is a Firestore write. See `touchActive`.
-    lastTouch: 'zc.lastTouch'
+    lastTouch: 'zc.lastTouch',
+    // Also not a `demo` key, and for the same reason: what it remembers is a
+    // Firestore write that has not happened yet. Every page here is its own
+    // document, so an in-memory map is empty again on exactly the navigation
+    // that lost the check. See `reconcileMatches`.
+    pendingMatch: 'zc.pendingMatch'
   };
 
   const SEED_VERSION = 1;
@@ -68,6 +73,12 @@
   // rather than a point past which the chat stops working.
   const LIVE_MESSAGE_WINDOW = 200;
   const TOUCH_THROTTLE_MS = 5 * 60 * 1000;
+  /** How many unfinished match checks to remember. A log, not a queue. */
+  const PENDING_MATCH_MAX = 20;
+  /** How many to finish per page load, so a backlog cannot become a stampede. */
+  const RECONCILE_MAX_PER_RUN = 5;
+  /** How long before the same pair is worth trying again, across tabs. */
+  const RECONCILE_RETRY_MS = 60 * 1000;
   const POLL_MS = 1500;
   const GENDERS = ['woman', 'man', 'nonbinary', 'other'];
   /** The five axes the matching engine reads, and the only ones ever published. */
@@ -706,7 +717,9 @@
       };
       // Checked, like the swipe write that precedes it. `recordSwipe` catches this and
       // rethrows it as a stored-swipe failure, so the deck keeps the swipe, skips the
-      // match burst and shows "Saved, but we could not check for a match just then" —
+      // match burst and shows "Saved, but we could not check for a match just then. We will
+      // try again next time you open the app." — and it will: the facade noted this pair
+      // before calling in here, and `reconcileMatches` finishes it on the next page load.
       // byte for byte what the Firestore adapter produces when `matchRef.set` fails.
       // Announcing a match that was never written is the one thing this must not do:
       // the person is told they matched, the conversation is not there on reload, and
@@ -1080,6 +1093,31 @@
     },
 
 
+    /**
+     * Finish a match check that was started and never answered.
+     *
+     * Delegates to the adapter's own — and only — match-creating path, so the
+     * block handling, the id convention, the document shape, create-if-absent
+     * and the deliberate silence on a refusal are all inherited rather than
+     * written a second time. A second writer of the match shape is exactly the
+     * divergence this file has been burned by.
+     *
+     * The swipe is READ rather than taken on trust from the note. The rules
+     * prove only that the other person liked me and never look at my side, so a
+     * note that outlived its swipe — a rewind on another device, a swipe write
+     * that never landed — would be a server-permitted resurrection. A stored
+     * `pass` falls out for free: the match path returns `{matched:false}` for a
+     * non-positive action.
+     * @param {string} fromUid the swiper
+     * @param {string} toUid the person swiped on
+     * @returns {Promise<{matched:boolean, matchId:string|null, created:boolean}>}
+     */
+    async finishMatchCheck(fromUid, toUid) {
+      const swipes = readSwipes();
+      const mine = swipes[swipeId(fromUid, toUid)];
+      if (!isPlainObject(mine)) return { matched: false, matchId: null, created: false };
+      return demoMatchFor(fromUid, toUid, normalizeAction(mine.action), swipes);
+    },
     async undoSwipe(fromUid, toUid) {
       // The same refusal the Firebase adapter makes, for the same reason, and
       // stated here rather than shared because the two adapters diverging
@@ -2136,6 +2174,30 @@
     },
 
 
+    /**
+     * Finish a match check that was started and never answered.
+     *
+     * Delegates to the adapter's own — and only — match-creating path, so the
+     * block handling, the id convention, the document shape, create-if-absent
+     * and the deliberate silence on a refusal are all inherited rather than
+     * written a second time. A second writer of the match shape is exactly the
+     * divergence this file has been burned by.
+     *
+     * The swipe is READ rather than taken on trust from the note. The rules
+     * prove only that the other person liked me and never look at my side, so a
+     * note that outlived its swipe — a rewind on another device, a swipe write
+     * that never landed — would be a server-permitted resurrection. A stored
+     * `pass` falls out for free: the match path returns `{matched:false}` for a
+     * non-positive action.
+     * @param {string} fromUid the swiper
+     * @param {string} toUid the person swiped on
+     * @returns {Promise<{matched:boolean, matchId:string|null, created:boolean}>}
+     */
+    async finishMatchCheck(fromUid, toUid) {
+      const snap = await db().collection('swipes').doc(swipeId(fromUid, toUid)).get();
+      if (!snap.exists) return { matched: false, matchId: null, created: false };
+      return recordMatchFor(fromUid, toUid, normalizeAction((snap.data() || {}).action));
+    },
     async undoSwipe(fromUid, toUid) {
       const swipeRef = db().collection('swipes').doc(swipeId(fromUid, toUid));
       const matchRef = db().collection('matches').doc(pairId(fromUid, toUid));
@@ -2714,6 +2776,200 @@
     }
   }
 
+  /* ------------------------------------------------------------------------
+     7c. The match checks this device started and never got an answer to
+     ------------------------------------------------------------------------ */
+
+  /**
+   * `recordSwipe` writes the swipe and THEN looks for a reciprocal like. When
+   * the swipe lands and the match step does not, nothing anywhere retries: my
+   * swipe now exists, so that person leaves my deck for good, and their like is
+   * answered, so I leave their who-liked-you list. Neither client ever calls
+   * `recordSwipe` for that pair again. The pair are matched and neither of them
+   * will ever be told.
+   *
+   * A scan cannot find them. "Mutual like with no match document" is
+   * byte-for-byte what a deliberately ended conversation looks like — `unmatch`
+   * deletes the match and leaves both swipes — so a sweep would reopen every
+   * conversation somebody had closed, on every page load. Measured against the
+   * emulator rather than reasoned about.
+   *
+   * So the failing client leaves a note before it starts, and the next page load
+   * finishes what this device knows it began. Nothing is inferred, nothing is
+   * swept, and a device that never swiped has nothing to do.
+   *
+   * The storage idiom is `readLastTouch`'s, deliberately: storage first so the
+   * log survives the navigation that lost the check, an in-memory copy merged
+   * only after a write has actually failed, and a bare `setItem` rather than
+   * `writeJson` — whose "changes will not be saved" toast is false in firebase
+   * mode and would spend the session's one warning on a note.
+   */
+  let pendingMemo = {};
+  let pendingUnsaved = false;
+
+  function readPendingMatches() {
+    const stored = readJson(KEYS.pendingMatch, null);
+    if (!isPlainObject(stored)) return cloneDeep(pendingMemo);
+    if (!pendingUnsaved) return stored;
+    Object.keys(pendingMemo).forEach(function (uid) {
+      const mine = pendingMemo[uid];
+      if (!isPlainObject(mine)) return;
+      if (!isPlainObject(stored[uid])) stored[uid] = {};
+      Object.keys(mine).forEach(function (other) {
+        if (!stored[uid][other]) stored[uid][other] = mine[other];
+      });
+    });
+    return stored;
+  }
+
+  function savePendingMatches(map) {
+    pendingMemo = map;
+    try {
+      window.localStorage.setItem(KEYS.pendingMatch, JSON.stringify(map));
+      pendingUnsaved = false;
+    } catch (err) {
+      // Nothing to tell anyone: a note that cannot be written means the repair
+      // does not happen, which is exactly where this started. It must never turn
+      // a swipe that DID land into a failed one.
+      pendingUnsaved = true;
+    }
+  }
+
+  function countPending(map) {
+    return Object.keys(map).reduce(function (sum, uid) {
+      return sum + (isPlainObject(map[uid]) ? Object.keys(map[uid]).length : 0);
+    }, 0);
+  }
+
+  /** Remember that a match check is about to be attempted for this pair. */
+  function notePendingMatch(fromUid, toUid, action) {
+    // A pass can never produce a match, so it can never leave one unfinished.
+    // No check pins this line and it would be dishonest to imply one does: a
+    // pass never reaches the match path at all, so its note is always cleared
+    // when the swipe write succeeds, and removing this guard changes nothing
+    // observable. It stays because it is true and it keeps the log to entries
+    // that could actually be owed. What IS pinned is the half a stale note can
+    // reach — `finishMatchCheck` reads the stored action, so a `pass` cannot
+    // become a match however the note got there.
+    if (!isPositive(normalizeAction(action))) return;
+    const map = readPendingMatches();
+    if (!isPlainObject(map[fromUid])) map[fromUid] = {};
+    if (map[fromUid][toUid]) return;
+    map[fromUid][toUid] = { at: nowIso(), last: null };
+
+    // Bounded, oldest first. An unbounded log on a device that keeps failing is
+    // a growing localStorage entry nobody ever looks at.
+    while (countPending(map) > PENDING_MATCH_MAX) {
+      let oldestUid = null;
+      let oldestOther = null;
+      let oldest = Infinity;
+      Object.keys(map).forEach(function (uid) {
+        Object.keys(map[uid] || {}).forEach(function (other) {
+          const at = Date.parse((map[uid][other] || {}).at || '') || 0;
+          if (at < oldest) { oldest = at; oldestUid = uid; oldestOther = other; }
+        });
+      });
+      if (!oldestUid) break;
+      delete map[oldestUid][oldestOther];
+      if (!Object.keys(map[oldestUid]).length) delete map[oldestUid];
+    }
+    savePendingMatches(map);
+  }
+
+  /** Forget a note: the check finished, or the swipe under it is gone. */
+  function clearPendingMatch(fromUid, toUid) {
+    const map = readPendingMatches();
+    if (!isPlainObject(map[fromUid]) || !map[fromUid][toUid]) return;
+    delete map[fromUid][toUid];
+    if (!Object.keys(map[fromUid]).length) delete map[fromUid];
+    savePendingMatches(map);
+  }
+
+  /** Forget every note for a pair, addressed by the match they now share. */
+  function clearPendingForPair(uid, matchId) {
+    const map = readPendingMatches();
+    const mine = map[uid];
+    if (!isPlainObject(mine)) return;
+    let touched = false;
+    Object.keys(mine).forEach(function (other) {
+      if (pairId(uid, other) !== matchId) return;
+      delete mine[other];
+      touched = true;
+    });
+    if (!touched) return;
+    if (!Object.keys(mine).length) delete map[uid];
+    savePendingMatches(map);
+  }
+
+  /** Forget everything owed to an account that no longer exists. */
+  function clearPendingForUser(uid) {
+    const map = readPendingMatches();
+    if (!isPlainObject(map[uid])) return;
+    delete map[uid];
+    savePendingMatches(map);
+  }
+
+  function markPendingTried(fromUid, toUid) {
+    const map = readPendingMatches();
+    if (!isPlainObject(map[fromUid]) || !map[fromUid][toUid]) return;
+    map[fromUid][toUid].last = nowIso();
+    savePendingMatches(map);
+  }
+
+  let reconcileRun = null;
+
+  async function runReconcile(uid) {
+    const map = readPendingMatches();
+    const mine = isPlainObject(map[uid]) ? map[uid] : null;
+    const owed = mine ? Object.keys(mine) : [];
+    // The early return that makes the ordinary case free: no notes, no reads,
+    // no round trips, on every page of every session that never lost a check.
+    if (!owed.length) return { checked: 0, repaired: 0, pending: 0 };
+
+    const now = Date.now();
+    const due = owed
+      .filter(function (other) {
+        const last = Date.parse((mine[other] || {}).last || '') || 0;
+        return !(last && now - last < RECONCILE_RETRY_MS);
+      })
+      .sort(function (a, b) {
+        return (Date.parse((mine[a] || {}).at || '') || 0) - (Date.parse((mine[b] || {}).at || '') || 0);
+      })
+      .slice(0, RECONCILE_MAX_PER_RUN);
+
+    let checked = 0;
+    let repaired = 0;
+    for (let i = 0; i < due.length; i += 1) {
+      const other = due[i];
+      // Stamped BEFORE the attempt, so a second tab starting at the same moment
+      // does not repeat it.
+      markPendingTried(uid, other);
+      let outcome = null;
+      try {
+        outcome = await adapter.finishMatchCheck(uid, other);
+      } catch (err) {
+        // Transient — offline, a dropped connection. Keep this note and every
+        // note behind it; there is no point burning the rest of the run on a
+        // network that is not there.
+        console.warn('[zc.store] A match check could not be finished yet.');
+        break;
+      }
+      checked += 1;
+      if (outcome && outcome.matched && outcome.created) repaired += 1;
+      // ANY settled answer spends the note, a refusal included. A block is
+      // enforced by the rules refusing the write, and retrying a blocked pair
+      // forever would make the repetition itself the tell.
+      clearPendingMatch(uid, other);
+    }
+
+    const after = readPendingMatches();
+    return {
+      checked: checked,
+      repaired: repaired,
+      pending: isPlainObject(after[uid]) ? Object.keys(after[uid]).length : 0
+    };
+  }
+
   function planLimits(plan) {
     const limits = (ZC.config && ZC.config.limits) || {};
     return limits[plan === 'premium' ? 'premium' : 'free'] || { likesPerDay: 25, superLikesPerDay: 1, rewinds: 0 };
@@ -2982,7 +3238,28 @@
       await ready;
       if (!fromUid || !toUid) throw new Error('A swipe needs both people.');
       if (fromUid === toUid) throw new Error('You cannot swipe on yourself.');
-      return adapter.recordSwipe(fromUid, toUid, action);
+
+      // The note goes down BEFORE the adapter is called, not after it answers.
+      // The likeliest way to lose a match check is a tab that leaves while the
+      // swipe write is in flight — `dashboard.js` deliberately does not await
+      // this, and the match burst's own link points at another page. A write
+      // whose acknowledgement never arrives may still have committed, and a note
+      // written after that acknowledgement does not exist.
+      //
+      // The cost of being early is one wasted 1-read check on the next load when
+      // the swipe itself never landed, and `finishMatchCheck` answers that
+      // without writing anything.
+      notePendingMatch(fromUid, toUid, action);
+      try {
+        const outcome = await adapter.recordSwipe(fromUid, toUid, action);
+        clearPendingMatch(fromUid, toUid);
+        return outcome;
+      } catch (err) {
+        // A failure BEFORE the swipe landed leaves nothing to finish. Only a
+        // rejection that says the swipe is stored is worth coming back to.
+        if (!(err && err.swipeStored)) clearPendingMatch(fromUid, toUid);
+        throw err;
+      }
     },
 
     /**
@@ -3000,7 +3277,44 @@
     async undoSwipe(fromUid, toUid) {
       await ready;
       if (!fromUid || !toUid) throw new Error('A rewind needs both people.');
-      return adapter.undoSwipe(fromUid, toUid);
+      const outcome = await adapter.undoSwipe(fromUid, toUid);
+      // The swipe is gone, so there is nothing left to finish. Leaving the note
+      // would have the next page load re-create the match a rewind just refused
+      // to leave standing.
+      if (outcome && outcome.ok) clearPendingMatch(fromUid, toUid);
+      return outcome;
+    },
+
+    /**
+     * Finish the match checks this device started and never got an answer to.
+     *
+     * Called once per page by `app.js`, on every page, because the page that
+     * swipes and the page that shows the conversation are different documents
+     * here. With nothing owed it costs no reads and no round trips at all — the
+     * log is empty for anyone who has never lost a check.
+     *
+     * Device-local by design. It finishes what THIS browser knows it started; it
+     * cannot find a pair somebody else's client lost, and it does not try, because
+     * "mutual like with no match document" is byte-for-byte what a deliberately
+     * ended conversation looks like and a sweep would reopen every one of them.
+     * @param {string} uid the signed-in account
+     * @returns {Promise<{checked:number, repaired:number, pending:number}>}
+     */
+    async reconcileMatches(uid) {
+      await ready;
+      if (!uid) return { checked: 0, repaired: 0, pending: 0 };
+      // `applyAuthState` fires twice on an ordinary sign-in, and two runs would
+      // race each other over the same notes.
+      if (reconcileRun && reconcileRun.uid === uid) return reconcileRun.promise;
+      const promise = runReconcile(uid).then(function (result) {
+        reconcileRun = null;
+        return result;
+      }, function (err) {
+        reconcileRun = null;
+        throw err;
+      });
+      reconcileRun = { uid: uid, promise: promise };
+      return promise;
     },
 
     /**
@@ -3046,7 +3360,12 @@
     async unmatch(matchId, uid) {
       await ready;
       if (!matchId) throw new Error('A match id is required.');
-      return adapter.unmatch(matchId, uid);
+      const outcome = await adapter.unmatch(matchId, uid);
+      // Whatever was owed for this pair is settled by the conversation ending:
+      // finishing the check afterwards would re-create the match the person just
+      // removed, on their next page load.
+      if (uid) clearPendingForPair(uid, matchId);
+      return outcome;
     },
 
     /**
@@ -3303,7 +3622,11 @@
     async deleteAccountData(uid) {
       await ready;
       if (!uid) throw new Error('deleteAccountData needs a uid.');
-      return adapter.deleteAccountData(uid);
+      const out = await adapter.deleteAccountData(uid);
+      // The account is gone; a note pointing at it would have the next page load
+      // try to create a match for a person who no longer exists.
+      clearPendingForUser(uid);
+      return out;
     },
 
     /**

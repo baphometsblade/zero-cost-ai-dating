@@ -342,6 +342,14 @@ opposite directions, inside the one primitive a live list is built on.
 - `recordSwipe(from, to, action)` writes `swipes/{from}_{to}`; if the reciprocal swipe exists
   and both are positive (`like`/`super`), it creates `matches/{sortedPair}` and returns
   `{ matched: true, matchId }`. Idempotent in both adapters.
+- `reconcileMatches(uid)` finishes a match check that was started and never answered. The
+  facade notes the pair in `localStorage` before calling the adapter, clears the note on any
+  settled outcome, and keeps it only for a rejection that says the swipe itself landed;
+  `app.js` drains the log once per page. It is a note rather than a sweep because `unmatch`
+  leaves both swipes behind, so a mutual like with no match document is indistinguishable
+  from a conversation somebody ended — a sweep would reopen every one of them. Costs three
+  reads and one write per repair, and nothing at all when nothing is owed. Device-local: it
+  finishes what that browser began.
 - `undoSwipe` deletes the swipe, and refuses — `{ ok: false, reason: 'matched' }`, nothing
   deleted — when the pair already have a match. A match is two people's: the other side can
   have read it and written into it, so one of them pressing rewind may not take it away. The

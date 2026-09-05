@@ -594,7 +594,10 @@ service cloud.firestore {
       // could mint a match against a uid found through the (deliberately open) users
       // read and then message a stranger, since message writes are gated purely on
       // membership of the match. The client already satisfies this: recordSwipe writes
-      // the swipe and only then, as a separate operation, creates the match.
+      // the swipe and only then, as a separate operation, creates the match — and so does
+      // the quieter second caller, `finishMatchCheck`, which finishes a check a page load
+      // lost. It reads the swipe back before creating anything, precisely because this
+      // rule proves the OTHER person liked you and never looks at your own side.
       //
       // ...and not once they have blocked you. Unmatching alone is not durable: it deletes
       // the match document but not the like underneath it, so `likedByOther` still holds
