@@ -798,6 +798,167 @@ test('a swipe that browser storage refuses is reported as lost, not as stored', 
     'and nothing was persisted, which is what the rejection is reporting');
 });
 
+/**
+ * Run `fn` with `localStorage.setItem` refusing the named keys — or every key when
+ * none are named — the way a browser at its quota does.
+ *
+ * Selective, because "fail every write" is the wrong model for half this file: a
+ * write that only removes entries shrinks the stored value and lands even on a full
+ * origin, so a shim that fails unconditionally invents failures the browser cannot
+ * produce. See the note above `writeUsers` in data-store.js. These checks each name
+ * the one key whose write genuinely grows.
+ */
+async function withStorageRefusing(keys, fn) {
+  const realSetItem = localStorageShim.setItem;
+  const refuse = keys ? keys.map(String) : null;
+  localStorageShim.setItem = function (key, value) {
+    if (!refuse || refuse.indexOf(String(key)) !== -1) {
+      const err = new Error('The quota has been exceeded.');
+      err.name = 'QuotaExceededError';
+      throw err;
+    }
+    return realSetItem.call(localStorageShim, key, value);
+  };
+  try {
+    return await fn();
+  } finally {
+    localStorageShim.setItem = realSetItem;
+  }
+}
+
+test('a match whose write is refused is never announced as a match', async function () {
+  // The swipe fix stopped one write short. With the reciprocal like already stored,
+  // `recordSwipe`'s own write is guarded — but `demoMatchFor` then wrote the match
+  // and discarded the boolean, so a refused write still answered
+  // `{matched: true, created: true}`. The deck fires its burst, the person is told
+  // they matched, and the conversation is not there on reload. Nothing retries: both
+  // clients have spent their swipe, so no later call reaches this branch again.
+  await resetWorld();
+  const me = 'demo-you';
+  const them = 'ava-nakamura';
+  await store.recordSwipe(them, me, 'like');
+
+  let failed = null;
+  await withStorageRefusing([KEYS.matches], async function () {
+    try {
+      await store.recordSwipe(me, them, 'like');
+    } catch (err) {
+      failed = err;
+    }
+  });
+
+  assert.ok(failed, 'a match whose write was refused must not resolve as `matched: true`');
+  assert.equal(failed.swipeStored, true,
+    'and it must be marked swipeStored: the swipe itself DID land, so the card stays ' +
+    'gone and the deck shows "we could not check for a match just then" rather than ' +
+    'putting a decided card back');
+  const swipes = JSON.parse(backing.get(KEYS.swipes) || '{}');
+  assert.ok(swipes[me + '_' + them], 'the swipe is stored, which is what swipeStored says');
+  const matches = JSON.parse(backing.get(KEYS.matches) || '{}');
+  assert.equal(matches[[me, them].sort().join('_')], undefined,
+    'and the match is not, which is what the rejection is reporting');
+});
+
+test('a message whose write is refused is reported as lost, not as sent', async function () {
+  // matches.js gives the user their typed text back from its catch and nowhere else.
+  // Resolving normally cleared the composer and destroyed the message.
+  await resetWorld();
+  const before = await store.getMessages(DEVIN_MATCH, { limit: 500 });
+  const TEXT = 'a sentence the store must not claim to have kept';
+
+  let failed = null;
+  await withStorageRefusing([KEYS.messages], async function () {
+    try {
+      await store.sendMessage(DEVIN_MATCH, YOU, TEXT);
+    } catch (err) {
+      failed = err;
+    }
+  });
+
+  assert.ok(failed, 'a message whose write was refused must not resolve as if it were sent');
+  const after = await store.getMessages(DEVIN_MATCH, { limit: 500 });
+  assert.equal(after.length, before.length, 'and the thread is unchanged');
+  const match = await store.getMatch(DEVIN_MATCH, YOU);
+  assert.notEqual(match.lastMessage, TEXT,
+    'nor may the preview carry a message the thread does not hold — the guard sits ' +
+    'BEFORE the denormalisation for exactly this reason');
+});
+
+test('a user write that is refused is reported as failed, not as saved', async function () {
+  // updateUser is how a block, a profile save and a plan change are stored. Every
+  // caller already has a failure branch; returning the object anyway made them dead
+  // code in demo mode and told the user the change had been kept.
+  await resetWorld();
+  await store.createUser('alice', {});
+
+  let updateFailed = null;
+  let createFailed = null;
+  await withStorageRefusing([KEYS.users], async function () {
+    try {
+      await store.updateUser('alice', { blocked: ['bob'] });
+    } catch (err) {
+      updateFailed = err;
+    }
+    try {
+      await store.createUser('zed', {});
+    } catch (err) {
+      createFailed = err;
+    }
+  });
+
+  assert.ok(updateFailed, 'a refused update must not resolve with the merged document');
+  assert.ok(createFailed, 'nor a refused create');
+  assert.deepEqual((await store.getUser('alice')).blocked, [],
+    'and the block was not stored, which is what the rejection is reporting');
+  assert.equal(await store.getUser('zed'), null, 'nor the account');
+});
+
+test('a report whose write is refused is reported as failed, not as filed', async function () {
+  // The worst thing in this file to confirm falsely: the modal says the report has
+  // been filed and the queue is empty.
+  await resetWorld();
+
+  let failed = null;
+  await withStorageRefusing([KEYS.reports], async function () {
+    try {
+      await store.reportUser(YOU, 'ava-nakamura', 'harassment', 'Said something vile.');
+    } catch (err) {
+      failed = err;
+    }
+  });
+
+  assert.ok(failed, 'a refused filing must not answer { ok: true }');
+  assert.deepEqual(await store.getMyReports(YOU), [],
+    'and nothing is in the queue, which is what the rejection is reporting');
+});
+
+test('a backwards clock correction releases the presence throttle instead of latching it', async function () {
+  // `now - last < TOUCH_THROTTLE_MS` is true for every NEGATIVE elapsed time, and a
+  // stamp lands in the future whenever the device clock is fast — a dead RTC battery,
+  // a resumed VM, a phone that has not reached an NTP server yet. The account then
+  // stops refreshing lastActiveAt until real time catches up to the bad stamp, while
+  // the projection every other deck ranks it by reads as maximally fresh. The map is
+  // never cleared, so the wedge outlives the correction that caused it.
+  await resetWorld();
+  const realNow = Date.now;
+  const DAY = 24 * 60 * 60 * 1000;
+  try {
+    Date.now = function () { return realNow() + 60 * DAY; };
+    assert.equal(await store.touchActive(YOU), true, 'the skewed load writes');
+    const skewed = (await store.getUser(YOU)).lastActiveAt;
+    assert.ok(Date.parse(skewed) > realNow(), 'and stores a lastActiveAt in the future');
+
+    Date.now = realNow;
+    assert.equal(await store.touchActive(YOU), true,
+      'the touch after the correction must write — a future stamp is not "inside the window"');
+    const healed = (await store.getUser(YOU)).lastActiveAt;
+    assert.ok(Date.parse(healed) <= realNow() + 1000,
+      'and lastActiveAt is back to real time rather than left dated forward: ' + healed);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 test('listenLikesReceived counts only the likes still waiting for an answer', async function () {
   await resetWorld();
   await store.createUser('alice', {});

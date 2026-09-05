@@ -456,7 +456,12 @@ async function openSession(browser, viewport, opts) {
   // failures. Rather than widen the filter for everyone — which is what hid
   // real regressions before — a spec opts into that window explicitly, and
   // closes it again afterwards.
-  const state = { expectingNetworkErrors: false };
+  //
+  // The same shape, for a spec that provokes an application error on purpose: a
+  // rejected store call the UI is supposed to report. Declared as a pattern rather
+  // than a boolean, so arming it cannot swallow a second, unrelated error that
+  // happens to land inside the same window.
+  const state = { expectingNetworkErrors: false, expectedError: null };
   const isResourceFailure = function (text) {
     return /net::ERR|Failed to load resource/i.test(text);
   };
@@ -478,6 +483,7 @@ async function openSession(browser, viewport, opts) {
     // whole story and has to be reported.
     if (!firebase && isExpectedCdnNoise(msg)) return;
     if (state.expectingNetworkErrors && isResourceFailure(text)) return;
+    if (state.expectedError && state.expectedError.test(text)) return;
     // Chromium points a failed-resource message at the resource, not at the
     // page. Recording that is what lets a spec tell one "Failed to load
     // resource" apart from another — "status 400" alone names nothing.
@@ -497,7 +503,18 @@ async function openSession(browser, viewport, opts) {
      * @param {boolean} on whether an outage is expected right now
      * @returns {void}
      */
-    expectNetworkErrors: function (on) { state.expectingNetworkErrors = !!on; }
+    expectNetworkErrors: function (on) { state.expectingNetworkErrors = !!on; },
+
+    /**
+     * Tolerate console errors matching `pattern` until it is cleared. For a spec
+     * that MAKES the app fail — injecting a rejected store call to reach the
+     * failure branch — where the console.error is the app behaving correctly.
+     * Pass null to close the window again; leave it open and the session stops
+     * seeing the class of error the check exists to catch.
+     * @param {RegExp|null} pattern the message this spec is about to provoke
+     * @returns {void}
+     */
+    expectConsoleError: function (pattern) { state.expectedError = pattern || null; }
   };
 }
 

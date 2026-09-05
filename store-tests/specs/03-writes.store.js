@@ -271,6 +271,67 @@ module.exports = {
       quietTouch === true && typeof quietStored === 'string',
       k.show({ returned: quietTouch, stored: quietStored }));
 
+    // The other storage failure, and the one the throttle was moved into storage to
+    // survive: an origin that is READABLE but full. `readLastTouch` preferred the
+    // stored map unconditionally, so the in-memory copy its own comment names as the
+    // fallback was unreachable the moment `zc.lastTouch` had ever been written — every
+    // page load and every touch within a page wrote again, which is the throttle
+    // collapsing to nothing. Storage stays authoritative when it works; the merge
+    // happens only after a write has actually failed, which is what the check below
+    // this one pins.
+    const fullUid = 'writes-touch-full';
+    await k.admin.set('users', fullUid, k.h.userDoc(fullUid, { lastActiveAt: null }));
+    await k.admin.set('discovery', fullUid, k.h.discoveryDoc(fullUid));
+    const stale = JSON.parse(globalThis.localStorage.getItem(KEY) || '{}');
+    stale[fullUid] = Date.now() - (5 * 60 * 1000 + 1000);
+    globalThis.localStorage.setItem(KEY, JSON.stringify(stale));
+
+    const wroteWhileFull = [];
+    const realSet = globalThis.localStorage.setItem;
+    try {
+      // Only this key, and only for writes — the quota is what fails, not the origin.
+      globalThis.localStorage.setItem = function (key, value) {
+        if (String(key) === KEY) throw new Error('The quota has been exceeded.');
+        return realSet.call(globalThis.localStorage, key, value);
+      };
+      for (let i = 0; i < 3; i += 1) wroteWhileFull.push(await k.store.touchActive(fullUid));
+    } finally {
+      globalThis.localStorage.setItem = realSet;
+    }
+
+    t.check('and when storage is full rather than disabled the throttle still holds',
+      k.same(wroteWhileFull, [true, false, false]),
+      'three touches on an origin that can read but not write: ' + k.show(wroteWhileFull) +
+      ' — one write is the bound, three is no throttle at all');
+
+    // The merge is not a latch: as soon as a write lands, the memory-only flag clears
+    // and storage is authoritative again. Asserted on a uid storage has never seen, so
+    // the touch writes for a reason that cannot be confused with the merge — and the
+    // proof is that the stamp reaches storage, which it could not while the flag was
+    // set for the whole map. This also leaves the flag clear for anything after it.
+    const healedUid = 'writes-touch-healed';
+    await k.admin.set('users', healedUid, k.h.userDoc(healedUid, { lastActiveAt: null }));
+    await k.admin.set('discovery', healedUid, k.h.discoveryDoc(healedUid));
+    const healedWrote = await k.store.touchActive(healedUid);
+    const healedMap = JSON.parse(globalThis.localStorage.getItem(KEY) || '{}');
+
+    // ...and then the half that proves the flag actually cleared, rather than the
+    // merge having simply stayed on. `fullUid` is the hard case: storage holds a stale
+    // stamp for it and MEMORY holds a fresh one, so the two answers differ. Storage
+    // must win — that is what "a new page throttles on what the last one wrote" means,
+    // and a merge left permanently on would answer with memory and refuse the write.
+    const recovered = JSON.parse(globalThis.localStorage.getItem(KEY) || '{}');
+    recovered[fullUid] = Date.now() - (5 * 60 * 1000 + 1000);
+    globalThis.localStorage.setItem(KEY, JSON.stringify(recovered));
+    const storageWinsAgain = await k.store.touchActive(fullUid);
+
+    t.check('and the memory-only fallback is not a latch — a landed write ends it',
+      healedWrote === true && typeof healedMap[healedUid] === 'number' && storageWinsAgain === true,
+      'the landed write stored a stamp for ' + healedUid + ' (' + k.show(healedMap[healedUid]) +
+      '); a stale STORED stamp for ' + fullUid + ' then ' +
+      (storageWinsAgain ? 'released the throttle, so storage is authoritative again'
+        : 'did NOT release it — memory is still winning, so the merge never turned off'));
+
     t.check('and it says nothing to the user, who is not the one storage failed',
       toasts.length === 0 && quietWarnings.length === 0,
       toasts.length + ' toast(s) ' + k.show(toasts) + ', ' +

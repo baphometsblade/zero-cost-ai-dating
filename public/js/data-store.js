@@ -480,6 +480,37 @@
     }
   }
 
+  /* Each of these returns false when the write did not land, and whether a caller must
+     check it is not a matter of taste — it follows from whether the write can FAIL.
+
+     A write that GROWS the stored value can hit the origin's quota, and every one of
+     those is checked: `demoMatchFor`, `sendMessage`, `createUser`/`updateUser`,
+     `reportUser`, and `recordSwipe`'s own swipe row. Each throws, because the
+     Firestore adapter rejects on the same failure and the callers all have the branch.
+     Reporting an unwritten document as written is how this file managed to announce a
+     match nobody had, send a message it had destroyed, and confirm a safety report it
+     had not filed.
+
+     A write that only ever SHRINKS cannot: `unmatch`, `undoSwipe`, `markRead` and
+     `deleteAccountData` re-serialise the map they have just read with entries removed,
+     with no `await` in between, so no other tab can grow it underneath them — and
+     localStorage's quota is measured on the resulting usage, so a shorter overwrite
+     succeeds even on a full origin (measured in Chromium: same-length and shrinking
+     writes land where +1 byte throws). Their ignored boolean is safe, and their
+     `return true` is truthful. The other way `writeJson` fails is storage being
+     unavailable, and that fails the READ too, so there is nothing stored to leave
+     behind. `retractReport` is in this group for the same reason.
+
+     `bumpUsage` is the deliberate exception: it ignores the boolean because the
+     Firestore adapter swallows the identical failure and returns the optimistic count,
+     and `store-tests/specs/03-writes.store.js` pins that contract against the emulator
+     ("it warned instead of throwing, having stored nothing"). Making the demo side
+     reject would be divergence, not honesty. A full store cannot hand out free likes
+     in any case — `recordSwipe` throws before this line is reached.
+
+     Two audits have now filed the shrinking writes as a defect, both times using a shim
+     that fails EVERY `setItem`. That shim is the right model for a growing write and
+     the wrong one for these. */
   function readUsers() { return readJson(KEYS.users, {}); }
   function writeUsers(map) { return writeJson(KEYS.users, map); }
   function readSwipes() { return readJson(KEYS.swipes, {}); }
@@ -626,7 +657,14 @@
         lastMessageAt: null,
         unread: unread
       };
-      writeMatches(matches);
+      // Checked, like the swipe write that precedes it. `recordSwipe` catches this and
+      // rethrows it as a stored-swipe failure, so the deck keeps the swipe, skips the
+      // match burst and shows "Saved, but we could not check for a match just then" —
+      // byte for byte what the Firestore adapter produces when `matchRef.set` fails.
+      // Announcing a match that was never written is the one thing this must not do:
+      // the person is told they matched, the conversation is not there on reload, and
+      // nothing ever writes it, because both clients have spent their swipe.
+      if (!writeMatches(matches)) throw new Error('That match could not be saved.');
       created = true;
     }
     pollAll();
@@ -876,7 +914,12 @@
       user.lastActiveAt = stamp;
       user.usage = normalizeUsage({ date: todayKey() });
       users[user.uid] = user;
-      writeUsers(users);
+      // The Firestore adapter rejects when this write cannot land, and every caller
+      // already has the branch — auth.js falls back to an in-memory document,
+      // profile.js and settings.js surface the error. Returning the object anyway made
+      // those branches dead in demo mode and reported a profile save, a plan change and
+      // a block as stored when none of them were.
+      if (!writeUsers(users)) throw new Error('That change could not be saved.');
       return cloneDeep(user);
     },
 
@@ -887,7 +930,8 @@
       user.uid = String(uid);
       user.updatedAt = nowIso();
       users[user.uid] = user;
-      writeUsers(users);
+      // See createUser above.
+      if (!writeUsers(users)) throw new Error('That change could not be saved.');
       return cloneDeep(user);
     },
 
@@ -1077,7 +1121,11 @@
       const all = readMessages();
       if (!Array.isArray(all[matchId])) all[matchId] = [];
       all[matchId].push(message);
-      writeMessages(all);
+      // Before the denormalisation, deliberately: a message that was not stored must not
+      // leave its own preview and unread count on the match. `matches.js` puts the typed
+      // text back in the composer from its catch, which is the only way the words are not
+      // lost — resolving normally clears the composer and destroys them.
+      if (!writeMessages(all)) throw new Error('That message could not be sent.');
 
       // Denormalise the preview + unread counter onto the match.
       const other = otherOf(match, fromUid);
@@ -1160,7 +1208,10 @@
       const reports = readReports();
       if (reports[report.id]) return { ok: true, id: report.id, duplicate: true };
       reports[report.id] = report;
-      writeReports(reports);
+      // A safety report is the worst thing in this file to confirm falsely. The
+      // Firestore adapter rethrows when the write is refused; this one returned
+      // `{ ok: true }` and the modal said the report had been filed.
+      if (!writeReports(reports)) throw new Error('That report could not be filed.');
       return { ok: true, id: report.id, duplicate: false };
     },
 
@@ -2515,12 +2566,39 @@
    */
   let touchMemo = {};
 
+  /**
+   * True while the newest stamps are in memory only, because storage refused them.
+   *
+   * The reason this flag exists rather than an unconditional merge: without it memory
+   * outranks storage even when storage is working, and a page that reads a stamp its
+   * predecessor wrote would prefer its own older copy — which is the property
+   * `store-tests` pins with "reads it back, so a new page throttles on what the last
+   * one wrote". So the merge happens only after a write has actually failed.
+   */
+  let touchUnsaved = false;
+
   function readLastTouch() {
     // Storage first, so the bound spans navigations; the in-memory copy is the
     // fallback for a browser that has storage disabled or full, where the throttle
     // should still hold within the page rather than vanishing entirely.
     const stored = readJson(KEYS.lastTouch, null);
-    return isPlainObject(stored) ? stored : touchMemo;
+    if (!isPlainObject(stored)) return touchMemo;
+    if (!touchUnsaved) return stored;
+
+    // Storage is READABLE but not writable — an origin at its quota, which is not the
+    // same case as storage being disabled. The stored map parses, so the branch above
+    // returned it and the in-memory copy was never consulted: every page load, and
+    // every touch within a page, wrote again. That is the throttle collapsing to
+    // nothing in exactly the situation it was moved into storage to survive.
+    // Later stamp wins per uid, so a tab that CAN write still counts for one that
+    // cannot.
+    const merged = {};
+    Object.keys(stored).forEach(function (uid) { merged[uid] = stored[uid]; });
+    Object.keys(touchMemo).forEach(function (uid) {
+      const mine = Number(touchMemo[uid]);
+      if (mine && !(Number(merged[uid]) > mine)) merged[uid] = mine;
+    });
+    return merged;
   }
 
   function saveLastTouch(map) {
@@ -2536,8 +2614,12 @@
     // which is the safe direction.
     try {
       window.localStorage.setItem(KEYS.lastTouch, JSON.stringify(map));
+      touchUnsaved = false;
     } catch (err) {
-      // Nothing to tell anyone. See above.
+      // Nothing to tell anyone. See above — but `readLastTouch` needs to know, or the
+      // in-memory copy it names as the fallback is never reached on a readable-but-full
+      // origin.
+      touchUnsaved = true;
     }
   }
 
@@ -2605,7 +2687,15 @@
       const now = Date.now();
       const seen = readLastTouch();
       const last = Number(seen[uid]);
-      if (last && now - last < TOUCH_THROTTLE_MS) return false;
+      // `elapsed >= 0` and not just the upper bound: a stamp in the FUTURE — written
+      // while the device clock was fast, which a dead RTC battery or a resumed VM
+      // does — makes `now - last` negative, and a negative number is less than five
+      // minutes. The account then stops writing `lastActiveAt` until real time
+      // catches up to the bad stamp, while the projection every other deck ranks it
+      // by keeps reading as maximally fresh. Nothing in the app clears the map, so
+      // the wedge outlives the clock correction that caused it.
+      const elapsed = now - last;
+      if (last && elapsed >= 0 && elapsed < TOUCH_THROTTLE_MS) return false;
       seen[uid] = now;
       saveLastTouch(seen);
       return adapter.setLastActive(uid, new Date(now).toISOString());

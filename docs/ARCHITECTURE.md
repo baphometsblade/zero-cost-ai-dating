@@ -299,6 +299,19 @@ page). All access goes through a `readJson(key, fallback)` / `writeJson(key, val
 swallows corrupt JSON, private-mode exceptions and quota errors, warns once, and keeps the UI
 alive. A demo user who fills their quota gets a toast, not a white screen.
 
+`writeJson` returns false when the write did not land, and whether a caller must check it
+follows from whether the write can FAIL rather than from taste. A write that GROWS the
+stored value can hit the quota, and every one of those is checked and throws — the swipe,
+the match, the message, the user document, the report — because the Firestore adapter
+rejects on the same failure and every caller already has the branch. Reporting an unwritten
+document as written is how this adapter managed to announce a match nobody had, send a
+message it had destroyed, and confirm a safety report it had not filed. A write that only
+SHRINKS cannot fail: `unmatch`, `undoSwipe`, `markRead`, `retractReport` and
+`deleteAccountData` re-serialise the map they just read with entries removed, with no
+`await` in between, and a shorter overwrite lands even on a full origin. `bumpUsage` is the
+deliberate exception — it swallows, because the Firestore adapter swallows, and
+`store-tests` pins that contract against the emulator.
+
 `listenMessages` in demo mode has no server to push from, so it does both of the things a
 browser can: it listens for the `storage` event (another tab in the same profile) and polls a
 cheap signature of the thread every 1.5 s (same tab). Callers cannot tell the two adapters
@@ -334,10 +347,22 @@ changes. `store-tests/specs/11-live-cost.store.js` measures that.
   `localStorage` now (`zc.lastTouch`), with the in-memory copy kept as a fallback for a
   browser that has storage disabled, where a throttle that cannot remember should still
   hold within the page rather than disappear.
+  Storage disabled is not the only way it fails, and the other way was the one that
+  mattered: an origin at its quota can still be READ, so the stored map parsed, the
+  fallback was never consulted, and every touch wrote again. The in-memory copy is merged
+  in — later stamp per uid wins — but only after a write has actually failed, so storage
+  stays authoritative whenever it works. A stamp in the future is refused as "inside the
+  window" too: a fast device clock would otherwise wedge the account until real time
+  caught up, with the projection every other deck ranks it by reading as maximally fresh.
+  Failing to store the stamp is never reported to the user — in Firebase mode nothing
+  about the account is in `localStorage`, so "changes will not be saved" would be false,
+  and this is the one write in the app designed to be droppable.
   `store-tests/specs/03-writes.store.js` executes all of it: the second touch must not
   write, a touch after the window must — which pins the five minutes rather than merely
-  "some throttle" — and ageing the *stored* stamp must change the answer, which is what a
-  fresh page with fresh memory and the same storage actually does.
+  "some throttle" — ageing the *stored* stamp must change the answer, which is what a
+  fresh page with fresh memory and the same storage actually does, three touches on a
+  readable-but-full origin must be one write, and none of it may say anything to the user.
+  `tests/data-store.test.js` covers the clock, which needs no emulator.
 
 ---
 
@@ -452,9 +477,9 @@ The design system is two files: `style.css` (tokens, layout, forms, buttons, nav
 | Flows | `e2e/specs/*.e2e.js` | What only exists in a DOM: sign-in, the deck and its keyboard, the match burst, chat persistence, reports, deletion, the phone layout, offline navigation. |
 | Trust boundary | `rules-tests/specs/*.rules.js` | `firestore.rules` executed against the emulator: who can read what, the closed discovery projection, the reciprocal-like proof, the append-only chat, the bounded report queue, and the catch-all deny. |
 
-All four `tests/` suites run on `node --test` with no dependencies, which is what keeps the
-`verify` job down to a checkout, `npm run check:seed` and `npm test` — no install step, and
-it finishes in seconds. That short job is run twice, over a `node: ['20', '22']` matrix,
+The table names four of them; `tests/` holds fourteen, and all fourteen `tests/` suites run on
+`node --test` with no dependencies, which is what keeps the `verify` job down to a checkout,
+`npm run check:seed` and `npm test` — no install step, and it finishes in seconds. That short job is run twice, over a `node: ['20', '22']` matrix,
 because a single pinned version once hid a breakage: the runner stopped matching a
 positional `tests/` directory argument after Node 20, so `npm test` ran zero tests on newer
 runtimes while CI stayed green.

@@ -1322,9 +1322,14 @@
         : 'Thanks — the report has been filed.', 'success');
       announce('Report filed.');
     } catch (err) {
+      // No `return` here, deliberately. A failed filing is the case where the person
+      // most needs the other half of this flow: blocking is the protective action they
+      // can take themselves, and it does not depend on the report landing. Returning
+      // early meant the one person whose report did NOT go through was also the one
+      // denied the block — in both storage modes, since the Firestore adapter rejects
+      // on a refused write too.
       console.error('[zc] Could not file the report.', err);
-      toast('The report could not be filed. Please try again.', 'error');
-      return;
+      toast('The report could not be filed, but you can still block them.', 'error');
     }
 
     // Most people who report also want distance; offer it without forcing it.

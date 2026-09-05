@@ -101,21 +101,43 @@ test('every "N checks" in every document is a total some suite claims', function
     // "246-check total" (the run is 254) and, in a code comment where bold is not even
     // possible, docs/DEPLOY.md's "9 suites, 201 checks" and "all 201 checks passing",
     // 32 checks and 5 suites behind. An audit found them, not this test.
-    const pattern = /(?:\*\*)?(\d+)[ -](?:more )?checks?(?:\*\*)?/g;
-    const text = read(doc);
-    let match;
-    while ((match = pattern.exec(text)) !== null) {
+    totalsIn(read(doc)).forEach(function (hit) {
       // Under two is never a live total: `0/0 checks passed` is this project quoting the
       // false green a runner refuses to report, and is deliberately not a claim.
-      const n = Number(match[1]);
-      if (n < 2) continue;
-      if (claimed.indexOf(n) === -1) stale.push(doc + ' → ' + match[0].trim());
-    }
+      if (hit.n < 2) return;
+      if (claimed.indexOf(hit.n) === -1) stale.push(doc + ' → ' + hit.quoted);
+    });
   });
   assert.deepEqual(stale, [],
     'a check total is quoted at a number no suite claims:\n  ' + stale.join('\n  ') +
     '\nThe runners are the authority — run the suite and take its number.');
 });
+
+/**
+ * Every `N checks` total a document states, with single line breaks folded to spaces
+ * first.
+ *
+ * The separator was `[ -]` — a literal space or hyphen — which cannot match a newline,
+ * and these documents are hard-wrapped. `**123\ncheck s**` is the ordinary result of an
+ * edit pushing a word past the wrap column, and it took that total straight out of this
+ * scan while the comment above still said "every form the number is written in". Folding
+ * covers every wrap position in one move rather than widening the separator to cover one.
+ *
+ * `([^\n])\n(?!\n)` leaves a blank line intact on purpose, so a number ending one
+ * paragraph can never bind to a `checks` that opens the next.
+ * @param {string} text a document's contents
+ * @returns {Array<{n: number, quoted: string}>} the totals it states
+ */
+function totalsIn(text) {
+  const pattern = /(?:\*\*)?(\d+)[ -](?:more )?checks?(?:\*\*)?/g;
+  const folded = text.replace(/([^\n])\n(?!\n)/g, '$1 ');
+  const found = [];
+  let match;
+  while ((match = pattern.exec(folded)) !== null) {
+    found.push({ n: Number(match[1]), quoted: match[0].trim() });
+  }
+  return found;
+}
 
 test('a quoted "N/N passing" is a total some suite actually reports', function () {
   // The bolded `**N checks**` form above is not the only way this README states
@@ -149,7 +171,7 @@ test('a quoted "N/N passing" is a total some suite actually reports', function (
     '\nThe runners are the authority — run the suite and take its number.');
 });
 
-test('the README describes as many unit suites as tests/ actually holds', function () {
+test('the docs describe as many unit suites as tests/ actually holds', function () {
   const files = fs.readdirSync(path.join(ROOT, 'tests'))
     .filter(function (name) { return name.endsWith('.test.js'); });
   assert.equal(files.length, claims.UNIT_SUITE_FILES,
@@ -163,6 +185,57 @@ test('the README describes as many unit suites as tests/ actually holds', functi
   assert.match(read('README.md'), new RegExp(expected + ' suites on Node'),
     'README should open the unit-suite section with "' + expected + ' suites on Node", ' +
     'because tests/ holds ' + files.length + ' of them');
+
+  // ...and docs/ARCHITECTURE.md, which states the same count and was never checked.
+  // It said "All four `tests/` suites" — written when tests/ held six, tracking the four
+  // rows of the table above it rather than the directory the sentence names, and left
+  // reading "four" all the way to fourteen. The vacuity guard is the load-bearing half:
+  // rewording the count away is exactly how a pinned sentence escapes, and this test has
+  // shipped two assertions that could not fail.
+  const phrase = /([A-Za-z]+|\d+) `tests\/` suites/g;
+  const counts = [];
+  let found;
+  while ((found = phrase.exec(read('docs/ARCHITECTURE.md'))) !== null) counts.push(found[1]);
+  assert.ok(counts.length > 0,
+    'docs/ARCHITECTURE.md no longer says "<n> `tests/` suites"; either restore the phrase ' +
+    'or delete this assertion — do not leave it matching nothing');
+  const wrong = counts.filter(function (word) {
+    return word.toLowerCase() !== expected.toLowerCase();
+  });
+  assert.deepEqual(wrong, [],
+    'docs/ARCHITECTURE.md counts the `tests/` suites as ' + JSON.stringify(wrong) +
+    '; tests/ holds ' + files.length + ', so the word is "' + expected.toLowerCase() + '"');
+
+  // The numeric form, wherever a document states it beside `npm test`'s OWN total.
+  // docs/DEPLOY.md carries "# 14 suites, 234 checks" in a code comment, where the bolded
+  // form this suite's other checks look for is not even possible. The checks half of
+  // that line has been enforced since the audit that found it stale at "9 suites, 201
+  // checks"; the suites half never was, and splitting one tests/ file into two — which
+  // is how this directory has grown — moves the file count while leaving the total
+  // alone, so nothing fires.
+  //
+  // Gated on the line quoting the UNIT total specifically, not on any total. A line
+  // reading "1 suite, 183 checks" is describing the rules suite and is none of this
+  // test's business; gating on "shares a line with some total" reddens it, which is a
+  // false failure on correct documentation.
+  const unitTotal = claims.CLAIMS.unit.total;
+  const mismatched = [];
+  DOCS.forEach(function (doc) {
+    read(doc).split('\n').forEach(function (line, i) {
+      if (!totalsIn(line).some(function (hit) { return hit.n === unitTotal; })) return;
+      const suites = /(\d+)\s+suites?\b/g;
+      let hit;
+      while ((hit = suites.exec(line)) !== null) {
+        if (Number(hit[1]) !== claims.UNIT_SUITE_FILES) {
+          mismatched.push(doc + ':' + (i + 1) + ' → ' + hit[0].trim());
+        }
+      }
+    });
+  });
+  assert.deepEqual(mismatched, [],
+    'a suite count is quoted beside `npm test`\'s own total at a number tests/ does not ' +
+    'hold:\n  ' + mismatched.join('\n  ') + '\ntests/ holds ' + files.length + '. ' +
+    'scripts/claims.js is the authority — count the files.');
 });
 
 /* --------------------------------------------------------------------------
