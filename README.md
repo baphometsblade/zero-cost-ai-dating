@@ -297,7 +297,7 @@ Firebase rather than `localStorage`: the real SDK, real Auth, real Firestore, an
 read back out of the emulator instead of off the page. It drives the pages **with their real
 CSP meta tag** — the emulators are reached through the page's own origin rather than by
 relaxing the policy, which is the whole reason it can exist; the Limitations section explains
-the constraint it is working around. With both emulators up the run is **258 checks**, all
+the constraint it is working around. With both emulators up the run is **259 checks**, all
 passing.
 
 It did not start that way. On its first run one check was red, and it had found a real bug:
@@ -414,7 +414,7 @@ of its own, so a failed download reads as infrastructure rather than as a red te
 than either suite does. The `e2e` job runs the browser suite twice: once bare, which is what
 a contributor with nothing installed gets and which proves the Firebase spec skips rather
 than silently passing, and once inside `emulators:exec`, which is the only run in which every
-spec executes and therefore the only one that can hold the 258-check total to account. There are no secrets and no deploy step — deploying stays a
+spec executes and therefore the only one that can hold the 259-check total to account. There are no secrets and no deploy step — deploying stays a
 deliberate local `npm run deploy`.
 
 ---

@@ -467,7 +467,34 @@ module.exports = {
 
       /* ---- out, and back in ---- */
       await page.goto(base + '/settings.html', { waitUntil: 'domcontentloaded' });
-      await page.click('[data-signout]');
+
+      // `main [data-signout]`, scoped, and the scope is the whole point. There are TWO
+      // sign-out controls on this page: the one in the settings card, and the one
+      // `app.js` injects into `nav.nav-links` — which CSS hides at phone widths, by
+      // design. `page.click` takes the FIRST match in document order, and the nav comes
+      // first, so once app.js has rendered the header this selector resolved to a 0x0
+      // element and waited the full twenty seconds for it to become clickable.
+      //
+      // It passed for as long as it did because it was a race the spec usually won: the
+      // click landed before the nav existed. This CI run lost it, and adding a wait
+      // before the click — the obvious "fix" — made it lose every time, which is how it
+      // was caught. Measured, not reasoned about: the failing element reported
+      // `display: inline-flex` with a rect of 0x0 and `nav.nav-links` computing to
+      // `display: none`.
+      //
+      // The settings page finishing its own auth gate is asserted first, so a failure
+      // here can no longer be confused with `requireAuth` not having settled.
+      const settled = await page.waitForFunction(function () {
+        const hint = document.getElementById('signout-hint');
+        return !!hint && /other devices/.test(hint.textContent);
+      }, null, { timeout: 20000 }).then(function () { return true; }, function () { return false; });
+      t.check('the settings page finishes its auth gate before anything is clicked',
+        settled,
+        settled ? 'the sign-out hint is the one firebase mode writes'
+          : 'the hint was never rewritten — requireAuth had not settled, or the page ' +
+            'redirected out from under the click');
+
+      await page.click('main [data-signout]');
       await page.waitForURL('**/index.html');
       const signedOut = await page.evaluate(function () {
         return window.ZC && window.ZC.auth ? !window.ZC.auth.current : null;

@@ -51,7 +51,7 @@ const CLAIMS = {
     note: 'the twelve browser-only specs, both viewports, Firebase spec skipped'
   },
   e2eFirebase: {
-    total: 258,
+    total: 259,
     how: 'npm run test:e2e, with the Firestore and Auth emulators up',
     note: 'the same twelve specs plus the thirteenth, which drives the real SDK'
   },
