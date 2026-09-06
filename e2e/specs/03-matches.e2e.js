@@ -146,6 +146,111 @@ module.exports = {
       landed,
       landed ? 'the preview updated within 2s' : 'nothing arrived in 2s — the list is not live');
 
+    /* ---- the two ways a list can fail, which are not the same thing ---- */
+
+    // Both are injected through the URL rather than by patching the live page: each
+    // needs its own fresh document, and a wrapper applied to the old one goes with
+    // it on navigation. Same deferred-wrap shape as the counter above — `window.ZC`
+    // does not exist yet when an init script runs.
+    await page.addInitScript(function () {
+      window.__zcSubs = 0;
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('zcoffline') === '1') {
+        // What `startListDeadline` reads. The page must not sit for twelve seconds
+        // waiting for a delivery a browser that knows it is offline will not get.
+        Object.defineProperty(window.navigator, 'onLine', { get: function () { return false; } });
+      }
+      let calls = 0;
+      const dead = params.get('zcdead') === '1';
+      const silent = params.get('zcsilent') === '1';
+      const wrap = function () {
+        if (!window.ZC || !window.ZC.store || window.ZC.store.__wrapped) return;
+        window.ZC.store.__wrapped = true;
+        const real = window.ZC.store.listenMatchViews;
+        window.ZC.store.listenMatchViews = function (uid, onViews, onError) {
+          window.__zcSubs += 1;
+          calls += 1;
+          if (dead && calls === 1) {
+            window.setTimeout(function () { onError(new Error('Missing or insufficient permissions.')); }, 0);
+            return function () { /* already over */ };
+          }
+          // A stream that is open and simply never delivers — which is what an
+          // `onSnapshot` does with no network and no offline persistence.
+          if (silent) return function () { /* nothing to unsubscribe */ };
+          return real.call(window.ZC.store, uid, onViews, onError);
+        };
+      };
+      document.addEventListener('DOMContentLoaded', wrap);
+      window.setTimeout(wrap, 0);
+      window.setTimeout(wrap, 50);
+    });
+
+    // 1. A stream that DIED. Nothing more is coming, so the page has to let go of
+    // the subscription — otherwise `subscribeList` is a no-op forever and the retry
+    // button is the only way back, from a failure a reconnect may already have
+    // fixed.
+    ctx.session.expectConsoleError(/conversation list stopped/);
+    await page.goto(ctx.base + '/matches.html?zcdead=1', { waitUntil: 'domcontentloaded' });
+    const failed = await page.waitForSelector('#list-error:not(.hidden)', { timeout: 5000 })
+      .then(function () { return true; }, function () { return false; });
+    t.check('a conversation list that cannot load says so instead of showing none',
+      failed, failed ? 'the error state is shown' : '#list-error never appeared');
+
+    await page.evaluate(function () { window.dispatchEvent(new Event('focus')); });
+    // Presence, not visibility: on a phone the panes swap, and the claim is that the
+    // list came back rather than that it is the thing on screen.
+    const recovered = await page.waitForFunction(function () {
+      return document.querySelectorAll('#match-list .match-row').length > 0;
+    }, null, { timeout: 5000 }).then(function () { return true; }, function () { return false; });
+    const deadSubs = await page.evaluate(function () { return window.__zcSubs; });
+    t.check('and returning to the tab re-subscribes rather than leaving it stuck',
+      recovered && deadSubs === 2,
+      recovered ? deadSubs + ' subscription(s) — the second is the recovery'
+        : 'the list never came back after ' + deadSubs + ' subscription(s); a dead ' +
+          'stream the page still holds makes every re-subscribe a no-op');
+
+    // 2. A stream that is merely SLOW — here, a browser that says it is offline, which
+    // takes the same path without a twelve-second wait. The subscription is alive and
+    // Firestore reconnects on its own, so the handle is KEPT: releasing it would have
+    // every return to the tab stack a second stream on top of the first.
+    //
+    // What this check does NOT assert, and why: that the failure stays on screen.
+    // In demo mode the delivery arrives within a tick, so the soft deadline does
+    // exactly what it is supposed to — the late list clears the error and paints.
+    // The half that IS observable here is the one the two paths differ on.
+    await page.goto(ctx.base + '/matches.html?zcoffline=1', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#match-list .match-row');
+    await page.evaluate(function () { window.dispatchEvent(new Event('focus')); });
+    await page.waitForTimeout(300);
+    const offline = await page.evaluate(function () {
+      return { subs: window.__zcSubs, onLine: window.navigator.onLine };
+    });
+    ctx.session.expectConsoleError(null);
+    t.check('a browser that says it is offline keeps the one subscription it already has',
+      offline.onLine === false && offline.subs === 1,
+      'navigator.onLine=' + offline.onLine + ' (false or this check is vacuous), ' +
+      offline.subs + ' subscription(s) after a focus — the stream here is alive and ' +
+      'merely slow, so a second one would be stacked on top of it');
+
+    // 3. ...and it must not WAIT to find that out. With a stream that is open and
+    // never delivers — an `onSnapshot` with no network and no offline persistence —
+    // the deadline alone would leave a skeleton on screen for twelve seconds. Three
+    // is comfortably inside that and comfortably outside the short-circuit, so the
+    // bound is what makes this a check rather than a wait.
+    ctx.session.expectConsoleError(/conversation list stopped/);
+    await page.goto(ctx.base + '/matches.html?zcoffline=1&zcsilent=1', { waitUntil: 'domcontentloaded' });
+    const saidSoonEnough = await page.waitForSelector('#list-error:not(.hidden)', { timeout: 3000 })
+      .then(function () { return true; }, function () { return false; });
+    ctx.session.expectConsoleError(null);
+    t.check('and says so at once rather than waiting out the twelve-second deadline',
+      saidSoonEnough,
+      saidSoonEnough ? 'reported inside 3s' : 'nothing in 3s — a page that already knows ' +
+        'it is offline sat on a skeleton waiting for a delivery that was never coming');
+
+    await page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#match-list .match-row');
+    await openConversation(page, 'Sam');
+
     /* ---- and a conversation the other side ends keeps what was typed ---- */
 
     const typed = 'half a reply nobody should lose';

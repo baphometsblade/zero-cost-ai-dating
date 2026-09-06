@@ -456,6 +456,13 @@ moved. It now subscribes with `listenMatchViews`, through the same shared stream
 and holds `listStop` released by `pagehide` and re-taken by `pageshow` and `visibilitychange`.
 The `pageshow` handler is the one this app did not have anywhere: a document restored from the
 back-forward cache re-runs none of the boot path, and the poll was quietly covering for that.
+
+A stream that DIED and one that is merely SLOW are handled differently, and conflating them
+cost the page its own recovery: the store reports a death once and the stream is over, so the
+page releases its handle and a return to the tab can open a fresh one — holding a dead
+subscription made `subscribeList` a no-op forever and left the retry button as the only way
+back from a failure a reconnect may already have fixed. A slow first delivery keeps the
+handle, because that stream is alive and a second one would be stacked on top of it.
 The subscription is deliberately NOT gated on visibility — an idle listener costs nothing, and
 each detach and re-attach pays a fresh first delivery.
 
