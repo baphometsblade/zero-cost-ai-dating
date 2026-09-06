@@ -1484,9 +1484,31 @@
    * @returns {void}
    */
   function onListError(err) {
+    // Release the handle. The store reports this once and the stream is over, so
+    // holding a dead subscription makes `subscribeList` a no-op — and with that,
+    // coming back to the tab cannot recover, leaving the retry button as the only
+    // way out of a failure the browser may already have fixed.
+    listStop = null;
+    reportListFailure(err || new Error('The conversation list stopped.'));
+  }
+
+  /**
+   * The first delivery is taking too long — which is NOT the same thing.
+   *
+   * The subscription here is alive and merely slow, so the handle is kept: a
+   * return to the tab must not open a second stream alongside the first, and a
+   * delivery that arrives late still clears this and paints.
+   * @returns {void}
+   */
+  function onListDeadline(err) {
+    reportListFailure(err);
+  }
+
+  /** Paint the failed state and say so, however the list came to fail. */
+  function reportListFailure(err) {
     console.error('[zc] The conversation list stopped:', err);
     state.loading = false;
-    state.error = err || new Error('The conversation list stopped.');
+    state.error = err;
     stopListDeadline();
     renderList();
     announce('Your matches could not load. Use the Try again button.');
@@ -1525,13 +1547,20 @@
     stopListDeadline();
     if (state.gotFirst) return;
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-      onListError(new Error('This browser is offline.'));
+      onListDeadline(new Error('This browser is offline.'));
       return;
     }
+    // The twelve-second path itself is NOT pinned by a check, and saying so is
+    // better than implying otherwise: the only way to reach it is to wait twelve
+    // seconds, twice, which is a third of the browser suite's runtime for one
+    // assertion. What IS pinned is everything it shares with the offline
+    // short-circuit above — that a failure is reported, painted, and does not
+    // release a subscription that is still alive — plus that the short-circuit
+    // exists at all, which is the case a user actually hits.
     listDeadline = window.setTimeout(function () {
       listDeadline = null;
       if (state.gotFirst) return;
-      onListError(new Error('The conversation list did not arrive.'));
+      onListDeadline(new Error('The conversation list did not arrive.'));
     }, FIRST_DELIVERY_MS);
   }
 
@@ -1569,7 +1598,8 @@
   function onVisible() {
     if (document.visibilityState !== 'visible') return;
     // Idempotent, and here rather than on a timer: a tab restored from the
-    // back-forward cache has run `teardown` and needs its subscription back.
+    // back-forward cache has run `teardown` and needs its subscription back —
+    // and so does a page whose stream died while it was in the background.
     subscribeList();
     if (state.active) markRead();
   }
