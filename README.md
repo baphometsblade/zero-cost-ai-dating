@@ -674,7 +674,8 @@ These are real, and worth knowing before you show this to anyone:
     the conversation row it moves), a profile save **2** (the private document and its
     projection, in one transaction) — and every check names the documents, because three
     writes to the wrong places is also three writes. Against the free tier's **20,000 writes
-    a day**, three a like is about 6,600 swipes across the whole deployment.
+    a day**, three a like is about 6,600 likes across the whole deployment — passes are
+    cheaper at two, so a real day's mix buys somewhat more than that.
   - **Demo mode is not immune.** It is per-device, but not "one tab at a time": the store
     listens for `storage` events and supports several tabs of the same browser, and the demo
     adapter's bump is still a `localStorage` read-modify-write two of them can race. It shares
