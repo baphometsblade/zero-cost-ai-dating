@@ -231,5 +231,21 @@ module.exports = {
     t.check('and all ' + BUMPS + ' of them actually landed, so that is not ' +
       BUMPS + ' writes of nothing',
       likes === BUMPS, 'stored likes: ' + k.show(likes));
+
+    /* ---- 8. the instrument: the way nothing here creates documents ------ */
+
+    // `collection.add()` is a billed write the shipped store never makes — it
+    // creates every document through `.doc(id).set(...)`, messages included. The
+    // counter covers it anyway, because the day somebody does reach for `add`
+    // the alternative is a tally that silently reports one write short. An
+    // unexercised branch is not evidence of anything, so it is exercised.
+    const added = await measure(function () {
+      return k.ctx.ZC.firebase.db.collection('wc-scratch').add({ hello: 'world' });
+    });
+    k.ctx.drainWarnings();
+
+    t.check('a document created with add() is one write, though nothing shipped uses it',
+      added.writes === 1 && k.same(shape(added.wrote), ['wc-scratch:add']),
+      added.writes + ' write(s): ' + k.show(added.wrote));
   }
 };

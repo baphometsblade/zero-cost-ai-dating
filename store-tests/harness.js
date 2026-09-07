@@ -105,8 +105,18 @@ function noteWrite(tally, path, op) {
   if (Array.isArray(tally.wrote)) tally.wrote.push(String(path || '?') + ':' + op);
 }
 
-/** The write operations a document reference, transaction or batch can perform. */
-const WRITE_OPS = { set: 1, update: 1, delete: 1 };
+/**
+ * The write operations a document reference, transaction or batch can perform.
+ *
+ * `add` is here for completeness rather than for current use: the shipped store
+ * creates every document through `.doc(id).set(...)`, including messages, so
+ * nothing exercises it today. It is listed anyway because the alternative is a
+ * silent under-count the day somebody writes `messages.add(...)` — a counter
+ * that quietly reports 1 where the bill is 2 is the failure this file's header
+ * calls worse than no counter at all. A transaction and a batch have no `add`,
+ * so only the reference path can reach it.
+ */
+const WRITE_OPS = { set: 1, update: 1, delete: 1, add: 1 };
 
 /**
  * A transaction or batch whose buffered writes land in `pending` rather than in
