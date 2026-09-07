@@ -43,7 +43,13 @@
     // Firestore write that has not happened yet. Every page here is its own
     // document, so an in-memory map is empty again on exactly the navigation
     // that lost the check. See `reconcileMatches`.
-    pendingMatch: 'zc.pendingMatch'
+    pendingMatch: 'zc.pendingMatch',
+    // Firebase mode only, and the third key here whose subject is a Firestore
+    // operation rather than demo data: the public faces already paid for. Same
+    // multi-page reason as the two above, with the opposite sign — those
+    // remember work still owed, this one remembers work already done. See
+    // `fetchProfiles`.
+    profiles: 'zc.profiles'
   };
 
   const SEED_VERSION = 1;
@@ -79,6 +85,50 @@
   const RECONCILE_MAX_PER_RUN = 5;
   /** How long before the same pair is worth trying again, across tabs. */
   const RECONCILE_RETRY_MS = 60 * 1000;
+
+  /**
+   * How long a public profile may be served from storage instead of Firestore.
+   *
+   * It is TOUCH_THROTTLE_MS, and that is not a coincidence to be tidied away
+   * later. The cached document is the whole `discovery/{uid}` projection, and
+   * `matches.js` renders "Active 4h ago" out of its `lastActiveAt` — so this
+   * constant is not only "how stale may a name be", it is "how wrong may the
+   * activity line be". `setLastActive` already only writes that field once per
+   * TOUCH_THROTTLE_MS, so serving a copy no older than one throttle window keeps
+   * the error the same order of magnitude as the one the throttle already
+   * introduces, rather than adding a new and larger one on top.
+   *
+   * What is enforced is the NUMBER, not the reasoning:
+   * `store-tests/specs/17-face-cache.store.js` ages a stored entry past five
+   * minutes and requires it to be read again, so raising this reddens that
+   * check. The tie to TOUCH_THROTTLE_MS is a decision recorded here and nothing
+   * executes it — a check that only matched this line's source text would be
+   * satisfied by a string rather than by behaviour, which is not the kind of
+   * evidence anything else in this repository accepts.
+   */
+  const PROFILE_CACHE_TTL_MS = TOUCH_THROTTLE_MS;
+
+  /**
+   * How many faces to keep. Conversations, not the deck — see `rememberFaces`.
+   * A projected profile is bounded by the rules (six photo links of 1024, a
+   * capped bio and interest list), so forty of them is a few hundred KB at the
+   * absolute worst and typically far less. The whole blob is rewritten on every
+   * fetch, which is the other reason not to make this large.
+   *
+   * Somebody with more conversations than this is not a broken case, just a
+   * partly served one: the oldest go, the newest stay, and a page load pays for
+   * the difference rather than for everybody. Said out loud because "bounded at
+   * forty" reads like a promise that forty is always enough, and for a few
+   * people it will not be.
+   */
+  const PROFILE_CACHE_MAX = 40;
+
+  /**
+   * Bumped when the cached shape changes. A stored profile outlives the page
+   * that wrote it, so without this a change to `projectDiscovery` would be read
+   * back by the new code as the old shape for a whole TTL.
+   */
+  const PROFILE_CACHE_VERSION = 1;
   const POLL_MS = 1500;
   const GENDERS = ['woman', 'man', 'nonbinary', 'other'];
   /** The five axes the matching engine reads, and the only ones ever published. */
@@ -1718,9 +1768,139 @@
     }
   }
 
+  /* ----------------------------------------------------------------------
+     6b. Faces already paid for
+     ---------------------------------------------------------------------- */
+
+  /**
+   * The public profiles this browser has already read, kept across page loads.
+   *
+   * `resolveProfiles` memoises faces too, but only for the life of one page,
+   * which in this app is one navigation. Opening a conversation and going back
+   * to the list is two documents, so it was two full rounds of
+   * `discovery/{uid}` reads — N a visit, forever, for people whose names had
+   * not changed since the previous visit thirty seconds earlier. At ten
+   * conversations and twenty visits a day that is 200 reads per person per day
+   * spent re-reading the same ten names, against a 50,000-a-day quota shared by
+   * everyone using the deployment.
+   *
+   * Unlike the shared-stream hub — whose read saving turned out to be the SDK's
+   * and not its own — this one is a real bill. Nothing in the Firestore client
+   * survives a page load here: offline persistence is not enabled, so each
+   * document gets a fresh SDK with an empty memory cache, and the `get()` this
+   * skips is a `get()` that would otherwise reach the server and be billed.
+   * `store-tests/specs/17-face-cache.store.js` counts it rather than asserting
+   * it.
+   *
+   * Deliberately NOT populated from `listCandidates`, which walks `discovery` in
+   * pages of at least sixty and has therefore already paid for every face the
+   * deck could seed this with for free. Those are people the viewer has mostly
+   * not matched with and mostly never will, and at forty entries seeding them
+   * would evict the conversations this exists for on the first deck load. The
+   * cache holds faces somebody is actually talking to.
+   *
+   * There is no invalidation hook, and that is a fact about the rules rather
+   * than an omission: `discovery/{uid}` is writable only by that account, so
+   * every change to a cached face happens on a device this cache does not exist
+   * on. The TTL is the only mechanism available, which is exactly why it is one
+   * throttle window rather than a day.
+   *
+   * Two things it deliberately does not do. It does not survive sign-out any
+   * differently from `zc.lastTouch` and `zc.pendingMatch`, which also outlive a
+   * session on a shared browser; what it holds is the world-readable projection
+   * any signed-in account may fetch for itself, so the only thing it discloses
+   * is which uids this device looked up — the same class those two already
+   * accept. And two overlapping fetches each read, merge and write the whole
+   * blob, so the loser's entries can be dropped; that costs a read next time and
+   * cannot corrupt anything, which is the right way for a cache to lose a race.
+   */
+  function readFaceCache() {
+    const stored = readJson(KEYS.profiles, null);
+    if (!isPlainObject(stored) || stored.v !== PROFILE_CACHE_VERSION) return {};
+    return isPlainObject(stored.faces) ? stored.faces : {};
+  }
+
+  function writeFaceCache(faces) {
+    // A bare `setItem` rather than `writeJson`, for `saveLastTouch`'s reason: a
+    // failed write here means the next page pays for the faces again, which is
+    // the cost this app had before the cache existed. Telling the user "changes
+    // will not be saved" about it would be false — nothing of theirs is at stake
+    // — and would spend the session's one storage warning on it.
+    try {
+      window.localStorage.setItem(KEYS.profiles,
+        JSON.stringify({ v: PROFILE_CACHE_VERSION, faces: faces }));
+    } catch (err) {
+      // Nothing to tell anyone, and nothing to remember either: unlike the
+      // throttle and the repair log, a cache that cannot be written has no
+      // in-memory half worth keeping. `resolveProfiles` already covers the page.
+    }
+  }
+
+  /**
+   * The faces among `uids` that are cached and still fresh.
+   * @param {string[]} uids ids being looked up
+   * @param {number} now epoch ms
+   * @returns {Object} map of uid -> UserDoc-shaped public profile
+   */
+  function cachedFaces(uids, now) {
+    const faces = readFaceCache();
+    const out = {};
+    uids.forEach(function (uid) {
+      const entry = faces[uid];
+      if (!isPlainObject(entry) || !isPlainObject(entry.doc)) return;
+      const age = now - Number(entry.at);
+      // `age >= 0` is the same guard `touchActive` needed: a stamp from the
+      // future — a clock corrected backwards, a device that was set wrong when
+      // it wrote — makes `age` negative and `age < TTL` true, and the entry
+      // never expires again. Treating a future stamp as stale costs one read
+      // and can only ever be the safe direction.
+      if (!(age >= 0 && age < PROFILE_CACHE_TTL_MS)) return;
+      const doc = normalizeUser(entry.doc);
+      // The stored document must agree with the key it is filed under. Nothing
+      // in the shipped code can write a mismatched pair, which is the point:
+      // if one ever appears, serving it would put someone else's name and photo
+      // on a conversation, and re-reading it costs one document.
+      if (doc.uid !== uid) return;
+      out[uid] = doc;
+    });
+    return out;
+  }
+
+  /**
+   * File the faces just fetched, evicting the oldest beyond PROFILE_CACHE_MAX.
+   * @param {Object} fetched map of uid -> UserDoc-shaped public profile
+   * @param {number} now epoch ms
+   * @returns {void}
+   */
+  function rememberFaces(fetched, now) {
+    const uids = Object.keys(fetched);
+    if (!uids.length) return;
+    const faces = readFaceCache();
+    uids.forEach(function (uid) { faces[uid] = { at: now, doc: fetched[uid] }; });
+
+    const all = Object.keys(faces);
+    if (all.length > PROFILE_CACHE_MAX) {
+      all.sort(function (a, b) { return stampOf(faces[a]) - stampOf(faces[b]); })
+        .slice(0, all.length - PROFILE_CACHE_MAX)
+        .forEach(function (uid) { delete faces[uid]; });
+    }
+    writeFaceCache(faces);
+  }
+
+  /** When a cache entry was filed; 0 for anything malformed, so it evicts first. */
+  function stampOf(entry) {
+    return (isPlainObject(entry) && Number(entry.at)) || 0;
+  }
+
   /**
    * Fetch several public discovery profiles at once, tolerating individual
    * failures. Other people are only ever read through this projection.
+   *
+   * Misses are not cached, for the reason `resolveProfiles` gives for not
+   * memoising them: a remembered failure is a permanent "Someone" for an
+   * account whose profile was briefly unreadable. The cost of that choice is
+   * one read per page for a genuinely deleted account, which is the right way
+   * round.
    * @param {string[]} uids ids to fetch
    * @returns {Promise<Object>} map of uid -> UserDoc-shaped public profile
    */
@@ -1729,16 +1909,22 @@
     (uids || []).forEach(function (uid) {
       if (uid && unique.indexOf(uid) === -1) unique.push(uid);
     });
-    const results = await Promise.all(unique.map(function (uid) {
+    const map = cachedFaces(unique, Date.now());
+    const wanted = unique.filter(function (uid) { return !map[uid]; });
+    const results = await Promise.all(wanted.map(function (uid) {
       return db().collection('discovery').doc(uid).get().then(docToUser, function (err) {
         console.warn('[zc.store] Could not load profile ' + uid, err);
         return null;
       });
     }));
-    const map = {};
-    unique.forEach(function (uid, index) {
-      if (results[index]) map[uid] = results[index];
+    const fresh = {};
+    wanted.forEach(function (uid, index) {
+      if (results[index]) {
+        map[uid] = results[index];
+        fresh[uid] = results[index];
+      }
     });
+    rememberFaces(fresh, Date.now());
     return map;
   }
 
@@ -3142,7 +3328,11 @@
     /** Canonical UserDoc defaults. Copy it, do not mutate it. */
     DEFAULT_USER: DEFAULT_USER,
 
-    /** Demo-mode storage keys, exposed for the Settings data tools. */
+    /**
+     * The localStorage keys this store owns, exposed for the Settings data
+     * tools. Mostly demo data; `lastTouch`, `pendingMatch` and `profiles` are
+     * about Firestore operations instead, and each says so where it is defined.
+     */
     KEYS: KEYS,
 
     /**

@@ -165,6 +165,18 @@ module.exports = {
 async function measure(k, fn) {
   const real = k.ctx.ZC.firebase.db;
   const tally = { reads: 0, calls: 0 };
+
+  // Cold on both sides, deliberately. `fetchProfiles` now keeps the faces it
+  // reads in localStorage for one throttle window, so the second identical call
+  // below would find twelve of its reads already paid for — and this file's
+  // claim is that two identical calls cost the same however long the history
+  // behind them has grown. Leaving the cache warm would turn the second
+  // measurement into a measurement of the cache: it would come in twelve reads
+  // cheaper, the equality check would fail, and "fixing" it by accepting the
+  // lower number would stop testing the swipe walk this spec exists for. The
+  // cache has its own spec; this one measures what a cold page load costs.
+  globalThis.localStorage.removeItem(k.store.KEYS.profiles);
+
   k.ctx.ZC.firebase.db = k.h.countingDb(real, tally);
   try {
     const value = await fn();
