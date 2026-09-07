@@ -366,6 +366,14 @@ with two conversations they had none — while the Firestore adapter delivered n
 all, leaving a skeleton on screen. The same fault, and the two adapters lying about it in
 opposite directions, inside the one primitive a live list is built on.
 
+Writes are counted too — `harness.countingDb` tallies both halves of the bill now. It bills what Firestore would: a refused write is not a write, so the tally moves
+when the promise resolves rather than when the call is made, and a transaction's callback is
+replayed on contention, so each attempt buffers its own writes and only the one that
+committed is added. Counting where `tx.set` is called reports twenty concurrent bumps as
+forty, measured. `store-tests/specs/19-write-cost.store.js` pins a pass at 2, an ordinary
+like at 3, a mutual like at 4, a message at 2 and a profile save at 2 — with the documents
+named, because three writes to the wrong places is also three writes.
+
 `listCandidates` is the app's largest read path and was the last one whose bill nothing
 counted. It excluded people the viewer had already swiped on by reading the whole swipe
 history — `getSwipes(uid)`, one read per swipe ever made, on every deck load, measured at
