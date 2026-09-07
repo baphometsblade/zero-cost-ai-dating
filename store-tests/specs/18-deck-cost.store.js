@@ -44,7 +44,8 @@
      4. Only the room the deck has left is asked about.
      5. Somebody the mutual filters exclude is never asked about at all, which
         is what the filter reordering buys.
-     6. When the batched query is refused, the deck still loads.
+     6. When the batched query is refused, the deck still loads — and still
+        excludes, which is a separate thing and needs its own swipes to prove.
    ========================================================================== */
 'use strict';
 
@@ -279,6 +280,29 @@ module.exports = {
         data: { from: me, to: them, action: 'like', createdAt: '2026-01-02T00:00:00.000Z' }
       };
     }));
+
+    // The fallback again, now that there is something for it to find. The check
+    // above proves it produces a deck and what that costs; it could not prove it
+    // excludes anybody, because at that point nothing in the pool had been
+    // swiped and an exclusion step that found nothing looks identical to one
+    // that does not work. This is the path that only runs when something has
+    // already gone wrong, so "it returns the right number of cards" is not
+    // enough to know about it.
+    let excluded;
+    k.ctx.ZC.firebase.db = refusing;
+    try {
+      excluded = await k.store.listCandidates(me, { limit: LIMIT });
+    } finally {
+      k.ctx.ZC.firebase.db = real;
+    }
+    k.ctx.drainWarnings();
+
+    t.check('and one read at a time still excludes the people it finds',
+      taken.every(function (them) {
+        return excluded.map(function (u) { return u.uid; }).indexOf(them) === -1;
+      }) && excluded.length === LIMIT - taken.length,
+      excluded.length + ' candidate(s) through the fallback, none of them the ' +
+      taken.length + ' just swiped on');
 
     const after = await deck();
     k.ctx.drainWarnings();
