@@ -73,18 +73,128 @@ const OPEN_RULES = [
  * Deliberately not counted: reads made through a transaction's own `tx.get`,
  * which never passes through this object. Nothing measured with it uses one,
  * and a helper that silently under-counted would be worse than no helper, so it
- * is said out loud instead of assumed.
+ * is said out loud instead of assumed. That exclusion is also load-bearing now
+ * that writes ARE counted through transactions: adding `tx.get` here would move
+ * numbers in five specs that have nothing to do with writes.
+ *
+ * WRITES are counted too, and only the ones Firestore would bill:
+ *
+ *   - a rejected `set`/`update`/`delete` is not a write, so the tally moves when
+ *     the promise resolves rather than when the call is made. A rules denial
+ *     costs nothing and must not read as a write;
+ *   - a transaction's callback is REPLAYED on contention, so `tx.set` can run
+ *     several times for one committed write. Each attempt starts its own count
+ *     and only the attempt that committed is added — counting at call time
+ *     would report a contended bump as two or three writes, which is precisely
+ *     the situation `specs/01-concurrency` exists to create;
+ *   - a batch is counted at `commit()`, for both reasons at once.
+ *
+ * `tally.writes` is created on demand, so a spec that only cares about reads can
+ * keep passing `{reads: 0, calls: 0}`. Pass a `wrote` array as well to collect
+ * `collection/id:op` strings — "three writes" is satisfied by three writes to
+ * the wrong documents, so the identities are worth having.
  *
  * @param {Object} target the real compat Firestore, or one of its refs
- * @param {{reads:number, calls:number}} tally accumulator, mutated in place
- * @returns {Object} a stand-in that behaves identically and records reads
+ * @param {{reads:number, calls:number, writes?:number, wrote?:string[]}} tally
+ *   accumulator, mutated in place
+ * @returns {Object} a stand-in that behaves identically and records reads and writes
  */
+/** Record one billed write against the tally. */
+function noteWrite(tally, path, op) {
+  tally.writes = (tally.writes || 0) + 1;
+  if (Array.isArray(tally.wrote)) tally.wrote.push(String(path || '?') + ':' + op);
+}
+
+/** The write operations a document reference, transaction or batch can perform. */
+const WRITE_OPS = { set: 1, update: 1, delete: 1 };
+
+/**
+ * A transaction or batch whose buffered writes land in `pending` rather than in
+ * the tally, so a replayed attempt can be discarded and only the committed one
+ * counted.
+ * @param {Object} target the real transaction or WriteBatch
+ * @param {{writes:number, wrote:string[]}} pending this attempt's buffer
+ * @returns {Object} a stand-in that behaves identically
+ */
+function bufferingWrites(target, pending) {
+  return new Proxy(target, {
+    get: function (obj, prop) {
+      const value = obj[prop];
+      if (typeof value !== 'function') return value;
+      return function () {
+        if (WRITE_OPS[prop]) {
+          pending.writes += 1;
+          pending.wrote.push(String((arguments[0] && arguments[0].path) || '?') + ':' + prop);
+        }
+        return value.apply(obj, arguments);
+      };
+    }
+  });
+}
+
 function countingDb(target, tally) {
   return new Proxy(target, {
     get: function (obj, prop) {
       const value = obj[prop];
       if (typeof value !== 'function') return value;
       return function () {
+        if (WRITE_OPS[prop]) {
+          // On resolution, not on call: a write the rules refuse is not billed,
+          // and this suite provokes those on purpose.
+          const path = obj.path;
+          const out = value.apply(obj, arguments);
+          if (out && typeof out.then === 'function') {
+            return out.then(function (result) {
+              noteWrite(tally, path, prop);
+              return result;
+            });
+          }
+          noteWrite(tally, path, prop);
+          return out;
+        }
+
+        if (prop === 'runTransaction') {
+          const fn = arguments[0];
+          // Reset per attempt. Firestore replays the callback when the document
+          // moved under it, and the writes of an attempt that never committed
+          // were never billed.
+          let attempt = null;
+          return value.call(obj, function (tx) {
+            attempt = { writes: 0, wrote: [] };
+            return fn(bufferingWrites(tx, attempt));
+          }).then(function (result) {
+            if (attempt) {
+              tally.writes = (tally.writes || 0) + attempt.writes;
+              if (Array.isArray(tally.wrote)) {
+                attempt.wrote.forEach(function (entry) { tally.wrote.push('tx:' + entry); });
+              }
+            }
+            return result;
+          });
+        }
+
+        if (prop === 'batch') {
+          const pending = { writes: 0, wrote: [] };
+          const real = value.apply(obj, arguments);
+          return new Proxy(bufferingWrites(real, pending), {
+            get: function (b, p) {
+              const v = b[p];
+              if (p !== 'commit' || typeof v !== 'function') return v;
+              return function () {
+                return v.apply(b, arguments).then(function (result) {
+                  tally.writes = (tally.writes || 0) + pending.writes;
+                  if (Array.isArray(tally.wrote)) {
+                    pending.wrote.forEach(function (entry) { tally.wrote.push('batch:' + entry); });
+                  }
+                  pending.writes = 0;
+                  pending.wrote.length = 0;
+                  return result;
+                });
+              };
+            }
+          });
+        }
+
         if (prop === 'onSnapshot') {
           const args = Array.prototype.slice.call(arguments);
           if (typeof args[0] === 'function') {

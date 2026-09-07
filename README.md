@@ -337,7 +337,7 @@ The daily usage counter is the one piece of client logic where reading the code 
 as weak an argument as it was for the rules: whether two concurrent bumps collapse into one
 is a property of a real database, not of anything visible in the file. `store-tests/` loads
 the **shipped** `public/js/data-store.js` into Node — `window` aliased to `globalThis`,
-`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **183
+`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **193
 checks**, including 20 concurrent `bumpUsage` calls on one document storing exactly 20, the
 midnight roll-over happening inside the same transaction, a bump writing `usage` and nothing
 else, 30 swipes replaying the deck's real learning-save-then-bump ordering and storing exactly
@@ -666,6 +666,15 @@ These are real, and worth knowing before you show this to anyone:
     when the match document gets created. It was one more than that until the learning save
     stopped going through `updateUser`, which republished the projection for a field the
     projection has never carried.
+    Those numbers are counted rather than described. They were prose for a long time, and
+    `scripts/claims.js` names this exact sentence as one of the three that drifted before
+    anything executed them — "a *three writes* that was four for a mutual like", caught by a
+    person reading carefully. `store-tests/specs/19-write-cost.store.js` now runs it: a pass
+    is **2**, an ordinary like **3**, a mutual like **4**, a message **2** (the message and
+    the conversation row it moves), a profile save **2** (the private document and its
+    projection, in one transaction) — and every check names the documents, because three
+    writes to the wrong places is also three writes. Against the free tier's **20,000 writes
+    a day**, three a like is about 6,600 swipes across the whole deployment.
   - **Demo mode is not immune.** It is per-device, but not "one tab at a time": the store
     listens for `storage` events and supports several tabs of the same browser, and the demo
     adapter's bump is still a `localStorage` read-modify-write two of them can race. It shares
