@@ -337,9 +337,28 @@ optimisation that lasts only while the two queries stay byte-identical, and it g
 error channel, one cached first delivery for a late subscriber, and one refcounted
 teardown.
 
-Faces are fetched once per person per page load — not cached across navigations, so an
-edited name can never outlive the page it was read on.
-`store-tests/specs/15-live-list.store.js` counts the rest.
+Faces are fetched once per person per page load, and — since the round that measured what
+that actually cost — once per person per **five minutes** across page loads too. Every page
+here is its own document, so the per-page memo starts empty on every navigation and the same
+`discovery/{uid}` was re-read on each one; offline persistence is not enabled, so nothing in
+the SDK covered it either and every one of those reads reached the server. `fetchProfiles`
+keeps them in `localStorage` instead.
+
+Five minutes is `TOUCH_THROTTLE_MS`, and taking the same number is the design rather than a
+coincidence. The cached document is the whole projection, and `matches.js` renders
+"Active 4h ago" out of its `lastActiveAt` — so the TTL is not only how stale a name may be,
+it is how wrong the activity line may be, and `setLastActive` already refreshes that field
+at most once per throttle window. A cache may not outlive the interval at which the field it
+carries is itself rewritten.
+
+Unlike the shared stream above, this one really is a read saving, which is the whole
+difference between the two: there the SDK was already doing it, here nothing was.
+`store-tests/specs/15-live-list.store.js` counts the rest, and
+`store-tests/specs/17-face-cache.store.js` counts this one — a cold page load at 2N and the
+next at N — then spends most of its length on the ways a cache is worse than no cache: an
+entry past its window, a clock corrected backwards, a face filed under the wrong uid, an
+older stored shape, a cache that is not JSON, storage that is full, and a profile that is
+missing and must not be remembered as missing.
 
 Both listeners can now report a failure as well as a value. That is not decoration: before
 it, a stream that died left the demo adapter delivering an empty list — telling somebody

@@ -337,7 +337,7 @@ The daily usage counter is the one piece of client logic where reading the code 
 as weak an argument as it was for the rules: whether two concurrent bumps collapse into one
 is a property of a real database, not of anything visible in the file. `store-tests/` loads
 the **shipped** `public/js/data-store.js` into Node — `window` aliased to `globalThis`,
-`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **153
+`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **170
 checks**, including 20 concurrent `bumpUsage` calls on one document storing exactly 20, the
 midnight roll-over happening inside the same transaction, a bump writing `usage` and nothing
 else, 30 swipes replaying the deck's real learning-save-then-bump ordering and storing exactly
@@ -611,6 +611,25 @@ These are real, and worth knowing before you show this to anyone:
   discarding a background tab — pays that again. That is bounded by the size of a social
   graph and spent when something actually happened, which is the shape a free tier can
   carry.
+
+  One part of it was being paid over and over, and is not any more. Every page here is its
+  own HTML document, so the per-page memo behind the faces starts empty on every navigation:
+  opening the list, tapping into a conversation and coming back re-read a `discovery/{uid}`
+  for every conversation, each time. Nothing in the client covered that — offline persistence
+  is not enabled, so each page load gets a fresh SDK with an empty cache and every one of
+  those reads reaches the server. `fetchProfiles` now keeps the faces it reads in
+  `localStorage` for **five minutes**: measured, a cold page load costs 2N and the next one
+  costs N. Five minutes is `TOUCH_THROTTLE_MS` and takes that number deliberately — the
+  conversation list renders "Active 4h ago" out of the cached document's `lastActiveAt`, so
+  the TTL is also how wrong the activity line may be, and a cache must not outlive the
+  interval at which the field it carries is itself rewritten. Unlike the shared stream above
+  this one really is a read saving, and the difference is the point: there the SDK was
+  already doing it, here nothing was.
+  `store-tests/specs/17-face-cache.store.js` counts it, then spends most of its length on the
+  ways a cache is worse than no cache — an entry past its window, a clock corrected
+  backwards, a face filed under the wrong uid, an older stored shape, a cache that is not
+  JSON, storage that is full, and a profile that is missing and must not be remembered as
+  missing.
 - **Client-side gating is only as strong as the Firestore rules.** Daily like limits, premium
   features and rewinds are enforced in the browser because the free plan has no server to
   enforce them on. A determined user with devtools can bypass any of it. The rules stop data
