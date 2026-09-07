@@ -1972,14 +1972,23 @@
    * reads when none of them have been swiped, rather than one read per swipe
    * ever made.
    *
-   * No `from == uid` clause, deliberately. A pure key query needs no composite
-   * index, so there is no index this could be missing in production that the
-   * emulator would not notice; and it is already provably the caller's own
-   * data, because `swipeOk` in `firestore.rules` requires
-   * `swipeId == d.from + '_' + d.to`. Every document these ids can name has
-   * `from == uid` or it could not have been written. Adding the clause would
-   * restate that invariant while introducing an index question nothing here can
-   * answer.
+   * No `from == uid` clause, deliberately, and the reason is worth stating
+   * exactly rather than confidently. It is provably already the caller's own
+   * data: `swipeOk` in `firestore.rules` requires
+   * `swipeId == d.from + '_' + d.to`, so every document these ids can name has
+   * `from == uid` or it could not have been written — that half is checked, by
+   * `rules-tests/specs/08-budget.rules.js` running this query against the real
+   * ruleset. The other half is an index question, and it is the one thing here
+   * nothing available can settle: adding an equality clause would make this a
+   * two-field query, and whether Firestore serves that from an automatic index
+   * in production is not something the emulator answers — it builds indexes on
+   * demand and never raises the `failed-precondition` a real project would. The
+   * documentation says automatic single-field indexes serve equality and `in`
+   * and does not spell out the combination. So the query is left as a pure key
+   * filter, which is the form with the least to be wrong about, and the
+   * `catch` below is what actually carries the risk: a missing index arrives as
+   * a rejected `get()` exactly like a refused one, and falls through to the same
+   * per-document path. Degraded and loud, never broken.
    * @param {string} uid the viewer
    * @param {string[]} others the people to ask about
    * @returns {Promise<Object>} map of uid -> true for everyone already swiped
