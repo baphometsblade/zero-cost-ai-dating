@@ -366,6 +366,23 @@ with two conversations they had none — while the Firestore adapter delivered n
 all, leaving a skeleton on screen. The same fault, and the two adapters lying about it in
 opposite directions, inside the one primitive a live list is built on.
 
+`listCandidates` is the app's largest read path and was the last one whose bill nothing
+counted. It excluded people the viewer had already swiped on by reading the whole swipe
+history — `getSwipes(uid)`, one read per swipe ever made, on every deck load, measured at
+122 for a fresh account and 321 after two hundred swipes. It now asks by key instead:
+swipe ids are derived from the pair, so `swipes where __name__ in [ids]` answers the
+question for ten people at a time and a key query bills what it returns with a floor of
+one. The cost stops depending on the history and becomes the account, the pages walked,
+and one lookup per ten candidates considered — with the swipe lookup moved to LAST among
+the filters, so somebody the mutual age or gender filter excludes is never asked about.
+
+Ten, because the ceiling here is the ruleset's rather than Firestore's thirty: the swipes
+read rule is evaluated once per value in the list, and 1000 expressions per request is a
+hard limit whose overrun is a `permission-denied` naming nothing.
+`rules-tests/specs/08-budget.rules.js` measures the cliff (20) and fails if the batch loses
+its margin; `store-tests/specs/18-deck-cost.store.js` measures the bill. A refused batch
+falls back to one read per person, warns, and still produces a deck.
+
 ### Shared semantics
 
 - `recordSwipe(from, to, action)` writes `swipes/{from}_{to}`; if the reciprocal swipe exists
