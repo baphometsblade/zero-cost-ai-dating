@@ -325,11 +325,21 @@ changes. `store-tests/specs/11-live-cost.store.js` measures that.
 returns, pushed. It exists separately rather than as an option on `listenMatches` because
 the badge's contract — rows, no profiles — is what makes the badge cheap, and one method
 that sometimes fetches profiles would make that contract untestable. Two things on a page
-want this account's matches, and both go through **one** subscription: a second
-`onSnapshot` would mean Firestore delivering twice, and a delivery is what is billed, so
-the same message arriving would cost two reads instead of one. Faces are fetched once per
-person per page load — not cached across navigations, so an edited name can never outlive
-the page it was read on. `store-tests/specs/15-live-list.store.js` counts all of it.
+want this account's matches, and both go through **one** subscription.
+
+That was first justified as a read saving, and the justification was wrong. Firestore's
+client SDK already shares one server target between listeners on *exactly* the same query,
+so a second `onSnapshot` on an identical query costs nothing — the store suite's counter
+says otherwise only because it tallies per delivered callback, which is the right model for
+the first-snapshot-then-changes rule and the wrong one for this case. What the shared hub
+earns instead: the property holds by construction rather than by an undocumented client
+optimisation that lasts only while the two queries stay byte-identical, and it gives one
+error channel, one cached first delivery for a late subscriber, and one refcounted
+teardown.
+
+Faces are fetched once per person per page load — not cached across navigations, so an
+edited name can never outlive the page it was read on.
+`store-tests/specs/15-live-list.store.js` counts the rest.
 
 Both listeners can now report a failure as well as a value. That is not decoration: before
 it, a stream that died left the demo adapter delivering an empty list — telling somebody

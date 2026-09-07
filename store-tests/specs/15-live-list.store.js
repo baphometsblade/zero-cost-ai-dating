@@ -23,6 +23,20 @@
    `specs/11-live-cost.store.js` uses: it counts a listener's deltas rather than
    its payload, because a snapshot carrying twelve rows because one of them moved
    is one read and not twelve.
+
+   WHERE THAT COUNTER AND THE ACTUAL BILL COME APART, because this file believed
+   it once and shipped the belief. It tallies per delivered CALLBACK, so two
+   listeners on the same query report two reads for one change. Firestore does not
+   bill that: the client SDK shares one server target between listeners on exactly
+   the same query, so the second is free whether or not anything here is shared.
+   Sam Stern of the Firebase team, on firebase-talk: "Assuming those are on the
+   same device, yes they share the same listener and the query will only happen
+   once. This is only the case because the queries are exactly the same."
+
+   So the shared hub below saves no reads, and the checks that touch it say what
+   they actually measure — DELIVERIES — rather than repeating a cost claim the
+   instrument cannot see. Every other number here is the bill: one document
+   fetched is one read in any model.
    ========================================================================== */
 'use strict';
 
@@ -133,14 +147,14 @@ module.exports = {
       t.check('the conversation list then costs the faces and nothing else',
         facesCost === MATCHES,
         facesCost + ' read(s) on top of the badge — one profile per conversation is ' + MATCHES +
-        '; a second match query would make it ' + (MATCHES * 2));
+        '; re-reading the rows as well would make it ' + (MATCHES * 2));
 
       t.check('and every conversation it delivers carries a name',
         !!list && list.value.length === MATCHES &&
           list.value.every(function (v) { return !!(v.other && v.other.displayName); }),
         list ? list.value.map(function (v) { return v.other.displayName; }).join(', ') : 'timed out');
 
-      t.check('which is the whole point: the rows were already paid for',
+      t.check('so a page holding both pays for the rows once and the faces once',
         tally.reads === MATCHES * 2,
         tally.reads + ' read(s) total for a page holding both — the poll it replaces spent ' +
         (MATCHES * 2) + ' every twenty seconds, forever');
@@ -169,10 +183,14 @@ module.exports = {
       }));
       await until(function () { return listViews.length > listBefore; }, 5000);
 
-      t.check('one conversation changing costs exactly one read, for both subscribers together',
+      // One DELIVERY, which is what the counter can see. The bill is one read either
+      // way — the SDK shares the target — so what this pins is that the faces are
+      // not re-fetched, and that both subscribers are served by one delivery rather
+      // than each triggering their own hydration.
+      t.check('one conversation changing is one delivery, and does not re-fetch a single face',
         tally.reads - before === 1,
-        (tally.reads - before) + ' read(s) — two unshared subscriptions would bill 2, and ' +
-        're-fetching the faces would bill ' + (1 + MATCHES));
+        (tally.reads - before) + ' — re-fetching the faces would make it ' + (1 + MATCHES) +
+        '; two unshared subscriptions report 2 here, though Firestore bills that as 1');
 
       t.check('and both of them were told about it',
         badgeRows.length > badgeBefore && listViews.length > listBefore,

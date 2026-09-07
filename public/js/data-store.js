@@ -2983,11 +2983,30 @@
    * Open subscriptions, keyed by uid.
    *
    * Two things on the same page want this account's matches: `app.js` for the
-   * nav badge, and the conversation list. Two `onSnapshot` calls means Firestore
-   * delivers twice, and a delivery is what is billed — so the same message
-   * arriving would cost two reads instead of one, for as long as the page is
-   * open. Refcounting one stream is what makes "one conversation changing costs
-   * one read" a number a check can hold rather than a hope.
+   * nav badge, and the conversation list.
+   *
+   * A CORRECTION, because the first version of this comment got the reason wrong
+   * and the wrong reason shipped. It said two `onSnapshot` calls would have
+   * Firestore deliver twice and bill twice. That is what the store suite's
+   * counter reports — it tallies per delivered callback — but it is NOT how
+   * Firestore bills: the client SDK shares one server target between listeners on
+   * EXACTLY the same query, so the second one costs nothing. Sam Stern of the
+   * Firebase team, on firebase-talk: "Assuming those are on the same device, yes
+   * they share the same listener and the query will only happen once. This is only
+   * the case because the queries are exactly the same." The two here are exactly
+   * the same, so the hub saves no reads at all.
+   *
+   * What it does earn, and what it should have said:
+   *   - the property holds BY CONSTRUCTION rather than by an undocumented client
+   *     optimisation that Sam Stern's own answer says survives only while the two
+   *     queries stay identical — the moment one of them grows an `orderBy` they
+   *     become separate targets, and separate bills, with nothing to notice;
+   *   - one error channel, so a stream that dies reaches both subscribers and the
+   *     record is cleared for a retry;
+   *   - a cached first delivery, so a subscriber that arrives late is caught up
+   *     rather than left blank until something changes;
+   *   - one refcounted teardown, so one component navigating away cannot silently
+   *     stop the other's updates.
    */
   const matchStreams = Object.create(null);
 
