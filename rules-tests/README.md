@@ -55,7 +55,7 @@ without a row here.
 | `specs/05-messages.rules.js` | `matches/{id}/messages` — participants only, append-only, self-authored |
 | `specs/06-reports.rules.js` | `reports/{from_about}` — bounded, author-only, unprobeable |
 | `specs/07-default-deny.rules.js` | everything else — denied by default |
-| `specs/08-budget.rules.js` | the rules file itself — how much of Firestore's 1000-expression-per-request ceiling `userDocOk` has left |
+| `specs/08-budget.rules.js` | the rules file itself — how much of Firestore's 1000-expression-per-request ceiling `userDocOk` has left, and how long an `in` list the swipes read rule accepts before the same ceiling denies it. The second one binds the deck: `listCandidates` asks "have I swiped on these people" as `swipes where __name__ in [ids]`, the read rule is evaluated once per value, and going over comes back as a `permission-denied` naming nothing. Measured at 20; the store asks about 10 |
 
 Each spec starts from an empty database, so one spec's fixtures can never satisfy
 another's preconditions and mask a missing rule.

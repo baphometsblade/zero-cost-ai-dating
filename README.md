@@ -319,7 +319,7 @@ readable by other accounts, that nobody can mint a match with a stranger and the
 them, that the abuse queue cannot be enumerated — is a claim about one file,
 `firestore.rules`, because there is no server to enforce anything else. Reading it
 carefully is not evidence. `rules-tests/` executes it against the Firestore emulator:
-**183 checks**, including the attacks each rule exists to stop.
+**188 checks**, including the attacks each rule exists to stop.
 
 ```sh
 npm install --prefix /tmp/zc-rules @firebase/rules-unit-testing firebase-tools
@@ -337,7 +337,7 @@ The daily usage counter is the one piece of client logic where reading the code 
 as weak an argument as it was for the rules: whether two concurrent bumps collapse into one
 is a property of a real database, not of anything visible in the file. `store-tests/` loads
 the **shipped** `public/js/data-store.js` into Node — `window` aliased to `globalThis`,
-`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **170
+`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **183
 checks**, including 20 concurrent `bumpUsage` calls on one document storing exactly 20, the
 midnight roll-over happening inside the same transaction, a bump writing `usage` and nothing
 else, 30 swipes replaying the deck's real learning-save-then-bump ordering and storing exactly
@@ -695,7 +695,28 @@ These are real, and worth knowing before you show this to anyone:
 - **Discovery scans candidate pages and ranks them in the browser.** `listCandidates` walks
   the public `discovery` collection with a cursor (newest-active first, with cheap mutual
   gender/age pre-filters) until the deck is full or a scan cap is hit, and the ranking then
-  runs on the main thread during the page load. Measured with `npm run bench` on a 2.1 GHz
+  runs on the main thread during the page load.
+
+  What that walk **costs to read** was, for a long time, the thing this bullet did not
+  mention — it measured the CPU and nothing measured the bill. Excluding people you have
+  already swiped on was done by reading your **entire swipe history**, on every deck load:
+  measured against the emulator, **122 reads for a fresh account, 221 after a hundred
+  swipes, 321 after two hundred**, growing forever, against 50,000 a day for the whole
+  deployment. That is the same defect `getLikesReceived` had, in the same file, two
+  functions apart — and the comment above this one argued it could not be fixed here,
+  that the exclusion "cannot do that one id at a time". It can. Swipe ids are derived from
+  the pair, so the ids are known without reading anything, and a key query bills the
+  documents it returns with a floor of one: the deck now asks about people ten at a time
+  and costs **the account, one page, and one lookup per ten candidates** — flat at 127 in
+  the same measurement, whether the history behind it is fifty swipes or two hundred.
+  `store-tests/specs/18-deck-cost.store.js` pins the scaling property rather than the
+  number.
+
+  Ten at a time because the binding limit is not Firestore's ceiling of thirty but this
+  project's own rules budget: the swipes read rule is evaluated once per value in an `in`
+  list, and going over 1000 expressions is a `permission-denied` naming nothing.
+  `rules-tests/specs/08-budget.rules.js` measures where that cliff sits — **20** — and
+  fails if the batch ever loses its margin under it. Measured with `npm run bench` on a 2.1 GHz
   Xeon cloud vCPU under Node 22 — a deliberately slow stand-in, since no phone was actually
   measured — that costs ~90 µs per candidate and scales linearly: the 60-candidate deck the app actually
   loads takes ~5 ms, 500 candidates ~44 ms, 1,000 ~87 ms, 2,000 ~180 ms, 10,000 ~0.94 s. So

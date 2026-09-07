@@ -26,6 +26,17 @@
    `learning.interestAffinity` bounded by element count only, which meant one
    element could be a megabyte. Those bounds cost four of the eleven. What must
    not happen is spending the rest of it without noticing.
+
+   The same budget binds a second thing, found later and from the other
+   direction. `listCandidates` asks "have I already swiped on these people" with
+   a key query — `swipes where __name__ in [ids]` — instead of reading the
+   viewer's whole swipe history, and the read rule for `swipes` is evaluated
+   once per value in that list. Firestore's own ceiling for `in` is thirty; this
+   file's is lower, and it is the one that decides. So the largest list the
+   shipped rules actually accept is measured here too, and the store's batch
+   size has to stay well under it. The failure it prevents is nasty: a
+   `permission-denied` on the deck, on the accounts with the longest lists,
+   naming nothing.
    ========================================================================== */
 'use strict';
 
@@ -56,6 +67,24 @@ const PAD = ' && d.uid is string';
 
 /** Where in userDocOk the padding goes — a clause the validator always reaches. */
 const ANCHOR = "d.plan in ['free', 'premium']";
+
+/**
+ * The batch size `public/js/data-store.js` uses for its swipe lookups.
+ *
+ * Repeated here rather than imported: the store does not export it, and a check
+ * that read the same constant as the code would agree with it however wrong
+ * both were. If the two ever diverge this file goes red for the right reason —
+ * it is measuring the engine, not the constant.
+ */
+const SWIPE_BATCH = 10;
+
+/**
+ * How long an `in` list to search up to. Below Firestore's own limit of thirty
+ * on purpose: at thirty-one the SDK raises `invalid-argument` before the rules
+ * are consulted at all, and a search that could not tell that apart from a
+ * denial would report the SDK's limit as if it were the budget's.
+ */
+const IN_SEARCH_CEILING = 29;
 
 module.exports = {
   title: 'firestore.rules stays inside its 1000-expression evaluation budget',
@@ -127,5 +156,102 @@ module.exports = {
         ? 'Spend it knowing a clause that is a function call costs about 2.2 of these.'
         : 'Buy some back before adding anything: inline a helper, or drop a check ' +
           'that a write path already enforces.'));
+
+    /* ---- the same budget, seen from the swipes read rule --------------- */
+
+    const mod = h.loadOutside('firebase/firestore');
+    t.check('the modular firestore package is available to ask a key query with',
+      !!(mod && mod.documentId && mod.getDocs),
+      mod ? 'loaded' : 'not installed — see the suite install hint');
+    if (!mod || !mod.documentId) return;
+
+    // The two copies of the batch size have to be the same number, or this
+    // measurement is of a batch nobody uses. `tests/limits.test.js` compares the
+    // form's bounds with the rules' for the same reason: a limit written down
+    // twice needs something reading both.
+    const storeSource = require('node:fs')
+      .readFileSync(require('node:path').join(h.ROOT, 'public/js/data-store.js'), 'utf8');
+    const declared = /const\s+SWIPE_LOOKUP_BATCH\s*=\s*(\d+)\s*;/.exec(storeSource);
+    t.check('data-store.js asks about swipes in batches of ' + SWIPE_BATCH + ', as this file assumes',
+      !!declared && Number(declared[1]) === SWIPE_BATCH,
+      declared
+        ? 'SWIPE_LOOKUP_BATCH is ' + declared[1] + ', this file measures for ' + SWIPE_BATCH
+        : 'no `const SWIPE_LOOKUP_BATCH = N;` found in public/js/data-store.js');
+
+    const READER = 'budget-swiper';
+
+    /**
+     * Does the shipped ruleset accept `swipes where __name__ in [n ids]`?
+     *
+     * Half the documents are seeded and half are not, deliberately: the cost
+     * this is measuring is in the length of the list rather than in the results,
+     * and a run where every id missed would exercise the rule's `resource ==
+     * null` branch alone. A denial from anything other than the rules would be
+     * a different measurement, so the code is reported rather than swallowed.
+     * @param {number} n how many ids to ask about
+     * @returns {Promise<{allowed:boolean, code:string}>}
+     */
+    async function keyQueryAllowed(n) {
+      projects += 1;
+      const env = await testing.initializeTestEnvironment({
+        projectId: 'demo-zc-inbudget-' + projects,
+        firestore: { rules: source, host: address.host, port: address.port }
+      });
+      const ids = [];
+      for (let i = 0; i < n; i += 1) ids.push(READER + '_budget-them-' + String(i).padStart(3, '0'));
+      await env.withSecurityRulesDisabled(async function (c) {
+        const db = c.firestore();
+        for (let i = 0; i < n; i += 2) {
+          const to = ids[i].split('_')[1];
+          await mod.setDoc(mod.doc(db, 'swipes', ids[i]), {
+            id: ids[i], from: READER, to: to, action: 'pass', createdAt: '2026-01-01T00:00:00.000Z'
+          });
+        }
+      });
+      let allowed = true;
+      let code = '';
+      try {
+        const db = env.authenticatedContext(READER).firestore();
+        await mod.getDocs(mod.query(mod.collection(db, 'swipes'),
+          mod.where(mod.documentId(), 'in', ids)));
+      } catch (err) {
+        allowed = false;
+        code = (err && err.code) || String(err);
+      }
+      await env.cleanup();
+      return { allowed: allowed, code: code };
+    }
+
+    const one = await keyQueryAllowed(1);
+    t.check('the shipped rules accept a key query on the caller\'s own swipes at all',
+      one.allowed,
+      one.allowed ? 'allowed' : 'DENIED (' + one.code + ') — the deck cannot ask this question');
+    if (!one.allowed) return;
+
+    let inLo = 1;
+    let inHi = IN_SEARCH_CEILING;
+    let lastCode = '';
+    while (inLo < inHi) {
+      const mid = Math.ceil((inLo + inHi) / 2);
+      const answer = await keyQueryAllowed(mid);
+      if (answer.allowed) { inLo = mid; } else { inHi = mid - 1; lastCode = answer.code; }
+    }
+    const widest = inLo;
+
+    // Same vacuity guard as above, and it earns its place here: if the query
+    // were allowed at every length the search would report the ceiling and the
+    // floor below would pass while measuring nothing at all.
+    t.check('an `in` list can be made long enough to exhaust the budget',
+      widest < IN_SEARCH_CEILING,
+      widest + ' ids accepted, searched up to ' + IN_SEARCH_CEILING +
+      (lastCode ? '; the first refusal came back as ' + lastCode : ''));
+
+    t.check('and the deck\'s batch of ' + SWIPE_BATCH + ' keeps at least a 2x margin under that',
+      widest >= SWIPE_BATCH * 2,
+      widest + ' ids fit; data-store.js asks about ' + SWIPE_BATCH + ' at a time. ' +
+      (widest >= SWIPE_BATCH * 2
+        ? 'Making the swipes read rule more expensive shrinks this before it shrinks anything visible.'
+        : 'Cut SWIPE_LOOKUP_BATCH in data-store.js, or make the swipes read rule cheaper — ' +
+          'a deck that asks for more than fits comes back permission-denied naming nothing.'));
   }
 };

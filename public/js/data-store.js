@@ -1602,6 +1602,13 @@
     return firebase.firestore.FieldValue;
   }
 
+  /** FieldPath.documentId() when the SDK exposes it, else null. */
+  function documentIdPath() {
+    if (typeof firebase === 'undefined' || !firebase.firestore || !firebase.firestore.FieldPath) return null;
+    if (typeof firebase.firestore.FieldPath.documentId !== 'function') return null;
+    return firebase.firestore.FieldPath.documentId();
+  }
+
   function docToUser(snap) {
     if (!snap || !snap.exists) return null;
     const data = snap.data() || {};
@@ -1929,6 +1936,111 @@
   }
 
   /**
+   * How many swipe ids to ask about in one query.
+   *
+   * Firestore's own ceiling for `in` is thirty. This app's is lower, and it is
+   * not the SDK's limit that binds: the swipes read rule is evaluated once per
+   * value in the list, and `firestore.rules` evaluates at most 1000 expressions
+   * per request. Measured against the emulator with the real ruleset, lists of
+   * 5, 10, 15 and 20 are allowed and 25 and 30 come back `permission-denied`
+   * with an evaluation error naming the read rule — and the cliff sits in the
+   * same place whether none, half or all of the documents exist, because the
+   * cost is in the list length rather than in the results. Ten is half of the
+   * measured ceiling, which is the margin `userDocOk` did not leave itself.
+   * `rules-tests/specs/08-budget.rules.js` pins it so a rule that grows more
+   * expensive fails there rather than in somebody's deck.
+   */
+  const SWIPE_LOOKUP_BATCH = 10;
+
+  /**
+   * Which of these people this account has already swiped on.
+   *
+   * This used to be `getSwipes(uid)` — every swipe the account has ever made,
+   * read on every deck load, to answer a question about sixty people. The cost
+   * grew with how long somebody had used the app and nothing anywhere measured
+   * it: 122 reads for a fresh account, 221 after a hundred swipes, 321 after two
+   * hundred. The README's own figure for a month of ordinary use is 750 swipes,
+   * and that is what a deck load would then cost, every time, against a quota of
+   * 50,000 a day for the whole deployment. This is the same defect
+   * `getLikesReceived` had and was fixed for, in this same file, two functions
+   * apart; the comment here argued it could not be fixed, that the exclusion
+   * "cannot do that one id at a time". It can, and this is how.
+   *
+   * Swipe ids are derived from the pair, so the ids to look for are known
+   * without reading anything. A key query bills the documents it returns, with
+   * a floor of one — so asking about sixty people in six queries costs six
+   * reads when none of them have been swiped, rather than one read per swipe
+   * ever made.
+   *
+   * No `from == uid` clause, deliberately, and the reason is worth stating
+   * exactly rather than confidently. It is provably already the caller's own
+   * data: `swipeOk` in `firestore.rules` requires
+   * `swipeId == d.from + '_' + d.to`, so every document these ids can name has
+   * `from == uid` or it could not have been written — that half is checked, by
+   * `rules-tests/specs/08-budget.rules.js` running this query against the real
+   * ruleset. The other half is an index question, and it is the one thing here
+   * nothing available can settle: adding an equality clause would make this a
+   * two-field query, and whether Firestore serves that from an automatic index
+   * in production is not something the emulator answers — it builds indexes on
+   * demand and never raises the `failed-precondition` a real project would. The
+   * documentation says automatic single-field indexes serve equality and `in`
+   * and does not spell out the combination. So the query is left as a pure key
+   * filter, which is the form with the least to be wrong about, and the
+   * `catch` below is what actually carries the risk: a missing index arrives as
+   * a rejected `get()` exactly like a refused one, and falls through to the same
+   * per-document path. Degraded and loud, never broken.
+   * @param {string} uid the viewer
+   * @param {string[]} others the people to ask about
+   * @returns {Promise<Object>} map of uid -> true for everyone already swiped
+   */
+  async function alreadySwiped(uid, others) {
+    const set = {};
+    if (!others.length) return set;
+    const path = documentIdPath();
+
+    // The batches are independent, so they go together: sixty people asked about
+    // ten at a time is one round trip, not six. This runs while somebody is
+    // waiting for a deck to appear, and the history read it replaces was a
+    // single query — cheap in latency, however dear in reads — so the latency
+    // is a thing to keep rather than a thing to spend.
+    const batches = [];
+    for (let i = 0; i < others.length; i += SWIPE_LOOKUP_BATCH) {
+      batches.push(others.slice(i, i + SWIPE_LOOKUP_BATCH)
+        .map(function (them) { return swipeId(uid, them); }));
+    }
+
+    const results = await Promise.all(batches.map(async function (ids) {
+      if (path) {
+        try {
+          const snap = await db().collection('swipes').where(path, 'in', ids).get();
+          const found = [];
+          snap.forEach(function (doc) { found.push(doc.id); });
+          return found;
+        } catch (err) {
+          // A denial here is the expression budget above, or an SDK that does
+          // not take this query. Either way the deck must still load, so fall
+          // through to one read per person: dearer, still bounded by the people
+          // actually being considered, and never the whole history again.
+          console.warn('[zc.store] Batched swipe lookup unavailable, asking one at a time.', err);
+        }
+      }
+      const snaps = await Promise.all(ids.map(function (id) {
+        return db().collection('swipes').doc(id).get();
+      }));
+      return snaps.filter(function (snap) { return snap.exists; })
+        .map(function (snap) { return snap.id; });
+    }));
+
+    results.forEach(function (found) {
+      found.forEach(function (id) {
+        const them = id.slice(String(uid).length + 1);
+        if (them) set[them] = true;
+      });
+    });
+    return set;
+  }
+
+  /**
    * Of the people who liked this account, the ones it has not answered.
    *
    * One point read per liker, rather than the whole swipe history. That used to
@@ -2219,11 +2331,7 @@
       const pageSize = Math.min(200, Math.max(60, limit * 2));
       const discovery = db().collection('discovery');
 
-      const [me, mySwipes] = await Promise.all([
-        firestoreAdapter.getUser(uid),
-        firestoreAdapter.getSwipes(uid)
-      ]);
-      const swiped = swipedSet(mySwipes, uid);
+      const me = await firestoreAdapter.getUser(uid);
       const myBlocks = me ? me.blocked : [];
 
       // Everyone recently active can be ineligible (already swiped, or failing
@@ -2262,10 +2370,14 @@
         cursor = snap.docs[snap.docs.length - 1];
         scanned += snap.size;
 
+        // Every filter that costs nothing runs first, and "have I swiped on them"
+        // runs last, because it is now the only one that costs a read. The
+        // filters are all conjunctive so the order changes no answer — it
+        // changes who gets asked about. Someone excluded by the mutual age or
+        // gender filter is never looked up at all.
+        const shortlist = [];
         snap.forEach(function (doc) {
-          if (out.length >= limit) return;
           if (doc.id === uid) return;
-          if (swiped[doc.id]) return;
           if (myBlocks.indexOf(doc.id) !== -1) return;
           // People I blocked are filtered above, from my own private document. People
           // who blocked *me* are not, and cannot be: their block list is private, and
@@ -2278,8 +2390,23 @@
           // engine's hard filters) so ineligible profiles do not use up the
           // page budget; distance and the rest stay with the engine.
           if (me && !mutuallyEligible(me, candidate)) return;
-          out.push(candidate);
+          shortlist.push(candidate);
         });
+
+        // Ask about only as many as the deck still has room for, then only as
+        // many again as that left unfilled. A page whose first sixty are all
+        // unswiped costs six queries, not the twelve the whole page would.
+        let taken = 0;
+        while (taken < shortlist.length && out.length < limit) {
+          const want = shortlist.slice(taken, taken + (limit - out.length));
+          taken += want.length;
+          const swiped = await alreadySwiped(uid, want.map(function (c) { return c.uid; }));
+          want.forEach(function (candidate) {
+            if (out.length >= limit) return;
+            if (swiped[candidate.uid]) return;
+            out.push(candidate);
+          });
+        }
 
         // The unordered fallback cannot paginate; take the one page it gives.
         if (!ordered || snap.size < pageSize) break;
