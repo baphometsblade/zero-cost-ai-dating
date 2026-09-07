@@ -579,12 +579,23 @@ These are real, and worth knowing before you show this to anyone:
   first delivers and then only the ones that change, and the rows `listenMatches` delivers
   carry no profiles, because a badge draws a number — that contract is unchanged, which is
   precisely why the list got a second method rather than an option on the first.
-  The two share **one** subscription: a second `onSnapshot` would have Firestore delivering
-  twice, and a delivery is what is billed, so one message arriving would cost two reads
-  instead of one for as long as the page stayed open.
-  `store-tests/specs/15-live-list.store.js` counts that too — the badge costs six, the list
-  costs six more for the faces and nothing for the rows, idle costs nothing, one conversation
-  changing costs **one read for both subscribers together**, and a new match with a stranger
+  The two share **one** subscription. The first version of this paragraph said that was a
+  saving — that a second `onSnapshot` would have Firestore deliver twice and bill twice —
+  and **that was wrong**, checked against Firebase rather than against this repo's own
+  counter. The client SDK shares one server target between listeners on *exactly* the same
+  query, so the second costs nothing whether or not anything here is shared. Sam Stern, of
+  the Firebase team: *"Assuming those are on the same device, yes they share the same
+  listener and the query will only happen once. This is only the case because the queries
+  are exactly the same."* The suite's counter tallies per delivered callback, which is the
+  right model for the first-snapshot-then-changes rule and the wrong one here — the one
+  place the instrument and the bill come apart, and the place it was believed anyway.
+  What sharing actually earns is that the property holds **by construction** rather than by
+  an undocumented optimisation that survives only while the two queries stay byte-identical;
+  plus one error channel, one cached first delivery for a late subscriber, and one
+  refcounted teardown.
+  `store-tests/specs/15-live-list.store.js` counts the rest, and those numbers are the bill:
+  the badge costs six, the list costs six more for the faces and nothing for the rows, idle
+  costs nothing, one conversation changing is one read, and a new match with a stranger
   costs two.
   `store-tests/specs/11-live-cost.store.js` counts it rather than quoting the
   documentation: twelve matches cost twelve reads to subscribe, **nothing at all** while

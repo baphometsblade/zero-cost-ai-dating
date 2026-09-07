@@ -103,6 +103,14 @@ function countingDb(target, tally) {
               // delivery, so it is right for both cases; the minimum-one-read
               // rule applies only to that first one, where an empty result still
               // costs a read.
+              //
+              // What this CANNOT see, and a spec believed otherwise once: two
+              // listeners on the same query report their reads twice here, and
+              // Firestore bills them once — the client SDK shares one server
+              // target between listeners whose queries are exactly equal. Counting
+              // per callback is right for one listener and wrong for two, so a
+              // spec comparing shared against unshared subscriptions is measuring
+              // this helper rather than the bill.
               const changed = snap && typeof snap.docChanges === 'function'
                 ? snap.docChanges().length
                 : (snap && typeof snap.size === 'number' ? snap.size : 1);
