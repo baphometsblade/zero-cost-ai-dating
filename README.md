@@ -248,7 +248,7 @@ npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.
 
 ### Unit suites
 
-Fourteen suites on Node's built-in runner — **253 checks**, no install, no browser, seconds:
+Fourteen suites on Node's built-in runner — **255 checks**, no install, no browser, seconds:
 
 | Suite | What it pins down |
 | --- | --- |

@@ -2951,12 +2951,21 @@
       // Reports this account filed — readable and deletable only by their
       // author, which is exactly what makes this purge possible. Reports about
       // the account are someone else's documents and stay in the queue.
-      try {
-        const reports = await db().collection('reports').where('from', '==', uid).get();
-        await batchDelete(reports.docs.map(function (doc) { return doc.ref; }));
-      } catch (err) {
-        console.warn('[zc.store] Could not purge filed reports.', err);
-      }
+      //
+      // Not wrapped in a warn-and-carry-on, for the reason the comment below
+      // spends a paragraph on. It WAS: a rejected query, or a `commit()` that
+      // failed part way through a batch, left this account's reports in the
+      // abuse queue — carrying `from: <an account that no longer exists>` —
+      // while the two deletes below still ran and this still returned true. The
+      // person was told their account was gone and the documents naming them
+      // were the ones that stayed.
+      //
+      // Failing here leaves `users/{uid}` and `discovery/{uid}` intact, so the
+      // account is whole and the deletion can simply be run again; every delete
+      // above it is idempotent, so a retry costs nothing but the traversal.
+      // settings.js already says the honest thing for a part-way failure.
+      const reports = await db().collection('reports').where('from', '==', uid).get();
+      await batchDelete(reports.docs.map(function (doc) { return doc.ref; }));
 
       // The public projection, then the private document — and in that order,
       // with nothing swallowed between them.
@@ -3243,7 +3252,26 @@
     const due = owed
       .filter(function (other) {
         const last = Date.parse((mine[other] || {}).last || '') || 0;
-        return !(last && now - last < RECONCILE_RETRY_MS);
+        // `since >= 0` for `touchActive`'s reason, in the third and last place
+        // this file compares a stored stamp to `Date.now()`. A `last` in the
+        // FUTURE — stamped while the device clock was fast, which a resumed VM
+        // or a dead RTC battery does — makes `now - last` negative, and a
+        // negative number is below the retry window, so the note is filtered out
+        // of `due` and the repair never runs. It comes back once real time
+        // passes the bad stamp, so the wedge is as long as the skew rather than
+        // permanent; but `notePendingMatch` evicts the oldest note first, and a
+        // wedged note is by construction the oldest, so a busy device drops the
+        // owed check outright instead of deferring it.
+        //
+        // The reachable path is narrow and real: `last` is only ever written by
+        // `markPendingTried` immediately before an attempt, and any settled
+        // answer clears the note — so a future `last` survives only when the
+        // attempt failed. A device that resumes from sleep is offline and
+        // clock-skewed at the same moment, which is both halves at once.
+        // Treating a future stamp as due costs one 1-read check and can only be
+        // the safe direction.
+        const since = now - last;
+        return !(last && since >= 0 && since < RECONCILE_RETRY_MS);
       })
       .sort(function (a, b) {
         return (Date.parse((mine[a] || {}).at || '') || 0) - (Date.parse((mine[b] || {}).at || '') || 0);

@@ -447,7 +447,24 @@
     }
     if (button && ZC.ui) ZC.ui.setBusy(button, true, 'Signing out…');
     try {
-      await ZC.auth.signOut();
+      // The RESULT, not just the settling. `ZC.auth.signOut` catches a backend
+      // failure and RESOLVES with `{ok: false, error}` — it does not reject — so
+      // ignoring the return value made the `catch` below unreachable and a failed
+      // sign-out indistinguishable from a successful one. The user pressed Sign
+      // out, saw nothing wrong, and landed on the landing page with the Firebase
+      // credential still persisted; the next document's `onAuthStateChanged`
+      // restored the session and showed them signed in again.
+      //
+      // `settings.js` awaits the same call inside account deletion and only
+      // warns, which is right there and wrong here: by that point the account and
+      // its credential are already gone, so a lingering local session resolves to
+      // nobody. Here the credential is the thing that survived.
+      const result = await ZC.auth.signOut();
+      if (result && result.ok === false) {
+        if (button && ZC.ui) ZC.ui.setBusy(button, false);
+        if (ZC.ui) ZC.ui.toast(result.error || 'Could not sign out. Please try again.', 'error');
+        return;
+      }
       stopBadgePolling();
       window.location.href = url('index.html');
     } catch (err) {
