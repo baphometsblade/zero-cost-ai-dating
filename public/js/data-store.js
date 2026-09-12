@@ -2052,9 +2052,10 @@
    * so "have I answered them" is a document lookup needing no query and no
    * index.
    *
-   * `listCandidates` still reads the whole history and should: it excludes
-   * everyone already swiped from an unbounded walk of `discovery`, it cannot do
-   * that one id at a time, and it runs when a deck loads rather than on a timer.
+   * `listCandidates` used to read the whole history too, and this comment used
+   * to defend it — "it cannot do that one id at a time". It can, and it now
+   * does: `alreadySwiped` asks by derived key, ten at a time, so the deck's bill
+   * stopped growing with the history behind it as well.
    * @param {string} uid the viewer
    * @param {string[]} senders everyone who has liked them
    * @returns {Promise<string[]>} the uids still waiting for an answer
@@ -3568,7 +3569,16 @@
 
     /**
      * Candidates for the deck: everyone except me, anyone I have already
-     * swiped, and blocks in either direction. Ranking is the engine's job.
+     * swiped, and anyone this account has blocked. Ranking is the engine's job.
+     *
+     * NOT blocks in either direction, which this said for a long time: only the
+     * demo adapter can do that half, because it can read everybody's private
+     * document. In firebase mode a block list lives in `users/{uid}` and nothing
+     * publishes it, so a client cannot filter on who blocked IT without reading
+     * a signal that would tell its user they had been blocked — which is the one
+     * thing a block is supposed not to announce. The rules stop the contact
+     * instead; see the comment in the Firestore adapter's `listCandidates` and
+     * the Limitations section of README.md.
      * @param {string} uid viewer id
      * @param {{limit?:number}} [options] max candidates (default 60)
      * @returns {Promise<Object[]>} UserDocs
@@ -3760,6 +3770,12 @@
     /**
      * Subscribe to a conversation. Firestore uses onSnapshot; demo mode uses
      * the cross-tab storage event plus a 1.5s poll.
+     *
+     * No `onError`, unlike `listenMatches` and `listenMatchViews` — so a demo
+     * store that cannot be READ is delivered as a conversation with no messages
+     * in it, which is the shape `readJsonResult`'s docblock calls one of the two
+     * opposite lies. Left as it is for now rather than half-fixed: the fault has
+     * to reach the page, and `matches.js` has no channel to receive it on.
      * @param {string} matchId match id
      * @param {Function} cb called with the full ascending message list
      * @returns {Function} unsubscribe
@@ -3774,7 +3790,9 @@
      * `{ id, users, unread, lastMessage, lastMessageAt, createdAt }`, newest
      * conversation first, and **no profiles**. Fetching a name per match on a
      * timer is what made the badge refresh expensive, and a badge draws a
-     * number; the matches page still uses `getMatches` for the names.
+     * number. The matches page does NOT call `getMatches` for the names any
+     * more — it subscribes through `listenMatchViews`, and an e2e check asserts
+     * the page calls `getMatches` zero times.
      *
      * Firestore uses onSnapshot, which bills the first delivery and then only
      * what changes — so an open tab costs nothing while nothing happens. Demo

@@ -799,6 +799,13 @@
       }
       // Held until persistSwipe() has re-read the counter it belongs to.
       reserved[field] += 1;
+      // And repainted, or the reservation is invisible. `remainingOf` subtracts
+      // `reserved` precisely so the hint can drop the moment a swipe is
+      // committed — which `updateUsageHint`'s own comment claims it does — but
+      // nothing on this path repainted it, so the number sat at its old value
+      // until the write landed and `refreshBudgets` came back. The whole point
+      // of reserving is to not wait for that.
+      paintBudgets();
     }
 
     const entry = {

@@ -35,26 +35,18 @@ against localStorage. It needs the Firestore **and** Auth emulators; with neithe
 it prints `SKIP` and contributes no checks, so `npm run test:e2e` on a machine with no
 emulator is exactly the run it always was.
 
-firebase.json has no `emulators` block — nothing shipped needs one, and the Auth emulator
-will not start without it — so the emulator config lives outside the repo alongside the
-rest of the toolchain:
+firebase.json ships an `emulators` block — `firestore` on 8080, `auth` on 9099, the UI off
+— so the emulators start from the repository itself:
 
 ```sh
-mkdir -p /tmp/zc-emu && cd /tmp/zc-emu
-cat > firebase.json <<'JSON'
-{
-  "firestore": { "rules": "/absolute/path/to/zero-cost-ai-dating/firestore.rules" },
-  "emulators": {
-    "auth": { "port": 9099 },
-    "firestore": { "port": 8080 },
-    "ui": { "enabled": false }
-  }
-}
-JSON
-
 npx --yes firebase-tools emulators:exec --only firestore,auth --project demo-zc-browser \
-  "cd /absolute/path/to/zero-cost-ai-dating && NODE_PATH=/tmp/pw/node_modules npm run test:e2e -- firebase"
+  "NODE_PATH=/tmp/pw/node_modules npm run test:e2e -- firebase"
 ```
+
+This used to say the opposite — "firebase.json has no `emulators` block ... so the emulator
+config lives outside the repo" — and walked the reader through writing a second firebase.json
+into /tmp by hand. That block has been in the repository since the Auth emulator was added
+for this spec, and the hand-written copy it described was a copy of it.
 
 `emulators:exec` exports `FIRESTORE_EMULATOR_HOST`, `FIREBASE_AUTH_EMULATOR_HOST` and
 `GCLOUD_PROJECT`, which is how the spec finds them; started by hand it falls back to
