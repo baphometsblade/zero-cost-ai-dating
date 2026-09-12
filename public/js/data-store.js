@@ -2052,9 +2052,10 @@
    * so "have I answered them" is a document lookup needing no query and no
    * index.
    *
-   * `listCandidates` still reads the whole history and should: it excludes
-   * everyone already swiped from an unbounded walk of `discovery`, it cannot do
-   * that one id at a time, and it runs when a deck loads rather than on a timer.
+   * `listCandidates` used to read the whole history too, and this comment used
+   * to defend it — "it cannot do that one id at a time". It can, and it now
+   * does: `alreadySwiped` asks by derived key, ten at a time, so the deck's bill
+   * stopped growing with the history behind it as well.
    * @param {string} uid the viewer
    * @param {string[]} senders everyone who has liked them
    * @returns {Promise<string[]>} the uids still waiting for an answer
@@ -2931,6 +2932,34 @@
     },
 
     async deleteAccountData(uid) {
+      // Reports this account filed — readable and deletable only by their
+      // author, which is exactly what makes this purge possible. Reports about
+      // the account are someone else's documents and stay in the queue.
+      //
+      // FIRST, and not wrapped in a warn-and-carry-on. It used to be both: last,
+      // and swallowed — so a rejected query left this account's reports in the
+      // abuse queue, carrying `from:` an account that no longer existed, while
+      // the deletes below still ran and this still returned true.
+      //
+      // Letting it throw was half the fix. Done in its old position it threw
+      // only after the swipes and matches had gone, so the failure it reported
+      // left the account's relationships irrecoverably deleted and its identity
+      // documents intact — which a first version of this comment described as
+      // leaving the account "whole". It does not. Moving it to the front is what
+      // makes the sentence true: the one step here with no prior casualty fails
+      // before anything irreversible has happened.
+      //
+      // None of this makes deletion atomic. It is a traversal of several
+      // collections with no transaction around it — there cannot be one, on the
+      // free tier, from a browser — so a failure later in the walk does leave
+      // the account part-way removed. What holds is the property the ORDER is
+      // chosen for: `users/{uid}` and `discovery/{uid}` go last, so the identity
+      // needed to retry always survives, and deleting an already-deleted
+      // document succeeds, so a second run finishes what the first started.
+      // `settings.js` tells the user exactly that, in those words.
+      const reports = await db().collection('reports').where('from', '==', uid).get();
+      await batchDelete(reports.docs.map(function (doc) { return doc.ref; }));
+
       // Swipes in both directions: the ones this account made, and the ones
       // aimed at it — an inbound like is data about this account and must not
       // outlive it.
@@ -2946,16 +2975,6 @@
       for (let i = 0; i < matches.docs.length; i += 1) {
         await deleteMatchMessages(matches.docs[i].ref);
         await matches.docs[i].ref.delete();
-      }
-
-      // Reports this account filed — readable and deletable only by their
-      // author, which is exactly what makes this purge possible. Reports about
-      // the account are someone else's documents and stay in the queue.
-      try {
-        const reports = await db().collection('reports').where('from', '==', uid).get();
-        await batchDelete(reports.docs.map(function (doc) { return doc.ref; }));
-      } catch (err) {
-        console.warn('[zc.store] Could not purge filed reports.', err);
       }
 
       // The public projection, then the private document — and in that order,
@@ -3243,7 +3262,26 @@
     const due = owed
       .filter(function (other) {
         const last = Date.parse((mine[other] || {}).last || '') || 0;
-        return !(last && now - last < RECONCILE_RETRY_MS);
+        // `since >= 0` for `touchActive`'s reason, in the third and last place
+        // this file compares a stored stamp to `Date.now()`. A `last` in the
+        // FUTURE — stamped while the device clock was fast, which a resumed VM
+        // or a dead RTC battery does — makes `now - last` negative, and a
+        // negative number is below the retry window, so the note is filtered out
+        // of `due` and the repair never runs. It comes back once real time
+        // passes the bad stamp, so the wedge is as long as the skew rather than
+        // permanent; but `notePendingMatch` evicts the oldest note first, and a
+        // wedged note is by construction the oldest, so a busy device drops the
+        // owed check outright instead of deferring it.
+        //
+        // The reachable path is narrow and real: `last` is only ever written by
+        // `markPendingTried` immediately before an attempt, and any settled
+        // answer clears the note — so a future `last` survives only when the
+        // attempt failed. A device that resumes from sleep is offline and
+        // clock-skewed at the same moment, which is both halves at once.
+        // Treating a future stamp as due costs one 1-read check and can only be
+        // the safe direction.
+        const since = now - last;
+        return !(last && since >= 0 && since < RECONCILE_RETRY_MS);
       })
       .sort(function (a, b) {
         return (Date.parse((mine[a] || {}).at || '') || 0) - (Date.parse((mine[b] || {}).at || '') || 0);
@@ -3540,7 +3578,16 @@
 
     /**
      * Candidates for the deck: everyone except me, anyone I have already
-     * swiped, and blocks in either direction. Ranking is the engine's job.
+     * swiped, and anyone this account has blocked. Ranking is the engine's job.
+     *
+     * NOT blocks in either direction, which this said for a long time: only the
+     * demo adapter can do that half, because it can read everybody's private
+     * document. In firebase mode a block list lives in `users/{uid}` and nothing
+     * publishes it, so a client cannot filter on who blocked IT without reading
+     * a signal that would tell its user they had been blocked — which is the one
+     * thing a block is supposed not to announce. The rules stop the contact
+     * instead; see the comment in the Firestore adapter's `listCandidates` and
+     * the Limitations section of README.md.
      * @param {string} uid viewer id
      * @param {{limit?:number}} [options] max candidates (default 60)
      * @returns {Promise<Object[]>} UserDocs
@@ -3732,6 +3779,12 @@
     /**
      * Subscribe to a conversation. Firestore uses onSnapshot; demo mode uses
      * the cross-tab storage event plus a 1.5s poll.
+     *
+     * No `onError`, unlike `listenMatches` and `listenMatchViews` — so a demo
+     * store that cannot be READ is delivered as a conversation with no messages
+     * in it, which is the shape `readJsonResult`'s docblock calls one of the two
+     * opposite lies. Left as it is for now rather than half-fixed: the fault has
+     * to reach the page, and `matches.js` has no channel to receive it on.
      * @param {string} matchId match id
      * @param {Function} cb called with the full ascending message list
      * @returns {Function} unsubscribe
@@ -3746,7 +3799,9 @@
      * `{ id, users, unread, lastMessage, lastMessageAt, createdAt }`, newest
      * conversation first, and **no profiles**. Fetching a name per match on a
      * timer is what made the badge refresh expensive, and a badge draws a
-     * number; the matches page still uses `getMatches` for the names.
+     * number. The matches page does NOT call `getMatches` for the names any
+     * more — it subscribes through `listenMatchViews`, and an e2e check asserts
+     * the page calls `getMatches` zero times.
      *
      * Firestore uses onSnapshot, which bills the first delivery and then only
      * what changes — so an open tab costs nothing while nothing happens. Demo

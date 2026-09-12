@@ -1663,7 +1663,39 @@
     // restore this document without re-running any of the boot path, so the
     // page needs somewhere to pick it up again. There was no `pageshow` handler
     // anywhere in this app before; the twenty-second poll was covering for it.
-    window.addEventListener('pageshow', function () { subscribeList(); });
+    //
+    // `teardown` drops FOUR things and this put back ONE. The list came back
+    // and the open conversation did not: a restored document still holds
+    // `state.active`, but `state.unsubscribe` went with the teardown, so the
+    // chat log froze for good — no inbound message, and not even the reader's
+    // own — while the list beside it kept updating and `markRead` kept clearing
+    // the unread count for messages they could not see. Re-entering the
+    // conversation restores both the message listener and the stamp ticker.
+    // `stopListDeadline` is the one that needs nothing: `subscribeList` starts
+    // it again, and it returns early once the first delivery has landed.
+    window.addEventListener('pageshow', function (event) {
+      subscribeList();
+
+      // Everything below runs ONLY for a genuine back-forward restore, and the
+      // `persisted` flag is the only thing that says so. `pageshow` also fires
+      // on every ordinary load, and `openMatch` resets the thread and the
+      // composer — so ungated, this wiped the opener the match burst had just
+      // pre-filled and two e2e checks went red. `subscribeList` above stays
+      // ungated because it is idempotent, which is why the original handler
+      // could get away with no flag at all.
+      if (!event || !event.persisted) return;
+
+      // Idempotent, and needed even with no conversation open: the list's own
+      // relative stamps go stale without it.
+      startStampTicker();
+      if (state.active) {
+        const id = state.active.matchId;
+        // Cleared first, or `openMatch`'s same-conversation short-circuit
+        // returns before it re-subscribes.
+        state.active = null;
+        openMatch(id, false);
+      }
+    });
   }
 
   /**

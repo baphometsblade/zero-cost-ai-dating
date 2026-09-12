@@ -31,6 +31,56 @@ module.exports = {
     t.check('the card explains itself with reasons', card.reasons > 0, 'reasons=' + card.reasons);
     t.check('the usage hint names the daily like budget', /likes/i.test(card.usage), card.usage.trim());
 
+    /* ---- the like count drops as the card leaves, not when the write lands ---- */
+
+    // `remainingOf` subtracts a `reserved` counter that `commit` bumps the moment
+    // a swipe is committed, so the hint can drop before the write has landed —
+    // which is what `updateUsageHint`'s comment claims. Nothing on the committed
+    // path repainted it, so the number sat at its old value until `persistSwipe`
+    // finished and `refreshBudgets` came back. Read synchronously right after the
+    // key, with no wait: a check that polled would be satisfied by the late
+    // repaint this exists to stop relying on.
+    // The write is slowed to two seconds first, and that is what makes this a
+    // check rather than decoration. `pressDeckKey` waits for the deck to
+    // advance, and in demo mode the write lands inside that wait — so the late
+    // repaint through `refreshBudgets` produced the same number, and a first
+    // version of this check passed against a build with the fix removed.
+    // With `recordSwipe` held open, the only thing that can have moved the
+    // counter is the reservation.
+    await page.evaluate(function () {
+      const store = window.ZC.store;
+      const real = store.recordSwipe.bind(store);
+      window.__zcRealRecordSwipe = store.recordSwipe;
+      store.recordSwipe = function () {
+        const args = arguments;
+        return new Promise(function (resolve) { window.setTimeout(resolve, 2000); })
+          .then(function () { return real.apply(null, args); });
+      };
+    });
+
+    const readLikes = function () {
+      return page.evaluate(function () {
+        const m = /(\d+) of (\d+) likes left/.exec(document.getElementById('usage-hint').textContent || '');
+        return m ? Number(m[1]) : null;
+      });
+    };
+    const likesBefore = await readLikes();
+    await h.pressDeckKey(page, 'ArrowRight', await h.topCardName(page));
+    const likesAfter = await readLikes();
+    await h.closeBurst(page);
+
+    t.check('a like drops the counter under the deck immediately, not when the write lands',
+      likesBefore !== null && likesAfter === likesBefore - 1,
+      likesBefore + ' -> ' + likesAfter + ' likes left, with the swipe write still in ' +
+      'flight — only the reservation can have moved it');
+
+    // Put it back, and let the held write finish: everything after this drives the
+    // deck at its ordinary speed, and a store left wrapped times the rest out.
+    await page.evaluate(function () {
+      window.ZC.store.recordSwipe = window.__zcRealRecordSwipe;
+    });
+    await page.waitForTimeout(2200);
+
     /* ---- keyboard swipes advance the deck ---- */
     // A right or up swipe onto someone who already liked you raises the match
     // overlay, which then owns the keyboard — so each step clears it first.

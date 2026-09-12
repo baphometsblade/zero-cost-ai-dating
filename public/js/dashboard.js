@@ -73,6 +73,8 @@
   const usageEl = document.getElementById('usage-hint');
   const bannerEl = document.getElementById('limit-banner');
   const bannerTextEl = document.getElementById('limit-text');
+  /** The local day the limit banner was raised on; see `tickCountdown`. */
+  let bannerDay = null;
   const detailsEl = document.getElementById('deck-details');
   const detailsBodyEl = document.getElementById('details-body');
   const buttons = {
@@ -511,12 +513,24 @@
   function tickCountdown() {
     const budget = state.budget.likes;
     if (!bannerTextEl || !budget) return;
-    const remaining = msToMidnight();
-    if (remaining <= 0) {
-      // Midnight passed while the page was open: the counters have rolled over.
+
+    // The day this banner was raised on. Midnight is detected by the date
+    // CHANGING, not by a countdown reaching zero: `msToMidnight` rebuilds its
+    // target from `new Date()` on every tick, so it is always tomorrow relative
+    // to now and can never reach zero — 1ms at 23:59:59.999, then 86,400,000 one
+    // second later. `if (remaining <= 0)` was therefore dead code, and with it
+    // the only thing that re-read the daily budget while the limit banner was
+    // up: someone who hit their limit and left the tab open watched the
+    // countdown run down, wrap around, and keep telling them to wait.
+    const today = ZC.util.todayKey();
+    if (bannerDay && bannerDay !== today) {
+      bannerDay = today;
       refreshBudgets();
       return;
     }
+    if (!bannerDay) bannerDay = today;
+
+    const remaining = msToMidnight();
     const limit = budget.limit === Infinity ? 'your' : 'all ' + budget.limit;
     bannerTextEl.textContent = 'You have used ' + limit + ' likes for today. They come back in ' +
       formatCountdown(remaining) + ', at midnight.';
@@ -536,6 +550,9 @@
       window.clearInterval(state.countdown);
       state.countdown = null;
     }
+    // Cleared with the banner, so the next one starts from the day it is raised
+    // on rather than from a day that has already turned.
+    bannerDay = null;
   }
 
   /**
@@ -782,6 +799,13 @@
       }
       // Held until persistSwipe() has re-read the counter it belongs to.
       reserved[field] += 1;
+      // And repainted, or the reservation is invisible. `remainingOf` subtracts
+      // `reserved` precisely so the hint can drop the moment a swipe is
+      // committed — which `updateUsageHint`'s own comment claims it does — but
+      // nothing on this path repainted it, so the number sat at its old value
+      // until the write landed and `refreshBudgets` came back. The whole point
+      // of reserving is to not wait for that.
+      paintBudgets();
     }
 
     const entry = {

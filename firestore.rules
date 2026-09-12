@@ -355,9 +355,10 @@ service cloud.firestore {
 
       // Restated rather than shared: a rules function does not cross a `match` block,
       // and the private document's copy is two hundred lines and one collection away.
-      // Same five axes, same range — and a closed key list this time, which the private
-      // copy does not have and does not need, since `profileOk` is not the document
-      // anybody else can read.
+      // Same five axes, same range, and the same closed key list — the private copy has
+      // one too (`pp.keys().hasOnly([...])` in `profileOk`), which this comment used to
+      // deny. Both close the list for the same reason: an extra axis is a field the
+      // engine would never read and the 1 MiB ceiling would happily carry.
       function personalityOk(pp) {
         return pp == null || (
           pp is map
@@ -591,9 +592,14 @@ service cloud.firestore {
 
       // Create: a participant creating a well-formed match document, but only once the
       // other person has actually liked them back. Without that proof any signed-in user
-      // could mint a match against a uid found through the (deliberately open) users
-      // read and then message a stranger, since message writes are gated purely on
-      // membership of the match. The client already satisfies this: recordSwipe writes
+      // could mint a match against a uid read out of `discovery/{uid}` — which IS
+      // deliberately open to any signed-in account, and whose document id is the uid —
+      // and then message a stranger, since message writes are gated purely on membership
+      // of the match. (This used to say "the deliberately open users read". There is no
+      // such thing: `users/{uid}` is `allow read: if isOwner(uid)`, as the comment above
+      // that rule says and `rules-tests/specs/01-users.rules.js` asserts. The enumerable
+      // surface the argument needs is the projection, which the swipes rule below names
+      // correctly.) The client already satisfies this: recordSwipe writes
       // the swipe and only then, as a separate operation, creates the match — and so does
       // the quieter second caller, `finishMatchCheck`, which finishes a check a page load
       // lost. It reads the swipe back before creating anything, precisely because this

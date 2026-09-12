@@ -1014,12 +1014,65 @@ test('and a page load with nothing owed does no work at all', async function () 
  * until the note was injected instead. Seeding it directly is the only way to
  * exercise what happens to a note that is genuinely stale.
  */
-function seedPendingMatch(fromUid, toUid) {
+function seedPendingMatch(fromUid, toUid, lastOffsetMs) {
   const map = JSON.parse(backing.get(KEYS.pendingMatch) || '{}');
   if (!map[fromUid]) map[fromUid] = {};
-  map[fromUid][toUid] = { at: new Date().toISOString(), last: null };
+  map[fromUid][toUid] = {
+    at: new Date(Date.now() - 60000).toISOString(),
+    // `last` is when the repair was last ATTEMPTED, and it is what the retry
+    // window is measured from. Offsetting it is how the clock-skew check below
+    // reaches a branch no ordinary run can: a note only carries a `last` at all
+    // when an attempt was made and failed.
+    last: lastOffsetMs === undefined ? null : new Date(Date.now() + lastOffsetMs).toISOString()
+  };
   backing.set(KEYS.pendingMatch, JSON.stringify(map));
 }
+
+test('a repair owed by a device whose clock ran fast is still owed', async function () {
+  // The third and last place this file compares a stored stamp to `Date.now()`,
+  // and the only one that had no guard. `now - last` for a stamp in the FUTURE
+  // is negative, and a negative number is inside the retry window, so the note
+  // was filtered out of `due` and the repair never ran — leaving exactly the
+  // state the whole note-and-repair subsystem exists to eliminate: a mutual like
+  // with no match document, on the one device that knows it owes the check.
+  //
+  // `touchActive` and `cachedFaces` both guard this and both say why in a
+  // comment; this one did neither, and nothing executed it.
+  await resetWorld();
+  const me = 'demo-you';
+  const them = 'ava-nakamura';
+  await store.recordSwipe(them, me, 'like');
+  await withStorageRefusing([KEYS.matches], async function () {
+    await store.recordSwipe(me, them, 'like').catch(function () { /* the match write is what failed */ });
+  });
+  // An hour into the future: a resumed VM or a dead RTC battery, which is also
+  // the moment a device is offline, which is how the note kept its `last`.
+  seedPendingMatch(me, them, 60 * 60 * 1000);
+
+  const result = await store.reconcileMatches(me);
+  assert.equal(result.repaired, 1, 'the repair ran despite the future stamp');
+  const matches = await store.getMatches(me);
+  assert.equal(matches.filter(function (m) { return m.otherUid === them; }).length, 1,
+    'and the conversation exists');
+});
+
+test('but a repair genuinely tried a moment ago still waits its turn', async function () {
+  // The other half, so the guard above cannot be satisfied by removing the retry
+  // window altogether: a note stamped thirty seconds ago is inside the minute and
+  // must stay there.
+  await resetWorld();
+  const me = 'demo-you';
+  const them = 'ava-nakamura';
+  await store.recordSwipe(them, me, 'like');
+  await withStorageRefusing([KEYS.matches], async function () {
+    await store.recordSwipe(me, them, 'like').catch(function () { /* as above */ });
+  });
+  seedPendingMatch(me, them, -30 * 1000);
+
+  const result = await store.reconcileMatches(me);
+  assert.equal(result.checked, 0, 'nothing was re-checked inside the retry window');
+  assert.equal(result.pending, 1, 'and the note is still owed');
+});
 
 test('a stored pass never becomes a match, whatever the note says', async function () {
   // The repair reads the swipe rather than trusting the note, so an action that

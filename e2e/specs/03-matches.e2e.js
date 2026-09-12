@@ -161,11 +161,34 @@ module.exports = {
         Object.defineProperty(window.navigator, 'onLine', { get: function () { return false; } });
       }
       let calls = 0;
+      let badgeCalls = 0;
+      window.__zcBadgeSubs = 0;
       const dead = params.get('zcdead') === '1';
+      const deadBadge = params.get('zcdeadbadge') === '1';
       const silent = params.get('zcsilent') === '1';
       const wrap = function () {
         if (!window.ZC || !window.ZC.store || window.ZC.store.__wrapped) return;
         window.ZC.store.__wrapped = true;
+
+        // The nav badge's own stream, wrapped the same way the list's is below.
+        // It shares the store's match stream with the list but subscribes through
+        // a different method, so killing one says nothing about the other.
+        const realMatches = window.ZC.store.listenMatches;
+        window.ZC.store.listenMatches = function (uid, cb, onError) {
+          window.__zcBadgeSubs += 1;
+          badgeCalls += 1;
+          if (deadBadge && badgeCalls === 1) {
+            // Guarded, because the point of the check is that `onError` used not
+            // to be passed at all: calling an undefined handler would throw here
+            // instead of reporting what the page does with the death.
+            window.setTimeout(function () {
+              if (typeof onError === 'function') onError(new Error('Missing or insufficient permissions.'));
+            }, 0);
+            return function () { /* already over */ };
+          }
+          return realMatches.call(window.ZC.store, uid, cb, onError);
+        };
+
         const real = window.ZC.store.listenMatchViews;
         window.ZC.store.listenMatchViews = function (uid, onViews, onError) {
           window.__zcSubs += 1;
@@ -209,6 +232,31 @@ module.exports = {
         : 'the list never came back after ' + deadSubs + ' subscription(s); a dead ' +
           'stream the page still holds makes every re-subscribe a no-op');
 
+    // 1b. The same death, on the NAV BADGE's subscription rather than the list's.
+    // `app.js` passed no error handler at all, so when the shared stream died the
+    // store cleared its subscribers and deleted the record while `matchStop` kept
+    // holding a live-looking handle to it — and the `if (!matchStop)` guard then
+    // refused every re-subscription for the life of the page. The list recovered on
+    // focus and the badge beside it sat on a stale number with nothing said.
+    ctx.session.expectConsoleError(/badge could not update/);
+    await page.goto(ctx.base + '/matches.html?zcdeadbadge=1', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#match-list .match-row');
+    const badgeBefore = await page.evaluate(function () { return window.__zcBadgeSubs; });
+    await page.evaluate(function () { window.dispatchEvent(new Event('focus')); });
+    const badgeBack = await page.waitForFunction(function () {
+      return window.__zcBadgeSubs >= 2;
+    }, null, { timeout: 5000 }).then(function () { return true; }, function () { return false; });
+    const badgeSubs = await page.evaluate(function () { return window.__zcBadgeSubs; });
+    // Handed back, not cleared. The offline case below runs while case 1's
+    // pattern is still in force and relies on it; clearing here made its
+    // "conversation list stopped" line an unexpected console error.
+    ctx.session.expectConsoleError(/conversation list stopped/);
+    t.check('a nav badge whose stream dies re-subscribes instead of freezing',
+      badgeBack && badgeSubs === 2,
+      badgeSubs + ' badge subscription(s) after a death and a focus (was ' + badgeBefore +
+      ' before) — without an onError the handle is never released and every ' +
+      're-subscribe is a no-op, so the count stays at 1 forever');
+
     // 2. A stream that is merely SLOW — here, a browser that says it is offline, which
     // takes the same path without a twelve-second wait. The subscription is alive and
     // Firestore reconnects on its own, so the handle is KEPT: releasing it would have
@@ -250,6 +298,54 @@ module.exports = {
     await page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#match-list .match-row');
     await openConversation(page, 'Sam');
+
+    /* ---- a restored page keeps the open conversation live ---- */
+
+    // `pagehide` tears down the message listener, the stamp ticker and the list
+    // subscription; the back-forward cache then restores the document with all
+    // its JavaScript state intact and re-runs none of the boot path. The
+    // handler put back the list and nothing else, so `state.active` survived
+    // while `state.unsubscribe` did not: the chat log froze permanently — no
+    // inbound message and not even the reader's own — while the list beside it
+    // kept updating and `markRead` kept clearing the unread count for messages
+    // they could not see.
+    //
+    // The events are dispatched rather than driven through real back/forward
+    // navigation on purpose: whether headless Chromium actually bfcaches a page
+    // is its policy and changes between versions, but `persisted: true` is the
+    // contract the handler is written against, and that is the thing worth
+    // pinning.
+    const restoredText = await page.evaluate(async function () {
+      window.dispatchEvent(new Event('pagehide'));
+      let show;
+      try {
+        show = new PageTransitionEvent('pageshow', { persisted: true });
+      } catch (err) {
+        show = new Event('pageshow');
+        Object.defineProperty(show, 'persisted', { value: true });
+      }
+      window.dispatchEvent(show);
+
+      const store = window.ZC.store;
+      const me = window.ZC.auth.current.uid;
+      const matchId = window.ZC.util.qs('m');
+      const list = await store.getMatches(me);
+      const target = list.filter(function (m) { return m.matchId === matchId; })[0];
+      const text = 'sent after a restore ' + Date.now();
+      await store.sendMessage(matchId, target.otherUid, text);
+      return text;
+    });
+    const reachedThread = await page.waitForFunction(function (want) {
+      const log = document.getElementById('chat-log');
+      return !!log && log.textContent.indexOf(want) !== -1;
+    }, restoredText, { timeout: 3000 }).then(function () { return true; }, function () { return false; });
+
+    t.check('a conversation restored from the back-forward cache is still live',
+      reachedThread,
+      reachedThread
+        ? 'a message sent after the restore reached the open thread'
+        : 'nothing reached the thread in 3s — the restore put the list back and left ' +
+          'the message listener dead');
 
     /* ---- and a conversation the other side ends keeps what was typed ---- */
 

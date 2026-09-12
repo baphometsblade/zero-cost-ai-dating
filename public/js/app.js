@@ -378,6 +378,16 @@
         } catch (err) {
           warnOnce(err);
         }
+      }, function (err) {
+        // Third argument, and it was missing. When the shared stream dies the
+        // store clears its subscribers and deletes the record, which leaves
+        // `matchStop` holding a live-looking handle to a stream that is gone —
+        // and the `if (!matchStop)` above then refuses every re-subscription for
+        // the life of the page. The badge sat on a stale number with nothing
+        // said. `matches.js` releases its own handle for exactly this reason;
+        // this shares the same record and did not.
+        matchStop = null;
+        warnOnce(err);
       });
     }
 
@@ -437,7 +447,24 @@
     }
     if (button && ZC.ui) ZC.ui.setBusy(button, true, 'Signing out…');
     try {
-      await ZC.auth.signOut();
+      // The RESULT, not just the settling. `ZC.auth.signOut` catches a backend
+      // failure and RESOLVES with `{ok: false, error}` — it does not reject — so
+      // ignoring the return value made the `catch` below unreachable and a failed
+      // sign-out indistinguishable from a successful one. The user pressed Sign
+      // out, saw nothing wrong, and landed on the landing page with the Firebase
+      // credential still persisted; the next document's `onAuthStateChanged`
+      // restored the session and showed them signed in again.
+      //
+      // `settings.js` awaits the same call inside account deletion and only
+      // warns, which is right there and wrong here: by that point the account and
+      // its credential are already gone, so a lingering local session resolves to
+      // nobody. Here the credential is the thing that survived.
+      const result = await ZC.auth.signOut();
+      if (result && result.ok === false) {
+        if (button && ZC.ui) ZC.ui.setBusy(button, false);
+        if (ZC.ui) ZC.ui.toast(result.error || 'Could not sign out. Please try again.', 'error');
+        return;
+      }
       stopBadgePolling();
       window.location.href = url('index.html');
     } catch (err) {
@@ -714,6 +741,25 @@
     refreshBadges: syncBadgeListeners,
     url: url
   };
+
+  // Releasing the badge handle on a stream death makes a retry possible; these
+  // are what take it. `syncBadgeListeners` is idempotent — each branch is
+  // guarded on its own handle being null, and it returns early when nobody is
+  // signed in — so a page that is still fine does nothing here, and a page
+  // whose stream died re-subscribes the moment it is looked at again. The
+  // conversation list has recovered on focus since its own stream learned to
+  // report a death; the badge beside it never did, because nothing called this
+  // a second time.
+  //
+  // Registered OUTSIDE the readyState branch below, deliberately: this file
+  // loads at the end of the body, so on nearly every page that branch is the
+  // `else`, and listeners added inside the `loading` half would have been added
+  // on almost no page at all.
+  window.addEventListener('focus', syncBadgeListeners);
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') syncBadgeListeners();
+  });
+  window.addEventListener('pageshow', syncBadgeListeners);
 
   // Boot as soon as the document is usable — this file loads at the end of
   // the body, so on most pages that is immediately.

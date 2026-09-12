@@ -213,23 +213,52 @@ test('body text clears AA against the surface it sits on, in every theme', funct
   const all = themes();
   const light = all.light;
   const failures = [];
-  // The three neutrals every page paints text on, against the two text inks.
+  const measured = [];
+  // The three neutrals every page paints text on, against all three text inks.
+  //
+  // This said "the two text inks" over a list of one, and measured `--text`
+  // alone — which is 14.47:1 at its worst, a bound the data never approaches.
+  // The inks that actually sit near 4.5 were the two it skipped: `--text-muted`
+  // colours 30 rules across the two stylesheets and `--text-faint` 14, and
+  // `.chat-day` in components.css pairs `--text-faint` on `--bg-sunken` at
+  // 4.78:1 — 0.28 above the bound. The palette itself claims that number
+  // (style.css: "this clears 4.5:1 on all three neutrals (4.78:1 on the
+  // darkest)") and nothing executed it. Verified by mutation: dropping either
+  // ink to 1.2:1 left the whole suite green.
   const SURFACES = ['--bg', '--bg-elev', '--bg-sunken'];
-  const INKS = ['--text'];
+  const INKS = ['--text', '--text-muted', '--text-faint'];
 
   Object.keys(all).forEach(function (name) {
     const tokens = all[name];
     SURFACES.forEach(function (surface) {
       INKS.forEach(function (inkName) {
-        const bg = parseHex(deVar(tokens, light, tokens[surface] || light[surface]));
-        const fg = parseHex(deVar(tokens, light, tokens[inkName] || light[inkName]));
-        if (!bg || !fg) return;
+        const bgRaw = deVar(tokens, light, tokens[surface] || light[surface]);
+        const fgRaw = deVar(tokens, light, tokens[inkName] || light[inkName]);
+        const bg = parseHex(bgRaw);
+        const fg = parseHex(fgRaw);
+        if (!bg || !fg) {
+          // A failure, not a `return`. This was a silent skip, which meant a
+          // palette that stopped being plain hex took the gate down with it
+          // without reddening anything: rewriting `--text` as an rgb() triple
+          // left body text entirely unmeasured and the suite green.
+          failures.push(name + ' ' + inkName + ' on ' + surface + ': ' + fgRaw + ' or ' +
+            bgRaw + ' is no longer a plain hex, so this check can no longer measure ' +
+            'it — either restore a flat colour or drop the token from INKS deliberately.');
+          return;
+        }
         const ratio = contrast(bg, fg);
+        measured.push(name + ' ' + inkName + ' on ' + surface + ' ' + ratio.toFixed(2) + ':1');
         if (ratio + 0.005 < AA_NORMAL) {
           failures.push(name + ' ' + inkName + ' on ' + surface + ' is ' + ratio.toFixed(2) + ':1');
         }
       });
     });
   });
-  assert.deepEqual(failures, [], failures.join('; '));
+
+  assert.deepEqual(failures, [], failures.join('\n  ') + '\n  measured: ' + measured.join(', '));
+  // The same vacuity guard the sibling above carries, and for the same reason:
+  // a run that measured nothing is not a passing run.
+  assert.ok(measured.length >= SURFACES.length * INKS.length * Object.keys(all).length,
+    'expected at least ' + (SURFACES.length * INKS.length * Object.keys(all).length) +
+    ' measurements, made ' + measured.length);
 });

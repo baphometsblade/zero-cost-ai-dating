@@ -108,7 +108,9 @@ Every page ends its `<body>` with the same block, in this order, plus at most on
   simply `undefined`, `isConfigured` is false, and the app runs in demo mode. That is a
   supported, tested path, not an error state.
 - `index.html` uses the same block with no page script (`app.js` is its controller).
-  `404.html` loads only `utils.js` and `app.js` — it needs neither data nor auth.
+  `404.html` loads no external script at all — not `utils.js`, not `app.js`. It has to
+  answer for nested missing paths, whose own relative script URLs would 404 in turn, so it
+  ships fully self-contained with one hash-pinned inline block.
 
 `tests/static.test.js` asserts this order on every page, so a copy-paste slip fails CI rather
 than the browser.
@@ -283,7 +285,7 @@ demo cast never looks like it went quiet in 2026.
 
 ### localStorage adapter
 
-Six keys, all under one prefix, each holding a JSON map keyed by id:
+Seven keys, all under one prefix, each holding a JSON map keyed by id:
 
 | Key | Contents |
 | --- | --- |
@@ -292,6 +294,7 @@ Six keys, all under one prefix, each holding a JSON map keyed by id:
 | `zc.demo.matches` | `{ [matchId]: MatchDoc }` |
 | `zc.demo.messages` | `{ [matchId]: MessageDoc[] }` |
 | `zc.demo.session` | the signed-in uid |
+| `zc.demo.reports` | `{ [reportId]: ReportDoc }` |
 | `zc.demo.seeded` | seed version marker |
 
 Plus `zc.demo.credentials` (owned by `auth.js`) and `zc.firebaseConfig` (owned by the settings
@@ -366,6 +369,16 @@ with two conversations they had none — while the Firestore adapter delivered n
 all, leaving a skeleton on screen. The same fault, and the two adapters lying about it in
 opposite directions, inside the one primitive a live list is built on.
 
+A listener's removals are not counted, and that is a billing rule rather than a
+simplification: Firestore charges "for a read when a document is removed from the result
+set because the document has changed", and in contrast "when a document is deleted, you
+are not charged for a read". The client cannot tell the two apart — both arrive as a
+`removed` change carrying the document's last known data — but this app's rules can:
+`swipes` is `allow update: if false`, and a match document's id is built from `users`, so
+neither live query can lose a document except by deletion. Ending a conversation is
+therefore delivered and free. The counter said one read, and one spec stated that as the
+bill until it was measured against the pricing page.
+
 Writes are counted too — `harness.countingDb` tallies both halves of the bill now. It bills what Firestore would: a refused write is not a write, so the tally moves
 when the promise resolves rather than when the call is made, and a transaction's callback is
 replayed on contention, so each attempt buffers its own writes and only the one that
@@ -414,7 +427,11 @@ falls back to one read per person, warns, and still produces a deck.
 - `getUsage` auto-resets when `usage.date` is not today, so daily limits need no scheduler.
 - `canSpend(uid, field)` returns `{ allowed, remaining, limit, plan }` by reading the plan
   limits out of `ZC.config`, and is called *before* every spend.
-- `touchActive` is throttled to one write per five minutes **across page loads**, because
+- `touchActive` is throttled to one *touch* per five minutes **across page loads** — and a
+  touch is TWO writes, not one: `setLastActive` stamps `users/{uid}` and then
+  `discovery/{uid}`, because the projection carries `lastActiveAt` too and every other deck
+  ranks on it. `store-tests/specs/03-writes.store.js` executes the timing; the count is
+  `specs/19-write-cost.store.js`'s business. The throttle exists because
   `lastActiveAt` feeds the activity score but is not worth a write per navigation. It is
   called on every auth resolution and on every page that resolves a user, so without the
   throttle a browsing session is one Firestore write per navigation.
@@ -481,8 +498,14 @@ dependence — so the same deck renders in the same order on every device. `opts
 remaining weights are renormalised to sum to 1 rather than scored as zero.
 
 `updateLearning(learning, candidate, action)` is pure and returns a new object: the caller
-persists it through `ZC.store.updateUser` after the swipe animation, never blocking the UI on
-the write.
+persists it through `ZC.store.saveLearning` after the swipe animation, never blocking the UI
+on the write. Not `updateUser`, which is what this said and what the deck used to do — that
+spent a transaction on a value already final, rewrote the whole user document, and
+republished `discovery/{uid}` to mirror a field the projection has never carried. It also
+raced the usage bump's own transaction on the same document, so one of the two came back
+`FAILED_PRECONDITION` on every single like; the SDK replayed it and the data was always
+right, which is why it went unnoticed. `saveLearning` is one field write, no read, nothing
+to lose.
 
 Weights, component formulas and the reason thresholds are documented in the
 [README](../README.md#how-the-matching-engine-works).
@@ -544,8 +567,15 @@ match id current without adding history entries.
 ## 8. Rendering rules
 
 - **Text in, text out.** Every string that came from a user or the seed file is inserted with
-  `textContent` — in practice `ZC.util.el(tag, { text })`. `el()`'s `html` option exists for
-  static markup the code itself authored and is never handed a value from a document.
+  `textContent` — in practice `ZC.util.el(tag, { text })`. `el()` has **no** `html` option.
+  There was one — `node.innerHTML = String(p.html)`, documented as "TRUSTED markup only" and
+  never passed by anything in the repository — and this section used to describe it as
+  existing and safe. That is the worst shape a sink can have: the one line that can inject
+  markup, in the helper every page builds every node with, kept alive by a comment asking
+  the next reader to be careful. A rule nobody can break beats a rule everybody is asked to
+  remember, so the line is gone, `tests/injection.test.js` fails the build if it or any
+  relative comes back, and `html` survives only in `DOM_PROP_KEYS` so that passing it is
+  inert rather than becoming a stray attribute.
 - **No inline styles.** The CSP forbids `style="…"`, so anything dynamic (the compatibility
   ring's `--pct`, a drag transform, a completeness bar's width) is set with
   `el.style.setProperty(...)`, which CSP allows.
