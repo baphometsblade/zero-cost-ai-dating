@@ -366,6 +366,16 @@ with two conversations they had none — while the Firestore adapter delivered n
 all, leaving a skeleton on screen. The same fault, and the two adapters lying about it in
 opposite directions, inside the one primitive a live list is built on.
 
+A listener's removals are not counted, and that is a billing rule rather than a
+simplification: Firestore charges "for a read when a document is removed from the result
+set because the document has changed", and in contrast "when a document is deleted, you
+are not charged for a read". The client cannot tell the two apart — both arrive as a
+`removed` change carrying the document's last known data — but this app's rules can:
+`swipes` is `allow update: if false`, and a match document's id is built from `users`, so
+neither live query can lose a document except by deletion. Ending a conversation is
+therefore delivered and free. The counter said one read, and one spec stated that as the
+bill until it was measured against the pricing page.
+
 Writes are counted too — `harness.countingDb` tallies both halves of the bill now. It bills what Firestore would: a refused write is not a write, so the tally moves
 when the promise resolves rather than when the call is made, and a transaction's callback is
 replayed on contention, so each attempt buffers its own writes and only the one that

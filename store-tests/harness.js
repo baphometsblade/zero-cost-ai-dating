@@ -224,15 +224,37 @@ function countingDb(target, tally) {
               // rule applies only to that first one, where an empty result still
               // costs a read.
               //
-              // What this CANNOT see, and a spec believed otherwise once: two
-              // listeners on the same query report their reads twice here, and
+              // A REMOVAL IS NOT ALWAYS A READ, and this counted it as one.
+              // Firestore's pricing page draws the line inside the word:
+              // "You are also charged for a read when a document is removed from
+              // the result set because the document has changed. (In contrast,
+              // when a document is deleted, you are not charged for a read.)"
+              // `docChanges()` reports both as type 'removed' and the client
+              // cannot tell them apart — the removed document's snapshot still
+              // carries its last known data either way.
+              //
+              // In THIS app it can be settled from the rules rather than from the
+              // snapshot, which is why removals are dropped outright rather than
+              // caveated. Both live queries lose a document only by deletion:
+              // `swipes` carries `allow update: if false`, so the likes listener's
+              // `where to == uid` result can never be edited out of its own query;
+              // and a match document's id is `d.users[0] + '_' + d.users[1]`, so
+              // changing `users` would be a different document, which makes the
+              // list listener's `where users array-contains uid` equally immutable.
+              // A removal here is a deletion, and a deletion is free.
+              //
+              // What this still CANNOT see, and a spec believed otherwise once:
+              // two listeners on the same query report their reads twice here, and
               // Firestore bills them once — the client SDK shares one server
               // target between listeners whose queries are exactly equal. Counting
               // per callback is right for one listener and wrong for two, so a
               // spec comparing shared against unshared subscriptions is measuring
               // this helper rather than the bill.
-              const changed = snap && typeof snap.docChanges === 'function'
-                ? snap.docChanges().length
+              const changes = snap && typeof snap.docChanges === 'function'
+                ? snap.docChanges()
+                : null;
+              const changed = changes
+                ? changes.filter(function (c) { return c && c.type !== 'removed'; }).length
                 : (snap && typeof snap.size === 'number' ? snap.size : 1);
               tally.reads += first ? Math.max(1, changed) : changed;
               first = false;

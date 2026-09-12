@@ -232,17 +232,28 @@ module.exports = {
       /* ---- 6. the other side ending it removes the row ------------------ */
 
       const beforeGone = tally.reads;
+      const deliveriesBeforeGone = listViews.length;
       await k.admin.del('matches', strangerId);
       await until(function () {
         const rows = listViews[listViews.length - 1] || [];
         return !rows.some(function (v) { return v.matchId === strangerId; });
       }, 5000);
 
-      t.check('a conversation the other side ends leaves the list, for one read',
-        tally.reads - beforeGone === 1 &&
+      // This said "for one read", and one read is what the counter reported —
+      // but not what Firestore charges. Its pricing page: "You are also charged
+      // for a read when a document is removed from the result set because the
+      // document has changed. (In contrast, when a document is deleted, you are
+      // not charged for a read.)" Ending a conversation deletes the match
+      // document, so the row leaving this list is FREE. The counter has been
+      // corrected to match; this check now asserts the delivery, which is the
+      // part that is real, and zero against the bill.
+      const goneDeliveries = listViews.length - deliveriesBeforeGone;
+      t.check('a conversation the other side ends leaves the list, and costs nothing',
+        tally.reads - beforeGone === 0 && goneDeliveries >= 1 &&
           (listViews[listViews.length - 1] || []).length === MATCHES,
-        (tally.reads - beforeGone) + ' read(s), ' +
-        (listViews[listViews.length - 1] || []).length + ' conversation(s) left');
+        (tally.reads - beforeGone) + ' read(s) and ' + goneDeliveries + ' delivery(s), ' +
+        (listViews[listViews.length - 1] || []).length + ' conversation(s) left — a ' +
+        'deletion is delivered but not billed');
     } finally {
       stopList();
       stopBadge();
