@@ -578,6 +578,59 @@ test('bumpUsage and canSpend enforce the free plan; premium lifts the limits', a
   assert.equal((await store.canSpend('alice', 'rewinds')).allowed, true);
 });
 
+test('canSpendAll answers every counter exactly as canSpend does, one field at a time', async function () {
+  await resetWorld();
+  await store.createUser('alice', {});
+  await store.bumpUsage('alice', 'likes', 4);
+  await store.bumpUsage('alice', 'superLikes');
+
+  // The deck asks for all three at once so it can paint the hint, the banner
+  // and the buttons together. The batch exists to make that one read of
+  // `users/{uid}` instead of six — which is only worth having if the cheap
+  // answer is the SAME answer, so that is what this pins. `store-tests/specs/
+  // 20-spend-cost.store.js` counts the reads; agreement is checkable here,
+  // against the demo adapter, with no emulator in the room.
+  const fields = ['likes', 'superLikes', 'rewinds'];
+  const batch = await store.canSpendAll('alice');
+  assert.deepEqual(Object.keys(batch).sort(), fields.slice().sort());
+  for (const field of fields) {
+    assert.deepEqual(batch[field], await store.canSpend('alice', field), field);
+  }
+
+  // And through the plan, because the batch reads it once for all three.
+  await store.updateUser('alice', { plan: 'premium' });
+  const premium = await store.canSpendAll('alice');
+  assert.equal(premium.rewinds.allowed, true, 'premium lifts the rewind limit in the batch too');
+  assert.equal(premium.likes.plan, 'premium');
+  for (const field of fields) {
+    assert.deepEqual(premium[field], await store.canSpend('alice', field), field);
+  }
+});
+
+test('canSpendAll rolls a stale day over, and persists the reset it reports', async function () {
+  await resetWorld();
+  await store.createUser('alice', {});
+  await store.updateUser('alice', { usage: { date: '2020-01-01', likes: 25, superLikes: 1, rewinds: 0 } });
+
+  const batch = await store.canSpendAll('alice');
+  assert.equal(batch.likes.remaining, 25, 'yesterday at the ceiling does not survive midnight');
+  assert.equal(batch.superLikes.remaining, 1);
+
+  // The reset is persisted, not just reported — the same promise getUsage makes.
+  const stored = (await store.getUser('alice')).usage;
+  assert.equal(stored.date, util.todayKey());
+  assert.equal(stored.likes, 0);
+});
+
+test('canSpendAll answers for an account that does not exist, as canSpend does', async function () {
+  await resetWorld();
+  const batch = await store.canSpendAll('nobody');
+  assert.deepEqual(batch.likes, await store.canSpend('nobody', 'likes'));
+  assert.equal(batch.likes.plan, 'free');
+  assert.equal(batch.likes.remaining, 25);
+  assert.equal(await store.getUser('nobody'), null, 'and invents no account on the way');
+});
+
 /* ------------------------------------------------------------------------
    8. Reports
    ------------------------------------------------------------------------ */

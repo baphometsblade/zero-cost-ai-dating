@@ -387,6 +387,15 @@ forty, measured. `store-tests/specs/19-write-cost.store.js` pins a pass at 2, an
 like at 3, a mutual like at 4, a message at 2 and a profile save at 2 — with the documents
 named, because three writes to the wrong places is also three writes.
 
+A transaction's own `tx.get` is counted too, and was not until `specs/20-spend-cost` needed
+it. The helper's header had defended that omission on two grounds — that nothing measured
+with it used a transaction, and that counting them would move numbers in five specs. The
+first was never true: `bumpUsage` is a transaction, so every roll-over and every counted
+swipe was paying for a read the tally reported as free. The second had never been executed;
+counting them moves no number the suite asserts. The reads go straight to the tally rather
+than being buffered per attempt the way the writes are, because the asymmetry is real — a
+replayed attempt's writes were never billed, and its reads were.
+
 `listCandidates` is the app's largest read path and was the last one whose bill nothing
 counted. It excluded people the viewer had already swiped on by reading the whole swipe
 history — `getSwipes(uid)`, one read per swipe ever made, on every deck load, measured at
@@ -403,6 +412,31 @@ hard limit whose overrun is a `permission-denied` naming nothing.
 `rules-tests/specs/08-budget.rules.js` measures the cliff (20) and fails if the batch loses
 its margin; `store-tests/specs/18-deck-cost.store.js` measures the bill. A refused batch
 falls back to one read per person, warns, and still produces a deck.
+
+The other read path was the smallest question in the app, asked constantly. The deck
+consults the daily counters twice around every card — `checkBudget(field)` before the spend
+and `refreshBudgets()` after it — and every answer comes out of `users/{uid}`. `canSpend`
+needed two things from that document, the plan and the counters, and fetched it twice to get
+them: once for the plan, then again inside `getUsage`. `refreshBudgets` needs all three
+counters, so it called `canSpend` three times in a `Promise.all`. **A like was eight reads of
+one document that had not changed between the first and the eighth**; a deck load, which does
+the same repaint once and no pre-spend check, was six.
+
+Eight was not a number anybody chose; it is two functions each doing the obvious thing, and
+`getUsage` re-reading a document its caller already holds looks like nothing at all in a
+diff. The fix is to separate the decision from the fetch: `usageFromUser(uid, user)` takes a
+document the caller has, and `spendAnswer(user, usage, field)` is pure. `canSpend` is one
+read; `canSpendAll(uid)` answers every field from that same read, and is what the dashboard
+calls. **A like is two reads now.** `store-tests/specs/20-spend-cost.store.js` counts them,
+and — because a cheaper second opinion is worth nothing — checks that the batch agrees with
+the single answer field for field.
+
+Midnight is the part that was not only about reads. The roll-over is persisted, through the
+same transaction a bump takes, so three parallel `canSpend` calls each found the same stale
+record — in flight together, none of them can see another's reset — and each fired its own
+transaction: three contended writes for one midnight, on the first repaint of every day. One
+read means one roll-over. Both sides of that are measured in the spec rather than one
+asserted and the other remembered.
 
 ### Shared semantics
 
@@ -426,7 +460,10 @@ falls back to one read per person, warns, and still produces a deck.
   a like landing between the read and the delete is caught on the replay rather than missed.
 - `getUsage` auto-resets when `usage.date` is not today, so daily limits need no scheduler.
 - `canSpend(uid, field)` returns `{ allowed, remaining, limit, plan }` by reading the plan
-  limits out of `ZC.config`, and is called *before* every spend.
+  limits out of `ZC.config`, and is called *before* every spend. `canSpendAll(uid)` returns
+  one of those per counter from a **single** read of `users/{uid}`, which is what the deck
+  uses to repaint the hint, the banner and the buttons together; both go through the same
+  pure `spendAnswer`, so they cannot give different answers for the same field.
 - `touchActive` is throttled to one *touch* per five minutes **across page loads** — and a
   touch is TWO writes, not one: `setLastActive` stamps `users/{uid}` and then
   `discovery/{uid}`, because the projection carries `lastActiveAt` too and every other deck
