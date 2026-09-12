@@ -118,7 +118,7 @@ module.exports = {
     await k.admin.set('swipes', me + '_' + lost, k.h.swipeDoc(me, lost, 'like'));
     note(me, lost);
 
-    const repair = { reads: 0, calls: 0 };
+    const repair = { reads: 0, calls: 0, writes: 0, wrote: [] };
     k.ctx.ZC.firebase.db = k.h.countingDb(real, repair);
     const fixed = await k.store.reconcileMatches(me);
     k.ctx.ZC.firebase.db = real;
@@ -128,10 +128,17 @@ module.exports = {
       fixed.repaired === 1 && !!created && k.same((created.users || []).slice().sort(), [me, lost].sort()),
       k.show(fixed) + ', match ' + (created ? 'created' : 'MISSING'));
 
+    // The write is counted, not just named. This check has said "three reads and
+    // one write" since it was written and asserted only the reads — the counter
+    // could not see a write at all until `harness.countingDb` learned to tally
+    // both halves. A check whose title promises more than its condition measures
+    // is the shape this suite exists to remove.
     t.check('and it costs three reads and one write, not a scan',
-      repair.reads === 3,
-      repair.reads + ' read(s): my swipe, their swipe, and the match that was not there. ' +
-      'Walking a swipe history would grow with how long the account has been used');
+      repair.reads === 3 && repair.writes === 1 &&
+        k.same(repair.wrote.map(function (e) { return e.split('/')[0]; }), ['matches']),
+      repair.reads + ' read(s): my swipe, their swipe, and the match that was not there; ' +
+      repair.writes + ' write(s): ' + k.show(repair.wrote) + '. Walking a swipe history ' +
+      'would grow with how long the account has been used');
 
     t.check('the note is spent, so the next load does nothing',
       notesFor(me).length === 0, k.show(notesFor(me)));
