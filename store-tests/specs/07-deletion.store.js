@@ -118,5 +118,73 @@ module.exports = {
     t.check('their report about the deleted account is retained for the queue',
       (await k.admin.get('reports', other + '_' + me)) !== null,
       'reports/' + other + '_' + me);
+
+    /* ---- a purge that fails, fails before it has broken anything -------- */
+
+    // Deletion is a traversal of several collections with no transaction around
+    // it — there cannot be one, on the free tier, from a browser — so it is not
+    // atomic and `settings.js` tells the user so. What CAN be arranged is the
+    // order: the one step with no prior casualty goes first, so the failure mode
+    // this file is about leaves the account exactly as it was.
+    //
+    // The filed-reports purge used to be last AND swallowed. Letting it throw
+    // was half the fix; done in its old position it threw only after the swipes
+    // and matches had gone, so it reported a failure over an account whose
+    // relationships were already irrecoverable. A reviewer caught that the
+    // "leaves the account whole" claim did not hold, and it does not — unless
+    // the purge runs first, which is what this asserts.
+    const victim = 'purge-order';
+    const friend = 'purge-order-friend';
+    const pairId = [victim, friend].sort().join('_');
+    await k.admin.set('users', victim, k.h.userDoc(victim));
+    await k.admin.set('discovery', victim, k.h.discoveryDoc(victim));
+    await k.admin.set('swipes', victim + '_' + friend, k.h.swipeDoc(victim, friend, 'like'));
+    await k.admin.set('matches', pairId, k.h.matchDoc(victim, friend));
+    await k.admin.set('reports', victim + '_' + friend, k.h.reportDoc(victim, friend));
+
+    const real = k.ctx.ZC.firebase.db;
+    let refused = 0;
+    // A Firestore whose `reports` collection cannot be queried — the shape of
+    // the failure, injected so the ordering is executed rather than argued.
+    k.ctx.ZC.firebase.db = new Proxy(real, {
+      get: function (obj, prop) {
+        const value = obj[prop];
+        if (prop !== 'collection' || typeof value !== 'function') return value;
+        return function (name) {
+          const col = value.apply(obj, arguments);
+          if (name !== 'reports') return col;
+          return new Proxy(col, {
+            get: function (c, p) {
+              if (p !== 'where') return c[p];
+              return function () { refused += 1; throw new Error('reports are unreadable'); };
+            }
+          });
+        };
+      }
+    });
+    let threw = false;
+    try {
+      await k.store.deleteAccountData(victim);
+    } catch (err) {
+      threw = true;
+    } finally {
+      k.ctx.ZC.firebase.db = real;
+    }
+    k.ctx.drainWarnings();
+
+    const survived = {
+      user: (await k.admin.get('users', victim)) !== null,
+      discovery: (await k.admin.get('discovery', victim)) !== null,
+      swipe: (await k.admin.get('swipes', victim + '_' + friend)) !== null,
+      match: (await k.admin.get('matches', pairId)) !== null
+    };
+
+    t.check('a purge that cannot read the reports says so instead of returning true',
+      threw && refused > 0, threw ? refused + ' refusal(s), and it threw' : 'it did NOT throw');
+
+    t.check('and it fails before deleting anything, so a retry has something to finish',
+      survived.user && survived.discovery && survived.swipe && survived.match,
+      k.show(survived) + ' — with the purge last, the swipe and the match would ' +
+      'already be gone and no retry could bring them back');
   }
 };

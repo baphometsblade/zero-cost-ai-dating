@@ -2932,6 +2932,34 @@
     },
 
     async deleteAccountData(uid) {
+      // Reports this account filed — readable and deletable only by their
+      // author, which is exactly what makes this purge possible. Reports about
+      // the account are someone else's documents and stay in the queue.
+      //
+      // FIRST, and not wrapped in a warn-and-carry-on. It used to be both: last,
+      // and swallowed — so a rejected query left this account's reports in the
+      // abuse queue, carrying `from:` an account that no longer existed, while
+      // the deletes below still ran and this still returned true.
+      //
+      // Letting it throw was half the fix. Done in its old position it threw
+      // only after the swipes and matches had gone, so the failure it reported
+      // left the account's relationships irrecoverably deleted and its identity
+      // documents intact — which a first version of this comment described as
+      // leaving the account "whole". It does not. Moving it to the front is what
+      // makes the sentence true: the one step here with no prior casualty fails
+      // before anything irreversible has happened.
+      //
+      // None of this makes deletion atomic. It is a traversal of several
+      // collections with no transaction around it — there cannot be one, on the
+      // free tier, from a browser — so a failure later in the walk does leave
+      // the account part-way removed. What holds is the property the ORDER is
+      // chosen for: `users/{uid}` and `discovery/{uid}` go last, so the identity
+      // needed to retry always survives, and deleting an already-deleted
+      // document succeeds, so a second run finishes what the first started.
+      // `settings.js` tells the user exactly that, in those words.
+      const reports = await db().collection('reports').where('from', '==', uid).get();
+      await batchDelete(reports.docs.map(function (doc) { return doc.ref; }));
+
       // Swipes in both directions: the ones this account made, and the ones
       // aimed at it — an inbound like is data about this account and must not
       // outlive it.
@@ -2948,25 +2976,6 @@
         await deleteMatchMessages(matches.docs[i].ref);
         await matches.docs[i].ref.delete();
       }
-
-      // Reports this account filed — readable and deletable only by their
-      // author, which is exactly what makes this purge possible. Reports about
-      // the account are someone else's documents and stay in the queue.
-      //
-      // Not wrapped in a warn-and-carry-on, for the reason the comment below
-      // spends a paragraph on. It WAS: a rejected query, or a `commit()` that
-      // failed part way through a batch, left this account's reports in the
-      // abuse queue — carrying `from: <an account that no longer exists>` —
-      // while the two deletes below still ran and this still returned true. The
-      // person was told their account was gone and the documents naming them
-      // were the ones that stayed.
-      //
-      // Failing here leaves `users/{uid}` and `discovery/{uid}` intact, so the
-      // account is whole and the deletion can simply be run again; every delete
-      // above it is idempotent, so a retry costs nothing but the traversal.
-      // settings.js already says the honest thing for a part-way failure.
-      const reports = await db().collection('reports').where('from', '==', uid).get();
-      await batchDelete(reports.docs.map(function (doc) { return doc.ref; }));
 
       // The public projection, then the private document — and in that order,
       // with nothing swallowed between them.
