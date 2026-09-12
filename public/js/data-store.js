@@ -3354,8 +3354,17 @@
     if (!uid || !user) return { date: today, likes: 0, superLikes: 0, rewinds: 0 };
     const usage = normalizeUsage(user.usage);
     if (usage.date === today) return usage;
-    // No field to move: the bump is the roll-over itself, and it already
-    // swallows its own write failures.
+    // No field to move: the bump IS the roll-over, and it already swallows its
+    // own write failures. `null` is deliberate rather than careless — in
+    // `nextUsage` the day is reset before the field is looked at, and an
+    // unrecognised field returns that reset record without moving a counter, so
+    // a bump of nothing is exactly a roll-over. Both adapters then persist it,
+    // which `specs/02-rollover` and `specs/20-spend-cost` prove by reading the
+    // stored document back rather than by trusting the return value.
+    //
+    // `adapter.bumpUsage`, NOT `store.bumpUsage`: the facade validates the field
+    // and sends an unrecognised one to `store.getUsage`, which is this function's
+    // own caller. Going through it would recurse rather than write.
     return adapter.bumpUsage(uid, null, 0);
   }
 
