@@ -248,7 +248,7 @@ npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.
 
 ### Unit suites
 
-Fourteen suites on Node's built-in runner — **255 checks**, no install, no browser, seconds:
+Fourteen suites on Node's built-in runner — **258 checks**, no install, no browser, seconds:
 
 | Suite | What it pins down |
 | --- | --- |
@@ -337,7 +337,7 @@ The daily usage counter is the one piece of client logic where reading the code 
 as weak an argument as it was for the rules: whether two concurrent bumps collapse into one
 is a property of a real database, not of anything visible in the file. `store-tests/` loads
 the **shipped** `public/js/data-store.js` into Node — `window` aliased to `globalThis`,
-`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **196
+`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **211
 checks**, including 20 concurrent `bumpUsage` calls on one document storing exactly 20, the
 midnight roll-over happening inside the same transaction, a bump writing `usage` and nothing
 else, 30 swipes replaying the deck's real learning-save-then-bump ordering and storing exactly
@@ -347,7 +347,7 @@ underneath it when it is finally unmatched, a page load whose bill is counted
 document by document and has to come out the same against a swipe history twice as long — and
 a match document the rules refuse, which has to come back as "no match" rather than as a
 swipe the deck believes it lost, and the messaging and abuse-report paths — fifteen of the
-thirty-three facade methods had never run against a real Firestore at all, so the documents
+thirty-four facade methods had never run against a real Firestore at all, so the documents
 the adapter writes had never met the rules that judge them. And, in both directions, the two documents an account is
 split across: the counter the transaction stores and the projection the profile save
 publishes are each replayed against the real `firestore.rules` on a separate project, because
@@ -682,6 +682,23 @@ These are real, and worth knowing before you show this to anyone:
     writes to the wrong places is also three writes. Against the free tier's **20,000 writes
     a day**, three a like is about 6,600 likes across the whole deployment — passes are
     cheaper at two, so a real day's mix buys somewhat more than that.
+  - **And a swipe used to be eight READS of the counter.** The deck consults it twice around
+    every card — once before the spend, so a swipe past the limit is refused before anything
+    is written, and once after, to repaint the hint, the limit banner and the buttons. Both
+    answers come out of `users/{uid}`. `canSpend` needed two things from that document, the
+    plan and the counters, and fetched it twice to get them: once for the plan, and once more
+    inside `getUsage`. The repaint needs all three counters, so it called `canSpend` three
+    times at once. Eight reads of one document that had not changed between the first and the
+    eighth — a number nobody chose, just two functions each doing the obvious thing, and
+    `getUsage` re-reading a document its caller already holds looks like nothing at all in a
+    diff. Separating the decision from the fetch is what makes one read enough: `canSpend` is
+    one, and `canSpendAll` answers every field from that same one. **A like is two reads now,
+    a deck load one.** `store-tests/specs/20-spend-cost.store.js` counts them, and checks that
+    the cheap answer is the *same* answer, field for field — a second opinion that disagrees
+    is worth less than the reads it saves. Midnight cost writes as well: the roll-over is
+    persisted, and three parallel questions each found the same stale record — in flight
+    together, none of them can see another's reset — so each fired its own transaction and the
+    first repaint of every day was three contended writes. One read means one roll-over.
   - **Demo mode is not immune.** It is per-device, but not "one tab at a time": the store
     listens for `storage` events and supports several tabs of the same browser, and the demo
     adapter's bump is still a `localStorage` read-modify-write two of them can race. It shares

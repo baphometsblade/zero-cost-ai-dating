@@ -3326,6 +3326,66 @@
     return limits[plan === 'premium' ? 'premium' : 'free'] || { likesPerDay: 25, superLikesPerDay: 1, rewinds: 0 };
   }
 
+  /**
+   * Today's usage for a user document the caller ALREADY HOLDS.
+   *
+   * This exists because of what the counters cost to consult. `canSpend` needs
+   * two things out of `users/{uid}` — the plan and the counters — and used to
+   * fetch the document twice to get them: once for the plan, and then again
+   * inside `getUsage`. The deck asks about three fields at once
+   * (`refreshBudgets`, in dashboard.js), so painting the hint under the cards
+   * was six reads of one document, and a like was eight: three fields
+   * afterwards plus the single check before it. Every one of those reads
+   * returns the same bytes.
+   *
+   * Splitting the decision away from the fetch is what makes one read enough,
+   * and keeping the decision in ONE function is what keeps `getUsage` and
+   * `canSpend` from drifting into two different ideas of what day it is —
+   * which is the exact failure `specs/02-rollover.store.js` was written for.
+   *
+   * The roll-over write survives unchanged: a stale record is still reset
+   * through `bumpUsage`, so the reset is atomic against a swipe racing it.
+   * @param {string} uid user id
+   * @param {Object|null} user the user document, already fetched
+   * @returns {Promise<{date:string, likes:number, superLikes:number, rewinds:number}>}
+   */
+  async function usageFromUser(uid, user) {
+    const today = todayKey();
+    if (!uid || !user) return { date: today, likes: 0, superLikes: 0, rewinds: 0 };
+    const usage = normalizeUsage(user.usage);
+    if (usage.date === today) return usage;
+    // No field to move: the bump IS the roll-over, and it already swallows its
+    // own write failures. `null` is deliberate rather than careless — in
+    // `nextUsage` the day is reset before the field is looked at, and an
+    // unrecognised field returns that reset record without moving a counter, so
+    // a bump of nothing is exactly a roll-over. Both adapters then persist it,
+    // which `specs/02-rollover` and `specs/20-spend-cost` prove by reading the
+    // stored document back rather than by trusting the return value.
+    //
+    // `adapter.bumpUsage`, NOT `store.bumpUsage`: the facade validates the field
+    // and sends an unrecognised one to `store.getUsage`, which is this function's
+    // own caller. Going through it would recurse rather than write.
+    return adapter.bumpUsage(uid, null, 0);
+  }
+
+  /**
+   * One budget answer, from a user document and a usage record already in hand.
+   * Pure: no storage, no clock — so `canSpend` and `canSpendAll` cannot give
+   * different answers for the same field.
+   * @param {Object|null} user the user document, or null for no account
+   * @param {Object} usage today's counters
+   * @param {'likes'|'superLikes'|'rewinds'} field counter to check
+   * @returns {{allowed:boolean, remaining:number, limit:number, plan:string}}
+   */
+  function spendAnswer(user, usage, field) {
+    const plan = user && user.plan === 'premium' ? 'premium' : 'free';
+    const limits = planLimits(plan);
+    const limit = limits[LIMIT_FIELDS[field] || 'likesPerDay'];
+    const used = Number(usage[field]) || 0;
+    const remaining = limit === Infinity ? Infinity : Math.max(0, limit - used);
+    return { allowed: remaining > 0, remaining: remaining, limit: limit, plan: plan };
+  }
+
   /* ------------------------------------------------------------------------
      7b. One match stream per account, shared
      ------------------------------------------------------------------------ */
@@ -3895,16 +3955,7 @@
      */
     async getUsage(uid) {
       await ready;
-      const today = todayKey();
-      const empty = { date: today, likes: 0, superLikes: 0, rewinds: 0 };
-      if (!uid) return empty;
-      const user = await adapter.getUser(uid);
-      if (!user) return empty;
-      const usage = normalizeUsage(user.usage);
-      if (usage.date === today) return usage;
-      // No field to move: the bump is the roll-over itself, and it already
-      // swallows its own write failures.
-      return adapter.bumpUsage(uid, null, 0);
+      return usageFromUser(uid, uid ? await adapter.getUser(uid) : null);
     },
 
     /**
@@ -3933,14 +3984,34 @@
     async canSpend(uid, field) {
       await ready;
       const user = uid ? await adapter.getUser(uid) : null;
-      const plan = user && user.plan === 'premium' ? 'premium' : 'free';
-      const limits = planLimits(plan);
-      const limitKey = LIMIT_FIELDS[field] || 'likesPerDay';
-      const limit = limits[limitKey];
-      const usage = await store.getUsage(uid);
-      const used = Number(usage[field]) || 0;
-      const remaining = limit === Infinity ? Infinity : Math.max(0, limit - used);
-      return { allowed: remaining > 0, remaining: remaining, limit: limit, plan: plan };
+      return spendAnswer(user, await usageFromUser(uid, user), field);
+    },
+
+    /**
+     * Every daily budget at once, from ONE read of `users/{uid}`.
+     *
+     * The deck needs all three before it can paint the hint, the limit banner
+     * and the buttons, and asking field by field re-read the same document
+     * three times — six, before this, because each `canSpend` read it twice.
+     * The answers are identical to `canSpend`'s, field for field: both go
+     * through `spendAnswer`.
+     *
+     * One read also means one ANSWER: the three budgets are computed from the
+     * same snapshot of the counters, so they cannot disagree about what day it
+     * is or how many likes are left the way three separate reads racing a swipe
+     * could.
+     * @param {string} uid user id
+     * @returns {Promise<Object>} `{likes, superLikes, rewinds}`, each a canSpend answer
+     */
+    async canSpendAll(uid) {
+      await ready;
+      const user = uid ? await adapter.getUser(uid) : null;
+      const usage = await usageFromUser(uid, user);
+      const out = {};
+      Object.keys(LIMIT_FIELDS).forEach(function (field) {
+        out[field] = spendAnswer(user, usage, field);
+      });
+      return out;
     },
 
     /** The closed list of report reasons ({slug, label}), for the report UI. */

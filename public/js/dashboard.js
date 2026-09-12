@@ -556,22 +556,35 @@
   }
 
   /**
-   * Ask the store whether an action is still affordable today.
-   * A read failure fails open: a transient storage error must not lock someone
-   * out of their own deck.
+   * The answer to fall back on when the store could not give one. Failing open
+   * is deliberate: a transient storage error must not lock somebody out of
+   * their own deck. `estimated` marks it a guess, so the hint under the deck
+   * does not claim a budget nobody has actually confirmed.
+   * @returns {{allowed:boolean, remaining:number, limit:number, plan:string, estimated:boolean}}
+   */
+  function estimatedBudget() {
+    return { allowed: true, remaining: Infinity, limit: Infinity, plan: state.me.plan || 'free', estimated: true };
+  }
+
+  /** Whether a store answer is shaped like a budget rather than like nothing. */
+  function isBudget(answer) {
+    return !!answer && typeof answer.allowed === 'boolean';
+  }
+
+  /**
+   * Ask the store whether one action is still affordable today. Used where a
+   * single field is at stake — the check before a spend, and rewind's.
    * @param {'likes'|'superLikes'|'rewinds'} field usage counter
    * @returns {Promise<{allowed:boolean, remaining:number, limit:number, plan:string}>}
    */
   async function checkBudget(field) {
     try {
       const answer = await ZC.store.canSpend(state.me.uid, field);
-      if (answer && typeof answer.allowed === 'boolean') return answer;
+      if (isBudget(answer)) return answer;
     } catch (err) {
       console.warn('[zc] Could not read the daily limit for ' + field + ':', err);
     }
-    // `estimated` marks a guess, so the hint under the deck does not claim a
-    // budget nobody has actually confirmed.
-    return { allowed: true, remaining: Infinity, limit: Infinity, plan: state.me.plan || 'free', estimated: true };
+    return estimatedBudget();
   }
 
   /** Repaint everything that reads the daily budgets. */
@@ -593,9 +606,21 @@
     const token = budgetRead + 1;
     budgetRead = token;
     const fields = ['likes', 'superLikes', 'rewinds'];
-    const answers = await Promise.all(fields.map(function (field) { return checkBudget(field); }));
+    // One call, not three. `canSpendAll` answers every field from a single read
+    // of `users/{uid}`; three `checkBudget` calls in a Promise.all read the same
+    // document six times, which on a Spark project's 50,000 reads a day was the
+    // most expensive thing the deck did — and it ran after every swipe.
+    let all = null;
+    try {
+      all = await ZC.store.canSpendAll(state.me.uid);
+    } catch (err) {
+      console.warn('[zc] Could not read the daily limits:', err);
+    }
     if (token !== budgetRead) return;
-    fields.forEach(function (field, i) { state.budget[field] = answers[i]; });
+    fields.forEach(function (field) {
+      const answer = all && all[field];
+      state.budget[field] = isBudget(answer) ? answer : estimatedBudget();
+    });
     paintBudgets();
   }
 

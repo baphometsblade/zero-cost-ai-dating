@@ -62,6 +62,69 @@ const OPEN_RULES = [
 ].join('\n');
 
 /**
+ * Record one billed read against the tally, empty results included.
+ * @param {Object} tally accumulator
+ * @param {Object} snap the snapshot that came back
+ */
+function noteRead(tally, snap) {
+  tally.calls += 1;
+  tally.reads += (snap && typeof snap.size === 'number') ? Math.max(1, snap.size) : 1;
+}
+
+/** Record one billed write against the tally. */
+function noteWrite(tally, path, op) {
+  tally.writes = (tally.writes || 0) + 1;
+  if (Array.isArray(tally.wrote)) tally.wrote.push(String(path || '?') + ':' + op);
+}
+
+/**
+ * The write operations a document reference, transaction or batch can perform.
+ *
+ * `add` is here for completeness rather than for current use: the shipped store
+ * creates every document through `.doc(id).set(...)`, including messages, so
+ * nothing exercises it today. It is listed anyway because the alternative is a
+ * silent under-count the day somebody writes `messages.add(...)` — a counter
+ * that quietly reports 1 where the bill is 2 is the failure this file's header
+ * calls worse than no counter at all. A transaction and a batch have no `add`,
+ * so only the reference path can reach it.
+ */
+const WRITE_OPS = { set: 1, update: 1, delete: 1, add: 1 };
+
+/**
+ * A transaction or batch whose buffered writes land in `pending` rather than in
+ * the tally, so a replayed attempt can be discarded and only the committed one
+ * counted — and whose reads, if it has any, go straight to the tally, because a
+ * replayed attempt's reads were billed.
+ * @param {Object} target the real transaction or WriteBatch
+ * @param {{writes:number, wrote:string[]}} pending this attempt's buffer
+ * @param {Object} [tally] where a transaction's own reads are counted; a
+ *   WriteBatch has no `get`, so it is passed without one
+ * @returns {Object} a stand-in that behaves identically
+ */
+function bufferingWrites(target, pending, tally) {
+  return new Proxy(target, {
+    get: function (obj, prop) {
+      const value = obj[prop];
+      if (typeof value !== 'function') return value;
+      return function () {
+        if (WRITE_OPS[prop]) {
+          pending.writes += 1;
+          pending.wrote.push(String((arguments[0] && arguments[0].path) || '?') + ':' + prop);
+        }
+        const out = value.apply(obj, arguments);
+        if (prop === 'get' && tally && out && typeof out.then === 'function') {
+          return out.then(function (snap) {
+            noteRead(tally, snap);
+            return snap;
+          });
+        }
+        return out;
+      };
+    }
+  });
+}
+
+/**
  * Wrap a compat Firestore so every document a read returns is tallied.
  *
  * Firestore bills a query that matches nothing as one read, so an empty result
@@ -70,12 +133,22 @@ const OPEN_RULES = [
  * makes "an idle listener costs nothing" a measurable claim rather than a
  * quotation from the documentation.
  *
- * Deliberately not counted: reads made through a transaction's own `tx.get`,
- * which never passes through this object. Nothing measured with it uses one,
- * and a helper that silently under-counted would be worse than no helper, so it
- * is said out loud instead of assumed. That exclusion is also load-bearing now
- * that writes ARE counted through transactions: adding `tx.get` here would move
- * numbers in five specs that have nothing to do with writes.
+ * A transaction's own `tx.get` IS counted, and this is the second thing this
+ * header has said about it. It used to say the reads were deliberately excluded,
+ * on two grounds: that "nothing measured with it uses one", and that counting
+ * them "would move numbers in five specs that have nothing to do with writes".
+ * The first was never true — `bumpUsage` is a transaction, so every roll-over
+ * and every counted swipe was paying for a read this tally reported as free.
+ * The second was checkable and nobody had checked it: counting them moves no
+ * number this suite asserts. (`specs/19-write-cost` does measure paths that take
+ * a transaction — it checks their writes, not their reads.) A gap that is
+ * documented is better than a silent one, but a documented gap defended by two
+ * reasons that do not survive being executed is how an under-count keeps its
+ * place for several rounds.
+ *
+ * The reads are counted where they happen rather than buffered like the writes,
+ * because the asymmetry is real: a replayed attempt's writes were never billed,
+ * and its reads were.
  *
  * WRITES are counted too, and only the ones Firestore would bill:
  *
@@ -99,49 +172,6 @@ const OPEN_RULES = [
  *   accumulator, mutated in place
  * @returns {Object} a stand-in that behaves identically and records reads and writes
  */
-/** Record one billed write against the tally. */
-function noteWrite(tally, path, op) {
-  tally.writes = (tally.writes || 0) + 1;
-  if (Array.isArray(tally.wrote)) tally.wrote.push(String(path || '?') + ':' + op);
-}
-
-/**
- * The write operations a document reference, transaction or batch can perform.
- *
- * `add` is here for completeness rather than for current use: the shipped store
- * creates every document through `.doc(id).set(...)`, including messages, so
- * nothing exercises it today. It is listed anyway because the alternative is a
- * silent under-count the day somebody writes `messages.add(...)` — a counter
- * that quietly reports 1 where the bill is 2 is the failure this file's header
- * calls worse than no counter at all. A transaction and a batch have no `add`,
- * so only the reference path can reach it.
- */
-const WRITE_OPS = { set: 1, update: 1, delete: 1, add: 1 };
-
-/**
- * A transaction or batch whose buffered writes land in `pending` rather than in
- * the tally, so a replayed attempt can be discarded and only the committed one
- * counted.
- * @param {Object} target the real transaction or WriteBatch
- * @param {{writes:number, wrote:string[]}} pending this attempt's buffer
- * @returns {Object} a stand-in that behaves identically
- */
-function bufferingWrites(target, pending) {
-  return new Proxy(target, {
-    get: function (obj, prop) {
-      const value = obj[prop];
-      if (typeof value !== 'function') return value;
-      return function () {
-        if (WRITE_OPS[prop]) {
-          pending.writes += 1;
-          pending.wrote.push(String((arguments[0] && arguments[0].path) || '?') + ':' + prop);
-        }
-        return value.apply(obj, arguments);
-      };
-    }
-  });
-}
-
 function countingDb(target, tally) {
   return new Proxy(target, {
     get: function (obj, prop) {
@@ -171,7 +201,7 @@ function countingDb(target, tally) {
           let attempt = null;
           return value.call(obj, function (tx) {
             attempt = { writes: 0, wrote: [] };
-            return fn(bufferingWrites(tx, attempt));
+            return fn(bufferingWrites(tx, attempt, tally));
           }).then(function (result) {
             if (attempt) {
               tally.writes = (tally.writes || 0) + attempt.writes;
@@ -266,8 +296,7 @@ function countingDb(target, tally) {
         const out = value.apply(obj, arguments);
         if (prop === 'get' && out && typeof out.then === 'function') {
           return out.then(function (snap) {
-            tally.calls += 1;
-            tally.reads += (snap && typeof snap.size === 'number') ? Math.max(1, snap.size) : 1;
+            noteRead(tally, snap);
             return snap;
           });
         }
