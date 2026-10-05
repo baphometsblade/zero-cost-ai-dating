@@ -66,22 +66,37 @@ module.exports = {
       await server.stop();
 
       // Clean URLs, exactly as Hosting serves them: no .html anywhere.
+      //
+      // A navigation that FAILED is kept apart from the title of one that
+      // landed. They used to share one string, and the failure text carries the
+      // URL — so against a worker that broke every offline navigation, the
+      // "/matches" check still passed, because `/Matches/i` found the word in
+      // "net::ERR_FAILED at http://…/matches". Only a title can satisfy these now.
       const seen = {};
       for (const route of ['/', '/matches', '/definitely-not-a-page']) {
         try {
           await page.goto(server.origin + route, { waitUntil: 'domcontentloaded', timeout: 15000 });
-          seen[route] = await page.title();
+          seen[route] = { ok: true, title: await page.title() };
         } catch (err) {
-          seen[route] = 'NAVIGATION FAILED: ' + (err && err.message ? err.message.split('\n')[0] : err);
+          seen[route] = { ok: false, title: '', failed: err && err.message ? err.message.split('\n')[0] : String(err) };
         }
+      }
+      /** The title an offline navigation landed on, or null when it did not land. */
+      function landed(route) {
+        return seen[route] && seen[route].ok ? seen[route].title : null;
+      }
+      /** What to print beside a check: the title, or why there was none. */
+      function shown(route) {
+        const out = seen[route] || {};
+        return out.ok ? out.title : 'NAVIGATION FAILED: ' + out.failed;
       }
 
       // Matched on the tagline, not the product name: the 404 page carries the
       // name too, and a fallback that quietly served it would still "pass".
-      t.check('offline "/" serves the landing page', /explains itself/i.test(seen['/']), seen['/']);
-      t.check('offline "/matches" serves the matches page', /Matches/i.test(seen['/matches']), seen['/matches']);
+      t.check('offline "/" serves the landing page', /explains itself/i.test(landed('/') || ''), shown('/'));
+      t.check('offline "/matches" serves the matches page', /Matches/i.test(landed('/matches') || ''), shown('/matches'));
       t.check('offline an unknown route serves the 404 page',
-        /404|not found|lost/i.test(seen['/definitely-not-a-page']), seen['/definitely-not-a-page']);
+        /404|not found|lost/i.test(landed('/definitely-not-a-page') || ''), shown('/definitely-not-a-page'));
 
       // Serving the shell is only half of it: the page has to come up with its
       // own data too, since demo mode keeps everything on the device.

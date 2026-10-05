@@ -49,6 +49,13 @@
      pair: #dc3545 already clears 4.5:1 on white as text. */
   --ok-ink: #0f7f57;
   --warn-ink: #9a5b14;
+  /* And accent, which had no ink and needed one: the super-like star is the
+     whole content of its button, drawn at 20px, and --accent-500 manages 4.86:1
+     on white and 4.08:1 on its own hover tint — under the 4.5:1 a glyph that
+     size has to clear. The value is --accent-fill-from's, so it is the same
+     purple the palette already uses where accent has to carry contrast.
+     tests/contrast.test.js measures every deck glyph at rest and on hover. */
+  --accent-ink: #5f4fd8;
   /* Ink for a filled --ok-ink surface: white is readable on light's deep
      green, but not on dark's mint, which inks near-black instead. */
   --on-ok: #ffffff;
@@ -160,6 +167,7 @@
     /* Against a dark surface the fill values are already the readable ones. */
     --ok-ink: var(--ok);
     --warn-ink: var(--warn);
+    --accent-ink: var(--accent-500);
     --on-ok: #06281c;
     --on-danger: #2a0d15;
 
@@ -216,6 +224,7 @@
 
   --ok-ink: var(--ok);
   --warn-ink: var(--warn);
+  --accent-ink: var(--accent-500);
   --on-ok: #06281c;
   --on-danger: #2a0d15;
 

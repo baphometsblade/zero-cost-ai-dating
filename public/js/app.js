@@ -399,6 +399,15 @@
         } catch (err) {
           warnOnce(err);
         }
+      }, function (err) {
+        // The matches badge above lost this exact defect a round ago and its
+        // sibling kept it: with no third argument the store could not say the
+        // stream had died, `likeStop` went on holding a dead handle, and
+        // `if (!likeStop)` refused every re-subscription for the life of the
+        // page. Letting go is what lets focus, visibility and pageshow — which
+        // all call back into here — bring it back.
+        likeStop = null;
+        warnOnce(err);
       });
     } else if (!wantsLikes && likeStop) {
       // Dropped back to Free: stop paying for the subscription and clear the

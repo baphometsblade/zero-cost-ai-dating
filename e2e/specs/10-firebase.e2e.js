@@ -372,7 +372,7 @@ module.exports = {
       await page.fill('#input-email', email);
       await page.fill('#input-password', password);
       await page.click('#submit-btn');
-      await page.waitForURL('**/profile.html*');
+      await page.waitForURL(h.pageUrl('profile'));
 
       // accounts:query is the Auth emulator's admin listing; the /emulator/…
       // path answers DELETE only.
@@ -495,7 +495,7 @@ module.exports = {
             'redirected out from under the click');
 
       await page.click('main [data-signout]');
-      await page.waitForURL('**/index.html');
+      await page.waitForURL(h.pageUrl('index'));
       const signedOut = await page.evaluate(function () {
         return window.ZC && window.ZC.auth ? !window.ZC.auth.current : null;
       });
@@ -506,7 +506,7 @@ module.exports = {
       await page.fill('#input-email', email);
       await page.fill('#input-password', password);
       await page.click('#submit-btn');
-      await page.waitForURL(function (url) { return !/auth\.html/.test(url.href); });
+      await page.waitForURL(function (url) { return !h.pageUrl('auth').test(url.href); });
       await page.waitForSelector('#deck-stack .swipe-card');
       const back = await page.evaluate(function () {
         return window.ZC && window.ZC.auth && window.ZC.auth.current ? window.ZC.auth.current.uid : null;

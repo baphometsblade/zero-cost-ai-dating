@@ -61,8 +61,14 @@ Rules that keep the graph acyclic:
   nothing about auth; auth knows nothing about any page.
 - **Page controllers never talk to each other.** They share state through `ZC.store` and the
   URL, never through globals of their own.
-- **`matching-engine.js` depends on nothing at all.** It is a pure function library that also
-  works in Node (see §5), which is what makes it testable without a DOM.
+- **`matching-engine.js` depends on nothing it cannot run without.** It is a pure function
+  library that also works in Node (see §5), which is what makes it testable without a DOM. It
+  used to be described as depending on nothing at all, and it reads one thing ambiently: when a
+  caller passes no `tagIndex` — and every page passes none — it takes `ZC.INTEREST_BY_SLUG`
+  from `seed-data.js`, and that table adds the category bonus, up to an eighth of the interest
+  score. With no table it still runs, without the bonus, which is the configuration every
+  engine test ran in and no page does; `tests/matching-engine.test.js` now also scores with
+  `seed-data.js` loaded, and fails if the fallback to it is removed.
 - **Only `data-store.js` touches `firebase.firestore()`.** Only `auth.js` touches
   `firebase.auth()`. Nothing else in the codebase references the SDK, so the demo-mode fallback
   has exactly two places to get right.
@@ -222,7 +228,12 @@ but never the birthdate; coordinates rounded to ~1 km) and the mutual filter pre
 block lists, usage counters and learned affinities never leave the private document, and the
 rules close the projection's key list with `hasOnly` so a tampered client cannot widen it.
 Candidate listing, the matches list and "who liked you" all read the projection; the demo
-adapter keeps a single local store since nothing ever leaves the browser there.
+adapter keeps a single local store since nothing ever leaves the browser there. "Who liked
+you" reads it only on the premium plan: the free plan's panel shows a number, and asks
+`countLikesReceived` for it — the same sender query and answered-lookup as
+`getLikesReceived`, without the profiles. It used to call the list and draw `.length`, which
+read every waiting liker's projection and cached it for five minutes on the one plan whose
+page says it never receives them.
 
 ### The rest
 
@@ -431,6 +442,21 @@ calls. **A like is two reads now.** `store-tests/specs/20-spend-cost.store.js` c
 and — because a cheaper second opinion is worth nothing — checks that the batch agrees with
 the single answer field for field.
 
+Every one of those is a page's own work. The cost every page pays FIRST went uncounted
+longest, and it is the one paid most often: each page is its own HTML document with a fresh
+SDK, so every navigation resolves the account (one read) and subscribes the nav badge, whose
+first snapshot bills every conversation it carries — **`1 + max(1, N)` reads per page load**,
+before any page-specific code runs. `store-tests/specs/21-navigation-cost.store.js` pins it as
+a known cost rather than a virtue. The fix is a schema change and is not built: the badge
+needs only the conversations with something unread, `unread` is a map keyed by uid, and
+`users array-contains` plus a range on a per-user map key is not an index anyone can declare.
+An `unreadFor` array maintained by `sendMessage` and `markRead` — both already write the
+match document, so no extra writes — would let the badge pay for what is unread instead of
+for everything. The premium likes listener on top of that paid `1 + 2M` for M people
+waiting, a `get` per sender to learn whether it was answered, billed even though a waiting
+sender's answer is a document that does not exist; it now goes through `alreadySwiped`, ten
+at a time, and pays `M + 1 + ⌈M/10⌉`.
+
 Midnight is the part that was not only about reads. The roll-over is persisted, through the
 same transaction a bump takes, so three parallel `canSpend` calls each found the same stale
 record — in flight together, none of them can see another's reset — and each fired its own
@@ -467,8 +493,10 @@ asserted and the other remembered.
 - `touchActive` is throttled to one *touch* per five minutes **across page loads** — and a
   touch is TWO writes, not one: `setLastActive` stamps `users/{uid}` and then
   `discovery/{uid}`, because the projection carries `lastActiveAt` too and every other deck
-  ranks on it. `store-tests/specs/03-writes.store.js` executes the timing; the count is
-  `specs/19-write-cost.store.js`'s business. The throttle exists because
+  ranks on it. `store-tests/specs/03-writes.store.js` executes the timing, and
+  `specs/21-navigation-cost.store.js` the count. This used to hand the count to
+  `specs/19-write-cost.store.js`, which has never called `touchActive` — so "two writes" was
+  a sentence until it was moved somewhere that runs it. The throttle exists because
   `lastActiveAt` feeds the activity score but is not worth a write per navigation. It is
   called on every auth resolution and on every page that resolves a user, so without the
   throttle a browsing session is one Firestore write per navigation.

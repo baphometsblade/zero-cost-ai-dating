@@ -153,6 +153,45 @@ module.exports = {
     t.check('and costs exactly what it cost before, with twice the history behind it',
       second.reads === first.reads && second.reads >= PENDING,
       first.reads + ' reads at ' + HISTORY + ' swipes, ' + second.reads + ' at ' + (HISTORY + MORE_HISTORY));
+
+    /* ---- whether each liker was answered, asked in batches --------------- */
+
+    // `pendingOf` asked one `get` per liker, and a liker still waiting is one
+    // whose answer document does not exist — so each person waiting cost a read
+    // to learn they were waiting. The old shape was the senders, the account,
+    // a lookup EACH, and the profiles. Anything at or above that has gone back.
+    const senders = PENDING + ANSWERED;
+    const perLiker = senders + 1 + senders + PENDING;
+    t.check('the answered-lookup is batched: fewer reads than one lookup per liker would cost',
+      first.reads < perLiker && first.reads >= PENDING,
+      first.reads + ' reads, against ' + perLiker + ' for one lookup per liker');
+
+    /* ---- the free plan's panel: a number, and nobody's profile ------------- */
+
+    // matches.html on the free plan draws placeholder faces beside "free
+    // accounts never receive the real ones" — and it used to get its number from
+    // `getLikesReceived(...).length`, which reads every waiting liker's profile
+    // and keeps it in the face cache for five minutes. `countLikesReceived` is
+    // that without its last step.
+    const count = await measure(k, function () { return k.store.countLikesReceived(me); });
+    const cachedAfterCount = globalThis.localStorage.getItem(k.store.KEYS.profiles);
+    const list = await measure(k, function () { return k.store.getLikesReceived(me); });
+    const cachedAfterList = globalThis.localStorage.getItem(k.store.KEYS.profiles);
+    k.ctx.drainWarnings();
+
+    t.check('the free count agrees with the list it replaces',
+      count.value === PENDING && (list.value || []).length === PENDING,
+      'count ' + count.value + ', list ' + (list.value || []).length);
+    t.check('and reads everything the list reads EXCEPT the profiles — one fewer per person waiting',
+      count.reads === list.reads - PENDING,
+      'count ' + count.reads + ' read(s), list ' + list.reads + ', ' + PENDING + ' profiles');
+    // The control comes second in the condition and first in importance: if the
+    // list did not fill the cache either, "the count left it empty" would be a
+    // measurement of nothing.
+    t.check('and leaves no profile behind in the face cache, where the list leaves every one',
+      !cachedAfterCount && !!cachedAfterList && cachedAfterList.indexOf(pending[0]) !== -1,
+      'after count: ' + (cachedAfterCount ? cachedAfterCount.length + ' bytes' : 'empty') +
+      '; after list: ' + (cachedAfterList ? cachedAfterList.length + ' bytes' : 'empty'));
   }
 };
 

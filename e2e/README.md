@@ -91,7 +91,7 @@ from.
 | Path | What it is |
 | --- | --- |
 | `run.js` | the runner: loads specs, opens a context per spec and viewport, prints results, exits non-zero on any failure |
-| `harness.js` | finding Playwright, serving `public/` the way Firebase Hosting does (clean URLs), optionally forwarding the emulators' paths through that same origin, opening a browser session, and the page steps every spec shares |
+| `harness.js` | finding Playwright, serving `public/` the way Firebase Hosting does — both halves of `cleanUrls`, the extensionless page AND the 301 for a path that names the `.html`, which it used to skip — optionally forwarding the emulators' paths through that same origin, opening a browser session, and the page steps every spec shares |
 
 One flow per spec, run in file-name order. `tests/docs.test.js` fails if a spec exists
 without a row here, so this list cannot quietly fall behind `specs/`.
@@ -118,6 +118,12 @@ Two optional exports: `session`, the options its browser context wants (see
 `harness.openSession`), and `available()`, which returns `{ ok, why }` — a spec whose
 requirements are missing is skipped by name and reason, and records nothing at all, so a
 run that could not test something never reports a check for it.
+
+Waiting for a page by URL goes through `harness.pageUrl(name)`, never a `'**/dashboard.html'`
+glob. The app links with relative `.html` URLs, so on GitHub Pages the address bar ends in
+`.html` — and on Firebase Hosting it never does, because the 301 lands on `/dashboard`. Every
+wait in this suite used to name the one shape production never shows, and passed only
+because this server did not redirect.
 
 Two things are load-bearing about the naming. Specs are `*.e2e.js` and live outside
 `tests/`, because `npm test` is `node --test` from the repo root and anything it discovers

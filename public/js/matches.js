@@ -501,12 +501,23 @@
   async function renderLikes() {
     if (!dom.likesCard || !dom.likesBody || !state.me) return;
     try {
-      const received = await ZC.store.getLikesReceived(state.me.uid);
-      const likes = Array.isArray(received) ? received : [];
+      // The plan is decided BEFORE anything is read. This used to fetch every
+      // waiting liker's profile on every plan and then, on free, draw only
+      // `likes.length` as placeholders — beside the sentence "free accounts
+      // never receive the real ones". They were received: read, billed, and
+      // written into the face cache for five minutes. A free account asks for
+      // a number now, and gets one.
       const unlocked = canSeeLikes();
+      let body;
+      if (unlocked) {
+        const received = await ZC.store.getLikesReceived(state.me.uid);
+        body = likesUnlocked(Array.isArray(received) ? received : []);
+      } else {
+        body = likesLocked(Math.max(0, Number(await ZC.store.countLikesReceived(state.me.uid)) || 0));
+      }
       show(dom.likesCard, true);
       show(dom.likesBadge, !unlocked);
-      fill(dom.likesBody, unlocked ? likesUnlocked(likes) : likesLocked(likes.length));
+      fill(dom.likesBody, body);
     } catch (err) {
       // A panel that cannot load simply does not appear; it is never the point
       // of the page.
@@ -988,6 +999,13 @@
     }
 
     stopListening();
+    // Before anything else: if the previous conversation was ended under the
+    // reader, its composer was disabled, and opening ANOTHER one straight from
+    // the list — the desktop layout keeps the list beside the thread, so that is
+    // one click — never undid it. Only `closeMatch` did, and this path does not
+    // go through it. The next conversation opened with a textarea nobody could
+    // type into and nothing on screen to say why.
+    reopenComposer();
     state.active = match;
     state.rendered = [];
     state.lastDay = null;
@@ -1021,11 +1039,6 @@
   }
 
   /**
-   * Close the open conversation and go back to the list.
-   * @param {boolean} [keepFocus=false] skip moving focus (used when unmatching)
-   * @returns {void}
-   */
-  /**
    * The other side ended this conversation while it was open.
    *
    * Not `closeMatch()`, and the difference is three measured harms. `closeMatch`
@@ -1036,7 +1049,9 @@
    * write the rules will now refuse.
    *
    * So: keep the header, keep what they typed, stop the listener, say what
-   * happened, and disable sending. Back or Escape closes it normally from there.
+   * happened, and disable sending. Back or Escape closes it normally from there,
+   * and opening another conversation from the list replaces it; both go through
+   * `reopenComposer`.
    * @returns {void}
    */
   function endActiveConversation() {
@@ -1066,10 +1081,25 @@
     announce('That conversation has ended.');
   }
 
-  function closeMatch(keepFocus) {
-    const had = state.active;
+  /**
+   * Undo what `endActiveConversation` did to the composer. Every way of leaving
+   * an ended conversation goes through here — closing it, or opening another —
+   * so there is one place that knows what "not ended" means.
+   * @returns {void}
+   */
+  function reopenComposer() {
     state.ended = false;
     if (dom.input) dom.input.disabled = false;
+  }
+
+  /**
+   * Close the open conversation and go back to the list.
+   * @param {boolean} [keepFocus=false] skip moving focus (used when unmatching)
+   * @returns {void}
+   */
+  function closeMatch(keepFocus) {
+    const had = state.active;
+    reopenComposer();
     stopListening();
     stopStampTicker();
     state.active = null;
@@ -1437,6 +1467,15 @@
       }
     }
 
+    // A delivery is proof the list is live, whichever subscription brought it.
+    // The error used to be cleared only in `firstViews`, which runs once per
+    // page — so a list that loaded, lost its stream, and came back on focus
+    // painted its fresh rows underneath an error panel that never went away:
+    // `renderList` hides the list whenever `state.error` is set.
+    if (state.gotFirst && state.error) {
+      state.error = null;
+      announce('Your matches are back.');
+    }
     if (!state.gotFirst) firstViews();
     renderList();
   }

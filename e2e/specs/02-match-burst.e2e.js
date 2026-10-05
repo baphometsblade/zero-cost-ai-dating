@@ -48,7 +48,7 @@ module.exports = {
     // Taking an opener must land in the conversation with that text ready to send.
     const chosen = burst.lines[0];
     await page.locator('.match-burst .icebreaker').first().click();
-    await page.waitForURL('**/matches.html*');
+    await page.waitForURL(h.pageUrl('matches'));
     await page.waitForSelector('#chat:not(.hidden)');
     const draft = await page.inputValue('#chat-input');
     t.check('the chosen opener arrives pre-filled in the composer', draft === chosen, draft);

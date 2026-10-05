@@ -66,6 +66,80 @@ module.exports = {
     t.check('but a link of ordinary length still goes on',
       badgeAfterGood !== badgeBefore, badgeBefore + ' → ' + badgeAfterGood);
 
+    /* ---- the city picker's placeholder ---- */
+
+    // "Choose a city…" carries the value '', and `Number('')` is 0 — the index
+    // of Portland, OR. Choosing it moved the account to Portland. The field's own
+    // hint tells people to "leave this blank" if their city is not listed, which
+    // was an instruction to trigger exactly that. Seattle first, so the bug has
+    // something to overwrite: starting from Portland would hide it.
+    await page.selectOption('#select-city', { label: 'Seattle, WA' });
+    const picked = await page.inputValue('#input-location');
+    await page.selectOption('#select-city', '');
+    const afterBlank = {
+      label: await page.inputValue('#input-location'),
+      picker: await page.evaluate(function () {
+        const select = document.getElementById('select-city');
+        return select.options[select.selectedIndex] ? select.options[select.selectedIndex].text : '';
+      }),
+      status: (await page.textContent('#location-status')).trim()
+    };
+    t.check('picking a city fills the location', picked === 'Seattle, WA', picked);
+    t.check('choosing "Choose a city…" afterwards leaves the location alone — it does not become Portland',
+      afterBlank.label === 'Seattle, WA' && !/45\.5/.test(afterBlank.status), JSON.stringify(afterBlank));
+    t.check('and the picker goes back to naming the city the location still is',
+      afterBlank.picker === 'Seattle, WA', afterBlank.picker);
+
+    /* ---- a save while the interest list is missing ---- */
+
+    // Loading filters the stored interests through the list seed-data.js
+    // publishes, so when that one file does not arrive `state.interests` comes
+    // out empty — not because the person has none, but because nothing could
+    // recognise them. The page says so ("interests cannot be edited right now")
+    // and then wrote the empty list back on any save: change a bio, lose every
+    // interest. Blocked for exactly one page load, then read back from the store.
+    const storedBefore = await page.evaluate(async function () {
+      const doc = await window.ZC.store.getUser(window.ZC.auth.current.uid);
+      return (doc && doc.profile && doc.profile.interests) || [];
+    });
+    // The page is controlled by the service worker, and a worker's own fetches
+    // never reach Playwright's routing — measured: zero hits, with the real
+    // file served. So the worker is unregistered first, which leaves the NEXT
+    // navigation uncontrolled (app.js registers again on it, but a page is only
+    // controlled from the one after). Fulfilled rather than aborted, so nothing
+    // has to be excused as a network error: a script that loads and publishes
+    // nothing is the state under test.
+    await page.evaluate(function () {
+      return navigator.serviceWorker.getRegistrations().then(function (regs) {
+        return Promise.all(regs.map(function (reg) { return reg.unregister(); }));
+      });
+    });
+    let seedRequests = 0;
+    const missingSeed = function (route) {
+      seedRequests += 1;
+      return route.fulfill({ status: 200, contentType: 'text/javascript', body: '/* the interest list did not arrive */' });
+    };
+    await page.context().route('**/js/seed-data.js', missingSeed);
+    await page.goto(ctx.base + '/profile.html', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#profile-main:not(.hidden)');
+    const missingNotice = /could not be loaded/i.test(await page.textContent('#interest-groups'));
+    await page.fill('#input-bio', (await page.inputValue('#input-bio')) + ' And one more line.');
+    await page.click('#save-btn');
+    await page.waitForFunction(function () {
+      return /saved|could not/i.test(document.getElementById('save-status').textContent);
+    });
+    await page.context().unroute('**/js/seed-data.js', missingSeed);
+    const storedAfter = await page.evaluate(async function () {
+      const doc = await window.ZC.store.getUser(window.ZC.auth.current.uid);
+      return (doc && doc.profile && doc.profile.interests) || [];
+    });
+    t.check('a save made while the interest list is missing leaves the stored interests alone',
+      missingNotice && seedRequests > 0 && storedBefore.length > 0 &&
+      JSON.stringify(storedAfter) === JSON.stringify(storedBefore),
+      (missingNotice ? '' : 'the missing-list notice never showed (' + seedRequests +
+        ' routed request(s)), so this tested nothing — ') +
+      storedBefore.length + ' interest(s) before, ' + storedAfter.length + ' after');
+
     /* ---- settings ---- */
     await page.goto(ctx.base + '/settings.html', { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#theme-group');

@@ -144,3 +144,169 @@ test('sw.js derives BASE and hard-codes no root-anchored path literals', functio
 
   assert.equal(problems.length, 0, report('Root-hosting assumptions in sw.js:', problems));
 });
+
+/* ------------------------------------------------------------------------
+   The worker itself, run rather than read
+
+   Everything above inspects sw.js as text. These run it: the shipped file is
+   evaluated in a `vm` context with a stand-in `caches` and `fetch`, and its own
+   install, activate and fetch handlers are fired. Three defects lived in this
+   file at once and none of them was visible to a string check:
+
+     - on Firebase Hosting every precached page arrived REDIRECTED (cleanUrls
+       answers `x.html` with a 301), and a browser turns a redirected response
+       handed to a navigation into a network error — so offline navigation
+       failed on every page of the production host;
+     - `activate` deleted every cache on the origin, and GitHub Pages puts every
+       project site a user publishes on one origin;
+     - the runtime write's promise was dropped, so a failed `cache.put` escaped
+       its `.catch` as an unhandled rejection.
+   ------------------------------------------------------------------------ */
+
+const vm = require('node:vm');
+
+/** A fetched response as the worker sees it, redirected or not. */
+function fakeResponse(body, opts) {
+  const o = opts || {};
+  const res = {
+    ok: o.ok === undefined ? true : o.ok,
+    status: o.status || 200,
+    statusText: o.statusText || 'OK',
+    redirected: !!o.redirected,
+    headers: new Headers({ 'content-type': 'text/html; charset=utf-8' }),
+    blob: function () { return Promise.resolve(new Blob([body])); },
+    text: function () { return Promise.resolve(body); }
+  };
+  res.clone = function () { return fakeResponse(body, o); };
+  return res;
+}
+
+/**
+ * Evaluate the shipped sw.js against stand-ins, and hand back what it did.
+ * @param {Object} opts `fetch(path)` to answer requests; `putFails` to make
+ *   every cache write reject; `existing` cache names already on the origin
+ * @returns {Object} the caches it left, the names it deleted, and `fire(type, event)`
+ */
+function runWorker(opts) {
+  const o = opts || {};
+  const listeners = {};
+  const stores = new Map();
+  (o.existing || []).forEach(function (name) { stores.set(name, new Map()); });
+  const deleted = [];
+  const origin = 'https://example.test';
+  function keyOf(req) {
+    return new URL(typeof req === 'string' ? req : req.url, origin + '/').href;
+  }
+  const caches = {
+    open: function (name) {
+      if (!stores.has(name)) stores.set(name, new Map());
+      const store = stores.get(name);
+      return Promise.resolve({
+        put: function (req, res) {
+          if (o.putFails) return Promise.reject(new Error('QuotaExceededError'));
+          store.set(keyOf(req), res);
+          return Promise.resolve();
+        },
+        match: function (req) { return Promise.resolve(store.get(keyOf(req))); }
+      });
+    },
+    keys: function () { return Promise.resolve(Array.from(stores.keys())); },
+    delete: function (name) { deleted.push(name); return Promise.resolve(stores.delete(name)); },
+    match: function (req) {
+      const key = keyOf(req);
+      for (const store of stores.values()) if (store.has(key)) return Promise.resolve(store.get(key));
+      return Promise.resolve(undefined);
+    }
+  };
+  const self = {
+    location: new URL(origin + '/sw.js'),
+    addEventListener: function (type, fn) { listeners[type] = fn; },
+    skipWaiting: function () { return Promise.resolve(); },
+    clients: { claim: function () { return Promise.resolve(); } }
+  };
+  const context = vm.createContext({
+    self: self, caches: caches, Response: Response, URL: URL, Blob: Blob, Headers: Headers,
+    fetch: function (req) { return Promise.resolve(o.fetch(typeof req === 'string' ? req : req.url)); }
+  });
+  vm.runInContext(fs.readFileSync(SW_PATH, 'utf8'), context, { filename: SW_PATH });
+  return {
+    stores: stores,
+    deleted: deleted,
+    cacheName: vm.runInContext('CACHE', context),
+    core: vm.runInContext('CORE', context),
+    fire: function (type, extra) {
+      let pending = null;
+      const event = Object.assign({
+        waitUntil: function (p) { pending = p; },
+        respondWith: function (p) { pending = p; }
+      }, extra || {});
+      listeners[type](event);
+      return pending;
+    }
+  };
+}
+
+test('install stores every page WITHOUT its redirect, so a navigation may be served it', async function () {
+  // What Firebase Hosting hands back for `dashboard.html`: the page, but as the
+  // answer to a 301.
+  const worker = runWorker({
+    fetch: function (url) { return fakeResponse('<!doctype html>' + url, { redirected: true }); }
+  });
+  await worker.fire('install');
+
+  const shell = worker.stores.get(worker.cacheName);
+  assert.ok(shell, 'install opened no cache named ' + worker.cacheName);
+  const pages = worker.core.filter(function (file) { return /\.html$/.test(file); });
+  assert.ok(pages.length >= 7, 'expected the precache list to name the pages, found ' + pages.length);
+  for (const file of pages) {
+    const stored = shell.get('https://example.test/' + file);
+    assert.ok(stored, file + ' was not precached');
+    assert.equal(stored.redirected, false, file + ' was stored as a redirected response');
+    assert.equal(stored.status, 200, file + ' lost its status');
+    assert.equal(await stored.text(), '<!doctype html>' + file, file + ' lost its body');
+  }
+});
+
+test('install still fails as a whole when any shell asset is not a success', async function () {
+  // The rule cache.addAll applied, kept on purpose: a half-precached shell must
+  // not activate and then delete the old, working one.
+  const worker = runWorker({
+    fetch: function (url) {
+      return /matches\.html$/.test(url) ? fakeResponse('gone', { ok: false, status: 404 }) : fakeResponse('ok');
+    }
+  });
+  await assert.rejects(worker.fire('install'), /matches\.html answered 404/);
+});
+
+test('activate retires only this app\'s older shells, never another project\'s caches', async function () {
+  const worker = runWorker({
+    fetch: function () { return fakeResponse('ok'); },
+    existing: ['zc-static-v1', 'zc-static-v2', 'another-project-offline', 'workbox-precache-v2']
+  });
+  await worker.fire('install');
+  await worker.fire('activate');
+
+  assert.deepEqual(worker.deleted.slice().sort(), ['zc-static-v1', 'zc-static-v2'],
+    'activate deleted ' + JSON.stringify(worker.deleted));
+  assert.ok(worker.stores.has('another-project-offline'), 'a sibling project\'s cache was deleted');
+  assert.ok(worker.stores.has('workbox-precache-v2'), 'a sibling project\'s cache was deleted');
+  assert.ok(worker.stores.has(worker.cacheName), 'the current shell was deleted');
+});
+
+test('a failed runtime cache write is caught, not left as an unhandled rejection', async function () {
+  const unhandled = [];
+  function onUnhandled(reason) { unhandled.push(reason); }
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const worker = runWorker({ fetch: function () { return fakeResponse('live'); }, putFails: true });
+    const answered = await worker.fire('fetch', {
+      request: { method: 'GET', url: 'https://example.test/matches', mode: 'navigate' }
+    });
+    assert.equal(await answered.text(), 'live', 'the live response must still be served');
+    // Unhandled rejections are reported after the microtask queue drains.
+    await new Promise(function (resolve) { setTimeout(resolve, 20); });
+  } finally {
+    process.removeListener('unhandledRejection', onUnhandled);
+  }
+  assert.deepEqual(unhandled.map(String), [], 'a cache write failure escaped');
+});

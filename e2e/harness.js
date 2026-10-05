@@ -77,9 +77,11 @@ function isFile(candidate) {
 }
 
 /**
- * Map a request path to a file on disk, honouring the `cleanUrls: true` in
- * firebase.json — `/matches` must serve matches.html, or the service worker's
- * offline fallbacks would be tested against a URL shape that never ships.
+ * Map a request path to a file on disk — the half of `cleanUrls: true` in
+ * firebase.json that serves `/matches` as matches.html, or the service worker's
+ * offline fallbacks would be tested against a URL shape that never ships. The
+ * other half, the 301 for a path that names the `.html`, is in the request
+ * handler below.
  * @param {string} root directory to serve from
  * @param {string} pathname the request pathname, already decoded
  * @returns {string|null} an absolute file path, or null when nothing matches
@@ -241,6 +243,27 @@ async function startServer(root, opts) {
     // on — a spec must not go green against a URL shape production redirects.
     if (mount && pathname === mount) {
       res.writeHead(301, { location: mount + '/' });
+      res.end();
+      return;
+    }
+    // The other half of `cleanUrls: true`, and the half this server did not
+    // implement. Serving `/matches` as matches.html is one behaviour; the other
+    // is that Hosting REDIRECTS a request that names the file. Superstatic, the
+    // engine Firebase Hosting runs: "If `.html` is used at the end of a
+    // filename, it will perform a 301 redirect to the same path with `.html`
+    // dropped." So in production every `.html` in the service worker's precache
+    // list arrives as a redirected response — and a redirected response is one a
+    // worker may not hand to a navigation. Answering them with a plain 200 here
+    // meant `07-offline` could only ever test a host this app is not deployed to.
+    //
+    // Only at the root, which is the Firebase shape. Under a mount this server is
+    // GitHub Pages, and Pages serves `dashboard.html` as it is.
+    // The query survives the redirect: the app's own sign-up link is
+    // `auth.html?mode=signup`, which could not work on Hosting otherwise.
+    if (!mount && /\.html$/.test(pathname) && resolveFile(dir, pathname)) {
+      let search = '';
+      try { search = new URL(req.url, 'http://127.0.0.1').search; } catch (err) { search = ''; }
+      res.writeHead(301, { location: pathname.replace(/\.html$/, '') + search });
       res.end();
       return;
     }
@@ -523,6 +546,26 @@ async function openSession(browser, viewport, opts) {
    -------------------------------------------------------------------------- */
 
 /**
+ * A URL test for one page that holds on BOTH hosts this app ships to.
+ *
+ * The app navigates with relative `.html` links, so on GitHub Pages — and under
+ * `npm run serve` — the address bar ends `dashboard.html`. On Firebase Hosting
+ * it never does: `cleanUrls` answers the `.html` with a 301, and the browser
+ * lands on `/dashboard`. Every wait in this suite used to be written as
+ * `'**' + '/dashboard.html'`, which is the one shape production never shows, and
+ * only passed because the test server did not redirect.
+ *
+ * Matches the page name as a whole path segment, with or without `.html`,
+ * followed by the end of the path, a query or a fragment — so `matches` does not
+ * also match `matches-old` or `/no-matches`.
+ * @param {string} name the page, without extension: 'dashboard', 'auth', …
+ * @returns {RegExp} for page.waitForURL or a url.href test
+ */
+function pageUrl(name) {
+  return new RegExp('/' + name + '(?:\\.html)?(?:[?#]|$)');
+}
+
+/**
  * Land on the marketing page, take the demo route in, and wait until the deck
  * has actually rendered a card. Almost every spec starts here.
  * @param {Object} page a Playwright Page
@@ -533,7 +576,7 @@ async function signIn(page, base) {
   await page.goto(base + '/index.html', { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('[data-cta="demo"]:not(.hidden)');
   await page.click('[data-cta="demo"]');
-  await page.waitForURL('**/dashboard.html');
+  await page.waitForURL(pageUrl('dashboard'));
   await page.waitForSelector('#deck-stack .swipe-card');
 }
 
@@ -599,6 +642,7 @@ module.exports = {
   loadPlaywright: loadPlaywright,
   startServer: startServer,
   openSession: openSession,
+  pageUrl: pageUrl,
   signIn: signIn,
   topCardName: topCardName,
   pressDeckKey: pressDeckKey,
