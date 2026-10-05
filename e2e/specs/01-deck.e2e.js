@@ -13,7 +13,7 @@ module.exports = {
     t.check('landing offers the demo sign-in', true);
 
     await page.click('[data-cta="demo"]');
-    await page.waitForURL('**/dashboard.html');
+    await page.waitForURL(h.pageUrl('dashboard'));
     await page.waitForSelector('#deck-stack .swipe-card');
 
     const card = await page.evaluate(function () {

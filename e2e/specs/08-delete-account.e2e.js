@@ -25,12 +25,12 @@ module.exports = {
       await page.locator('#delete-account').isEnabled());
 
     await page.click('#delete-account');
-    await page.waitForURL('**/index.html');
+    await page.waitForURL(h.pageUrl('index'));
     t.check('deleting the account returns you to the landing page', true, page.url().split('/').pop());
 
     // Nothing may survive: the guard on a signed-in page has to turn you away.
     await page.goto(ctx.base + '/dashboard.html', { waitUntil: 'domcontentloaded' });
-    await page.waitForURL(/auth\.html/);
+    await page.waitForURL(h.pageUrl('auth'));
     t.check('the deleted account can no longer reach the deck', true, page.url().split('/').pop());
   }
 };

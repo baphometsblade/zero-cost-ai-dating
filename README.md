@@ -248,7 +248,7 @@ npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.
 
 ### Unit suites
 
-Fourteen suites on Node's built-in runner — **258 checks**, no install, no browser, seconds:
+Fourteen suites on Node's built-in runner — **267 checks**, no install, no browser, seconds:
 
 | Suite | What it pins down |
 | --- | --- |
@@ -274,7 +274,7 @@ store and its daily counter, the auth backend, the pure half of the utilities, t
 schema, the static HTML. It cannot reach the flows that only exist in a DOM — signing in,
 the deck and its keyboard, the match burst, chat that persists, reporting someone, deleting
 your account, and the service worker serving the app with the network gone. Those live in
-`e2e/`: **260 checks** across the twelve specs that need nothing installed but a browser, each
+`e2e/`: **275 checks** across the twelve specs that need nothing installed but a browser, each
 run at 390x844 and most of them at 1280x800 as well — plus a thirteenth, `10-firebase.e2e.js`,
 which needs the Firebase emulators and skips, by name and reason, when they are not running.
 
@@ -297,7 +297,7 @@ Firebase rather than `localStorage`: the real SDK, real Auth, real Firestore, an
 read back out of the emulator instead of off the page. It drives the pages **with their real
 CSP meta tag** — the emulators are reached through the page's own origin rather than by
 relaxing the policy, which is the whole reason it can exist; the Limitations section explains
-the constraint it is working around. With both emulators up the run is **279 checks**, all
+the constraint it is working around. With both emulators up the run is **294 checks**, all
 passing.
 
 It did not start that way. On its first run one check was red, and it had found a real bug:
@@ -309,7 +309,7 @@ fixture in `rules-tests/` ever used a null there. The rule now accepts null, and
 checks pin the shape.
 
 Without an emulator the runner prints `SKIP` and records nothing, so `npm run test:e2e` on a
-bare machine is still 260/260 — and CI runs it both ways, so the skip path and the emulator
+bare machine is still 275/275 — and CI runs it both ways, so the skip path and the emulator
 path are each exercised on every push.
 
 ### Security rules tests
@@ -337,7 +337,7 @@ The daily usage counter is the one piece of client logic where reading the code 
 as weak an argument as it was for the rules: whether two concurrent bumps collapse into one
 is a property of a real database, not of anything visible in the file. `store-tests/` loads
 the **shipped** `public/js/data-store.js` into Node — `window` aliased to `globalThis`,
-`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **211
+`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **228
 checks**, including 20 concurrent `bumpUsage` calls on one document storing exactly 20, the
 midnight roll-over happening inside the same transaction, a bump writing `usage` and nothing
 else, 30 swipes replaying the deck's real learning-save-then-bump ordering and storing exactly
@@ -347,7 +347,7 @@ underneath it when it is finally unmatched, a page load whose bill is counted
 document by document and has to come out the same against a swipe history twice as long — and
 a match document the rules refuse, which has to come back as "no match" rather than as a
 swipe the deck believes it lost, and the messaging and abuse-report paths — fifteen of the
-thirty-four facade methods had never run against a real Firestore at all, so the documents
+thirty-five facade methods had never run against a real Firestore at all, so the documents
 the adapter writes had never met the rules that judge them. And, in both directions, the two documents an account is
 split across: the counter the transaction stores and the projection the profile save
 publishes are each replayed against the real `firestore.rules` on a separate project, because
@@ -414,7 +414,7 @@ of its own, so a failed download reads as infrastructure rather than as a red te
 than either suite does. The `e2e` job runs the browser suite twice: once bare, which is what
 a contributor with nothing installed gets and which proves the Firebase spec skips rather
 than silently passing, and once inside `emulators:exec`, which is the only run in which every
-spec executes and therefore the only one that can hold the 279-check total to account. There are no secrets and no deploy step — deploying stays a
+spec executes and therefore the only one that can hold the 294-check total to account. There are no secrets and no deploy step — deploying stays a
 deliberate local `npm run deploy`.
 
 ---
@@ -513,6 +513,26 @@ deliberate local `npm run deploy`.
 
 These are real, and worth knowing before you show this to anyone:
 
+- **Offline mode did not work on the host this app ships to, until it was tested there.**
+  `firebase.json` turns on `cleanUrls`, and Firebase Hosting answers every request for
+  `something.html` with a **301** to `something`. The service worker precached the shell by
+  those `.html` names, so every page it stored was a *redirected* response — and a browser
+  will not let a worker answer a navigation with one: it becomes a network error. So the
+  shell was cached, and every attempt to serve it offline failed, on every page. It went
+  unseen for as long as offline mode existed because the e2e server answered `.html` with a
+  plain 200, which Hosting never does; `e2e/specs/07-offline.e2e.js` was testing a host this
+  app is not deployed to, and one of its checks passed on its own error message — the text
+  `net::ERR_FAILED at …/matches` contains the word it was looking for. The server now
+  redirects the way Hosting does (`superstatic`, the engine it runs, documents the 301), the
+  worker stores each page without its redirect, and the spec fails against the old worker
+  on all four of its navigation checks. A rebuilt page also drops `content-encoding` and
+  `content-length`: `blob()` returns decoded bytes, so a gzipped page was being stored as
+  "gzip, 2892 bytes" over 9,119 bytes of plain HTML — Chromium serves that, and nothing should
+  depend on every engine doing so. Two more things in the same file went with it:
+  `activate` deleted every cache on the origin — on GitHub Pages every project site a user
+  publishes shares one, so the cache name now carries the deployment's path and cleanup
+  stays inside it — and a failed runtime cache write escaped its `.catch` as an unhandled
+  rejection. `tests/pwa.test.js` now runs the worker itself, not just reads it.
 - **Blocking stops contact, not visibility — and only the rules make even that true.**
   Your block list lives in your private `users/{uid}` document and is deliberately left
   out of the public `discovery/{uid}` projection, because publishing who somebody has
@@ -612,11 +632,23 @@ These are real, and worth knowing before you show this to anyone:
   passed on them. `recordSwipe` already knows it answered them, so it says so directly,
   which costs no read at all; a stranger newly liking you costs three, whether eight people
   were already waiting or eight hundred.
-  What is left is not zero and is worth knowing: the first subscription costs one read per
-  match and two per person waiting, and every reconnect — a dropped network, a browser
-  discarding a background tab — pays that again. That is bounded by the size of a social
-  graph and spent when something actually happened, which is the shape a free tier can
-  carry.
+  What is left is not zero, and it is paid more often than this paragraph used to say. It
+  said the first subscription costs one read per match and two per person waiting, and that
+  every reconnect pays that again. Both halves were true, and the second was the smaller
+  one: **"first" means first on this page**, and every page here is its own HTML document
+  with a fresh SDK, so every *navigation* is a first subscription. Before a page does
+  anything of its own it resolves the account and subscribes the nav badge, which comes to
+  **`1 + max(1, N)` reads for N conversations, on every page load** — seventeen at sixteen
+  conversations, which is about 2,900 page loads a day for the entire deployment before
+  anything else reads at all. `store-tests/specs/21-navigation-cost.store.js` pins that
+  floor as what it is rather than as a virtue, so a change to it in either direction has to
+  be made on purpose, and says what a fix would take: the badge only needs the conversations
+  with something unread, and nothing can query a match document for that today.
+  The premium half was cheaper to fix, and is fixed. The likes listener paid two reads per
+  person waiting — their like, and then a `get` to learn whether it had been answered — and
+  the second was a read of a document that, for a like still waiting, by definition does not
+  exist. It now asks through the same batched lookup the deck uses, ten people at a time:
+  nine people waiting went from nineteen reads on every page to eleven.
 
   One part of it was being paid over and over, and is not any more. Every page here is its
   own HTML document, so the per-page memo behind the faces starts empty on every navigation:
@@ -641,6 +673,15 @@ These are real, and worth knowing before you show this to anyone:
   enforce them on. A determined user with devtools can bypass any of it. The rules stop data
   *corruption* and cross-user reads; they do not — and on Spark cannot — implement rate limits
   or entitlement checks.
+  Who liked you is the clearest case, and it was weaker than that sentence admitted. The rules
+  let anyone read the likes aimed at them, so a free user with devtools can always find out.
+  But the app was doing it for them: on the free plan, `matches.html` drew placeholder faces
+  beside "free accounts never receive the real ones" while fetching every one of those
+  profiles and keeping them in `localStorage` for five minutes — it only needed the number.
+  It asks `countLikesReceived` for the number now, which reads no profile at all;
+  `store-tests/specs/09-read-cost.store.js` checks the count reads exactly one document fewer
+  per person waiting than the list, and leaves the face cache empty where the list fills it.
+  So the sentence on the page is true of the page. It is not a lock.
 - **The daily usage counter is atomic online, and only online.** It used to be a
   read-modify-write that two tabs could collapse into one increment. On the Firestore path a
   bump is now a single `runTransaction`: the user document is read *inside* the transaction, a

@@ -65,10 +65,18 @@ module.exports = {
       t.check('everyone still waiting is counted',
         seen[seen.length - 1] === WAITING, k.show(seen));
 
-      // The query itself, one lookup per sender, and one for the block list.
-      t.check('subscribing costs the senders plus one lookup each, and the blocks once',
-        tally.reads === WAITING * 2 + 1,
-        tally.reads + ' reads for ' + WAITING + ' waiting');
+      // The query itself, the block list once, and whether each sender was
+      // answered — asked ten at a time. This check used to pin "one lookup per
+      // sender", 2M + 1, and it was right about the code: a `get` per sender,
+      // each billed even though a waiting sender's answer is a document that
+      // does not exist. The lookup now goes through `alreadySwiped`, which bills
+      // what it finds with a floor of one per batch of ten, so everybody still
+      // waiting costs one read per ten of them. `specs/21-navigation-cost`
+      // carries the reason this matters: it is paid on every page, not once.
+      const lookups = Math.ceil(WAITING / 10);
+      t.check('subscribing costs the senders, the blocks once, and one lookup per ten senders',
+        tally.reads === WAITING + 1 + lookups,
+        tally.reads + ' reads for ' + WAITING + ' waiting (expected ' + (WAITING + 1 + lookups) + ')');
 
       /* ---- this client answering somebody ------------------------------- */
 
@@ -126,5 +134,63 @@ module.exports = {
       stop();
       k.ctx.ZC.firebase.db = real;
     }
+
+    /* ---- a stream that dies says so, and lets go ------------------------- */
+
+    // This listener took no error handler. When its stream died the store
+    // warned and stopped there, `app.js` kept holding the dead handle, and its
+    // `if (!likeStop)` refused every re-subscription for the life of the page —
+    // the defect `listenMatches` lost a round earlier, left on its sibling.
+    // Injected at the query, because this project runs open rules here and the
+    // emulator will not deny anything.
+    const broken = {
+      collection: function () {
+        const query = {
+          where: function () { return query; },
+          onSnapshot: function (next, onErr) {
+            setTimeout(function () { onErr(new Error('Missing or insufficient permissions.')); }, 0);
+            return function () { /* nothing to unsubscribe */ };
+          }
+        };
+        return query;
+      }
+    };
+    k.ctx.ZC.firebase.db = broken;
+    const deadSeen = [];
+    const deadErrors = [];
+    try {
+      // Deliberately never stopped: a caller told the stream is over lets go of
+      // the handle rather than calling it, which is exactly what app.js does.
+      k.store.listenLikesReceived(me, function (count) { deadSeen.push(count); },
+        function (err) { deadErrors.push(err); });
+      await settle(200);
+    } finally {
+      k.ctx.ZC.firebase.db = real;
+    }
+    k.ctx.drainWarnings();
+
+    t.check('a like stream that dies tells its caller, once, and delivers nothing',
+      deadErrors.length === 1 && deadSeen.length === 0,
+      deadErrors.length + ' error(s), ' + deadSeen.length + ' delivery(s)');
+
+    // The half a caller cannot do for itself. `recordSwipe` drives every live
+    // like watcher directly, so one whose stream had died — and whose caller,
+    // told to let go, never unsubscribed — would go on being handed counts.
+    await k.store.recordSwipe(me, likers[1], 'pass');
+    await settle(200);
+    k.ctx.drainWarnings();
+    t.check('and the dead watcher is retired: answering somebody afterwards reaches no one',
+      deadSeen.length === 0,
+      deadSeen.length + ' delivery(s) to a stream that had already died');
+
+    // And a fresh subscription afterwards works at all.
+    const retried = [];
+    const stopRetry = k.store.listenLikesReceived(me, function (count) { retried.push(count); });
+    await settle();
+    stopRetry();
+    k.ctx.drainWarnings();
+    t.check('and a fresh subscription after the failure counts again',
+      retried.length > 0 && retried[retried.length - 1] === WAITING,
+      k.show(retried));
   }
 };

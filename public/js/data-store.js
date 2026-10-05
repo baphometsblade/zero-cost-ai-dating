@@ -785,12 +785,23 @@
    * People who have liked this account and are still waiting for an answer, as
    * whole user documents. Shared by `getLikesReceived` and the live count, so
    * the badge and the list can never disagree about who is waiting.
+   *
+   * Reads both stores through `readJsonResult`, and says so when either could
+   * not be read. It used to read them through the forgiving helpers, which turn
+   * an unreadable store into an empty one — so a corrupt users entry came back
+   * as "nobody is waiting": a count of 0 on the free panel, `[]` on premium, and
+   * a live count of 0 with no error. The listener checked the swipes store and
+   * not this one, which is exactly the half that was found missing in review.
    * @param {string} uid the viewer
-   * @returns {Object[]} UserDocs
+   * @returns {Object[]|{fault: Error}} UserDocs, or the reason they could not be read
    */
   function pendingLikers(uid) {
-    const swipes = readSwipes();
-    const users = readUsers();
+    const swipesRead = readJsonResult(KEYS.swipes, {});
+    const usersRead = readJsonResult(KEYS.users, {});
+    if (!swipesRead.ok) return { fault: swipesRead.err || new Error('The stored swipes could not be read.') };
+    if (!usersRead.ok) return { fault: usersRead.err || new Error('The stored accounts could not be read.') };
+    const swipes = isPlainObject(swipesRead.value) ? swipesRead.value : {};
+    const users = isPlainObject(usersRead.value) ? usersRead.value : {};
     const me = users[uid] ? normalizeUser(users[uid]) : null;
     const myBlocks = me ? me.blocked : [];
     const out = [];
@@ -1198,7 +1209,18 @@
     },
 
     async getLikesReceived(uid) {
-      return pendingLikers(uid);
+      // A store that could not be read rejects, as a failed query does on the
+      // Firestore side — and matches.js hides a panel that cannot load rather
+      // than telling somebody nobody liked them.
+      const pending = pendingLikers(uid);
+      if (!Array.isArray(pending)) throw pending.fault;
+      return pending;
+    },
+
+    async countLikesReceived(uid) {
+      const pending = pendingLikers(uid);
+      if (!Array.isArray(pending)) throw pending.fault;
+      return pending.length;
     },
 
     async getMatches(uid) {
@@ -1303,11 +1325,23 @@
       });
     },
 
-    listenLikesReceived(uid, cb) {
+    listenLikesReceived(uid, cb, onError) {
+      // The same terminal failure `listenMatches` reports, for the same reason:
+      // `pendingLikers` reads through the forgiving helpers, which turn an
+      // unreadable store into an empty one, so a broken store used to arrive here
+      // as a count of zero — a badge saying "nobody liked you" because it could
+      // not look. The Firestore side now says when its stream dies; this side
+      // has to fail the same way, or the two adapters lie in opposite directions.
       return listen({
         cb: cb,
-        snapshot: function () { return pendingLikers(uid).length; },
-        signature: function (count) { return String(count); }
+        onError: onError,
+        snapshot: function () {
+          const pending = pendingLikers(uid);
+          return Array.isArray(pending) ? pending.length : pending;
+        },
+        signature: function (value) {
+          return isPlainObject(value) && value.fault ? 'fault' : String(value);
+        }
       });
     },
 
@@ -2056,19 +2090,41 @@
    * to defend it — "it cannot do that one id at a time". It can, and it now
    * does: `alreadySwiped` asks by derived key, ten at a time, so the deck's bill
    * stopped growing with the history behind it as well.
+   *
+   * And so does this, which that paragraph used to imply and the code did not:
+   * it went on asking one `get` per liker after the deck had moved to batches.
+   * A `get` of a missing document is still a read, and a liker still waiting is
+   * one whose answer is missing — so every person waiting cost a read to learn
+   * they were waiting. Ten per key query now, billed by what is found.
    * @param {string} uid the viewer
    * @param {string[]} senders everyone who has liked them
    * @returns {Promise<string[]>} the uids still waiting for an answer
    */
+  /**
+   * Everyone who has liked or super-liked this account — answered or not.
+   * Shared by `getLikesReceived` and `countLikesReceived`, so the list and the
+   * count cannot be drawn from two different queries.
+   * @param {string} uid the viewer
+   * @returns {Promise<string[]>} sender uids
+   */
+  async function likeSenders(uid) {
+    let snap;
+    try {
+      snap = await db().collection('swipes').where('to', '==', uid).where('action', 'in', ['like', 'super']).get();
+    } catch (err) {
+      console.warn('[zc.store] "in" query unavailable, filtering client-side.', err);
+      snap = await db().collection('swipes').where('to', '==', uid).get();
+    }
+    return positiveSenders(snap);
+  }
+
   async function pendingOf(uid, senders) {
     if (!senders.length) return [];
     const me = await firestoreAdapter.getUser(uid);
     const myBlocks = me ? me.blocked : [];
     const unblocked = senders.filter(function (from) { return myBlocks.indexOf(from) === -1; });
-    const already = await Promise.all(unblocked.map(function (from) {
-      return db().collection('swipes').doc(swipeId(uid, from)).get();
-    }));
-    return unblocked.filter(function (from, index) { return !already[index].exists; });
+    const answered = await alreadySwiped(uid, unblocked);
+    return unblocked.filter(function (from) { return answered[from] !== true; });
   }
 
   /**
@@ -2546,17 +2602,8 @@
     },
 
     async getLikesReceived(uid) {
-      let snap;
-      try {
-        snap = await db().collection('swipes').where('to', '==', uid).where('action', 'in', ['like', 'super']).get();
-      } catch (err) {
-        console.warn('[zc.store] "in" query unavailable, filtering client-side.', err);
-        snap = await db().collection('swipes').where('to', '==', uid).get();
-      }
-      const senders = positiveSenders(snap);
-      if (!senders.length) return [];
-
-      const pending = await pendingOf(uid, senders);
+      const pending = await pendingOf(uid, await likeSenders(uid));
+      if (!pending.length) return [];
       const users = await fetchProfiles(pending);
       // No "and they have not blocked me" filter, because there cannot be one here.
       // These profiles come from `discovery/{uid}`, and projectDiscovery deliberately
@@ -2570,6 +2617,13 @@
       return pending
         .map(function (from) { return users[from]; })
         .filter(function (user) { return !!user; });
+    },
+
+    async countLikesReceived(uid) {
+      // `getLikesReceived` without its last step, which is the whole point:
+      // no `fetchProfiles`, so no profile is read, billed, or left behind in
+      // the face cache.
+      return (await pendingOf(uid, await likeSenders(uid))).length;
     },
 
     async getMatches(uid) {
@@ -2690,7 +2744,7 @@
       }
     },
 
-    listenLikesReceived(uid, cb) {
+    listenLikesReceived(uid, cb, onError) {
       // Whether each sender has been answered is remembered rather than
       // recomputed. The first delivery has to look them all up; after that only
       // a sender this account has not seen before costs a read, and a sender it
@@ -2716,6 +2770,24 @@
       };
       likeWatchers.push(watcher);
 
+      // A stream that has died is over, and so is its watcher. Retired here as
+      // well as in the unsubscribe below, because the caller is told to let go
+      // and may never call that: a watcher left in `likeWatchers` would go on
+      // being driven by `noteAnswered` and keep painting a dead stream's count.
+      // Then the caller is told — once, and asynchronously when it happens
+      // during the call itself, so a caller still assigning the handle hears it.
+      let died = false;
+      function die(err, later) {
+        if (died) return;
+        died = true;
+        watcher.stopped = true;
+        const index = likeWatchers.indexOf(watcher);
+        if (index !== -1) likeWatchers.splice(index, 1);
+        if (typeof onError !== 'function') return;
+        if (later) Promise.resolve().then(function () { onError(err); });
+        else onError(err);
+      }
+
       let stop = function () { /* nothing to unsubscribe */ };
       try {
         stop = db().collection('swipes')
@@ -2737,13 +2809,22 @@
             }
             // The block list is re-read only when there is a new sender to
             // judge, so a delivery that adds nobody costs nothing.
+            //
+            // Whether each sender was answered is asked in batches, through the
+            // same `alreadySwiped` the deck uses. It used to be one `get` per
+            // sender — and a `get` of a document that does not exist is still a
+            // read, while a PENDING like is by definition one whose answer does
+            // not exist. So the badge paid a full read per waiting person to
+            // learn that they were waiting: 1 + 2M on the first delivery of
+            // every page, for M people. A key query bills what it finds, with a
+            // floor of one per ten asked about; nobody answered costs one read
+            // per batch, not one per person. Measured in
+            // `store-tests/specs/21-navigation-cost.store.js`.
             firestoreAdapter.getUser(uid).then(function (me) {
               watcher.blocks = me ? me.blocked : [];
-              return Promise.all(unknown.map(function (from) {
-                return db().collection('swipes').doc(swipeId(uid, from)).get();
-              }));
-            }).then(function (snaps) {
-              unknown.forEach(function (from, index) { watcher.answered[from] = snaps[index].exists; });
+              return alreadySwiped(uid, unknown);
+            }).then(function (answered) {
+              unknown.forEach(function (from) { watcher.answered[from] = answered[from] === true; });
               watcher.deliver();
             }, function (err) {
               console.warn('[zc.store] Live like count failed.', err);
@@ -2754,10 +2835,18 @@
             // would mean holding two subscriptions and reconciling them. The
             // emulator and production both support `in`; a failure here means the
             // badge stops updating, not that anything is lost.
+            //
+            // Stops updating — and used to stop SILENTLY, with no way back. This
+            // listener took no error handler, so `app.js` kept holding the dead
+            // handle and its `if (!likeStop)` refused every re-subscription for the
+            // life of the page: the same defect `listenMatches` had and lost a
+            // round earlier, left behind on its sibling.
             console.warn('[zc.store] Live like stream failed.', err);
+            die(err, false);
           });
       } catch (err) {
         console.warn('[zc.store] Could not open the live like stream.', err);
+        die(err, true);
       }
       return function () {
         watcher.stopped = true;
@@ -3772,6 +3861,29 @@
     },
 
     /**
+     * HOW MANY people liked me and are still waiting — without who they are.
+     *
+     * For the free plan's who-liked-you panel, which shows a number and
+     * placeholder faces beside the sentence "free accounts never receive the
+     * real ones". It used to call `getLikesReceived` and use `.length`: every
+     * waiting liker's profile was read, billed, and written into the face cache
+     * in `localStorage` for five minutes, on an account that had just been told
+     * it never received them. This reads what the count needs and nothing more.
+     *
+     * The count can exceed `getLikesReceived().length` only when a liker has no
+     * public profile to fetch, which an account in a consistent state does not
+     * have: `createUser` writes the projection, and deleting an account deletes
+     * its swipes.
+     * @param {string} uid viewer id
+     * @returns {Promise<number>}
+     */
+    async countLikesReceived(uid) {
+      await ready;
+      if (!uid) return 0;
+      return adapter.countLikesReceived(uid);
+    },
+
+    /**
      * All of this user's matches as render-ready views, newest activity first.
      * @param {string} uid viewer id
      * @returns {Promise<Object[]>} MatchViews
@@ -3928,9 +4040,9 @@
      * @param {Function} cb called with the count on every change
      * @returns {Function} unsubscribe
      */
-    listenLikesReceived(uid, cb) {
+    listenLikesReceived(uid, cb, onError) {
       if (!uid || typeof cb !== 'function') return function () { /* nothing to do */ };
-      return adapter.listenLikesReceived(uid, cb);
+      return adapter.listenLikesReceived(uid, cb, onError);
     },
 
     /**

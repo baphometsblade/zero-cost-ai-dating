@@ -262,3 +262,113 @@ test('body text clears AA against the surface it sits on, in every theme', funct
     'expected at least ' + (SURFACES.length * INKS.length * Object.keys(all).length) +
     ' measurements, made ' + measured.length);
 });
+
+/* ------------------------------------------------------------------------
+   The deck's action glyphs, at rest and on hover
+
+   Each of the four action buttons is a single glyph and nothing else, so the
+   glyph IS the control's label: there is no text beside it to read instead.
+   components.css says each is "coloured with the ink token rather than the
+   fill one", and that was true of two of the four. The star took
+   --accent-500, a fill, and measured 4.08:1 on its own hover tint in the light
+   theme — under the 4.5:1 a 20px glyph has to clear. Nothing measured it,
+   because every check above is about text tokens on page surfaces.
+
+   This reads the four rules rather than restating them, so a glyph that
+   changes its token, its size or its hover tint is measured as it now is.
+   The threshold follows WCAG's size rule: under 24px a glyph is normal text
+   and needs 4.5:1; at 24px and above it is large text and needs 3:1.
+   ------------------------------------------------------------------------ */
+
+const COMPONENTS = fs.readFileSync(path.join(ROOT, 'public', 'css', 'components.css'), 'utf8');
+
+/** The deck's single-glyph controls, by their modifier class. */
+const GLYPHS = ['action-rewind', 'action-pass', 'action-super', 'action-like'];
+
+/**
+ * The declarations of one rule, by exact selector.
+ * @param {string} selector e.g. '.action-super'
+ * @returns {string|null} the text between its braces
+ */
+function ruleBody(selector) {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\:]/g, '\\$&');
+  const match = new RegExp('(?:^|\\n)' + escaped + '\\s*\\{([^}]*)\\}').exec(COMPONENTS);
+  return match ? match[1] : null;
+}
+
+/** One declaration's value out of a rule body, or null. */
+function declared(body, property) {
+  if (!body) return null;
+  const match = new RegExp('(?:^|[;\\s])' + property + '\\s*:\\s*([^;]+);').exec(body);
+  return match ? match[1].trim() : null;
+}
+
+/** A colour, as hex or rgb()/rgba(), with its alpha. Null when it is neither. */
+function parseColour(value) {
+  const hex = parseHex(value);
+  if (hex) return { r: hex.r, g: hex.g, b: hex.b, a: 1 };
+  const rgb = /^rgba?\(\s*(\d+)[\s,]+(\d+)[\s,]+(\d+)(?:[\s,/]+([\d.]+))?\s*\)$/i.exec(String(value).trim());
+  if (!rgb) return null;
+  return { r: +rgb[1], g: +rgb[2], b: +rgb[3], a: rgb[4] === undefined ? 1 : +rgb[4] };
+}
+
+/** A translucent colour composited onto an opaque one. */
+function onto(top, under) {
+  const a = top.a;
+  return { r: top.r * a + under.r * (1 - a), g: top.g * a + under.g * (1 - a), b: top.b * a + under.b * (1 - a), a: 1 };
+}
+
+test('every deck action glyph clears the threshold its size calls for, at rest and on hover, in every theme', function () {
+  const all = themes();
+  const light = all.light;
+  const base = ruleBody('.action-btn');
+  assert.ok(base, 'no .action-btn rule found in components.css — this test is checking nothing');
+  const baseSize = parseFloat(declared(base, 'font-size'));
+  const restingBg = declared(base, 'background');
+  assert.ok(baseSize > 0 && /^var\(/.test(restingBg || ''),
+    '.action-btn no longer declares a px font-size and a token background: ' + baseSize + ', ' + restingBg);
+
+  const failures = [];
+  let measured = 0;
+  GLYPHS.forEach(function (name) {
+    const rest = ruleBody('.' + name);
+    const hover = ruleBody('.' + name + ':hover:not([disabled])');
+    const ink = declared(rest, 'color');
+    const tint = declared(hover, 'background');
+    const size = parseFloat(declared(rest, 'font-size')) || baseSize;
+    if (!ink || !tint) {
+      failures.push('.' + name + ': its colour or its hover background could not be found');
+      return;
+    }
+    const needed = size >= 24 ? 3 : 4.5;
+    Object.keys(all).forEach(function (theme) {
+      const tokens = all[theme];
+      const resolve = function (raw) {
+        const ref = /^var\(\s*(--[a-z0-9-]+)\s*\)$/i.exec(raw);
+        return parseColour(deVar(tokens, light, ref ? (tokens[ref[1]] || light[ref[1]]) : raw));
+      };
+      const fg = resolve(ink);
+      const surface = resolve(restingBg);
+      const wash = resolve(tint);
+      if (!fg || !surface || !wash || surface.a !== 1) {
+        // Unmeasurable is a failure, not a pass: a colour this cannot read is
+        // exactly the case that used to make the whole gate quietly vacuous.
+        failures.push(theme + ' .' + name + ': unmeasurable (' + ink + ' / ' + restingBg + ' / ' + tint + ')');
+        return;
+      }
+      const hoverBg = onto(wash, surface);
+      [['at rest', surface], ['on hover', hoverBg]].forEach(function (state) {
+        const ratio = contrast(onto(fg, state[1]), state[1]);
+        measured += 1;
+        if (ratio < needed) {
+          failures.push(theme + ' .' + name + ' ' + state[0] + ': ' + ratio.toFixed(2) + ':1 for a ' + size +
+            'px glyph, needs ' + needed + ':1 (' + ink + ')');
+        }
+      });
+    });
+  });
+
+  assert.deepEqual(failures, [], 'deck glyphs below contrast:\n  - ' + failures.join('\n  - '));
+  assert.equal(measured, GLYPHS.length * Object.keys(all).length * 2,
+    'measured ' + measured + ' glyph pairs; expected every glyph, theme and state');
+});

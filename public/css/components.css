@@ -454,7 +454,12 @@
 }
 
 /* Each of these glyphs is the whole visible content of its button, so it is
-   coloured with the ink token rather than the fill one. */
+   coloured with the ink token rather than the fill one. That was true of two of
+   the four: the star took --accent-500, a fill, and measured 4.08:1 on its hover
+   tint. Pass takes --danger, which the palette deliberately leaves as its own
+   ink, and at 26px it is large text, held to 3:1. tests/contrast.test.js reads
+   these four rules and measures each glyph at rest and on hover, in every theme,
+   at the threshold its size calls for. */
 .action-rewind {
   color: var(--warn-ink);
 }
@@ -477,7 +482,7 @@
 }
 
 .action-super {
-  color: var(--accent-500);
+  color: var(--accent-ink);
 }
 
 .action-super:hover:not([disabled]) {

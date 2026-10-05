@@ -925,4 +925,40 @@
     );
     assert.equal(M.explain(r), 'Good match (' + r.score + '%) — very similar outlook — you match closely on openness and warmth, and less than a km away.');
   });
+
+  /* ----------------------------------------------------------------------
+     The configuration the pages actually run
+
+     Every test above runs the engine with no tag table, because under
+     `node --test` nothing has loaded seed-data.js. No page runs it that way:
+     every page loads seed-data.js first, `dashboard.js` passes no `tagIndex`,
+     and so the engine falls back to `ZC.INTEREST_BY_SLUG` and adds the category
+     bonus — up to an eighth of the interest score — to every deck. The golden
+     case above pins `breakdown.interests` to 0.75 x 3/5, which is the bare
+     number, the one a browser never shows.
+
+     The bonus itself is tested, in isolation, with tags passed explicitly. What
+     nothing tested is the fallback: had `resolveTagIndex` stopped reaching for
+     the global table, every real deck would have lost the bonus and this whole
+     suite would have stayed green. LAST in the file on purpose — it publishes
+     `globalThis.ZC`, and `node --test` gives each file its own process, so
+     nothing after it here and nothing in another file can see that.
+     ---------------------------------------------------------------------- */
+
+  test('with seed-data.js loaded, as on every page, the engine scores with its tag table unasked', function () {
+    const bare = M.scoreCandidate(ALEX, RILEY, OPTS);
+    require('../public/js/seed-data.js');
+    const table = globalThis.ZC && globalThis.ZC.INTEREST_BY_SLUG;
+    assert.ok(table && table.hiking && table.cooking, 'seed-data.js did not publish its tag table');
+
+    const ambient = M.scoreCandidate(ALEX, RILEY, OPTS);
+    const explicit = M.scoreCandidate(ALEX, RILEY, Object.assign({}, OPTS, { tagIndex: table }));
+
+    near(ambient.breakdown.interests, explicit.breakdown.interests, 1e-12,
+      'with no tagIndex the engine must use the table seed-data.js published');
+    assert.ok(ambient.breakdown.interests > bare.breakdown.interests,
+      'and that table must change the score: ' + ambient.breakdown.interests + ' vs bare ' + bare.breakdown.interests);
+    assert.ok(ambient.score >= bare.score, 'a bonus cannot lower the score');
+    assert.ok(ambient.breakdown.interests <= 1, 'and the component stays a 0..1 fraction');
+  });
 })();

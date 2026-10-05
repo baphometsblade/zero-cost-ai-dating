@@ -718,6 +718,17 @@
     toast('Photo added. If the preview shows your avatar instead, the link did not load.', 'success');
   }
 
+  /**
+   * Whether the interest vocabulary from seed-data.js is here. Without it the
+   * stored interests cannot be recognised, shown or edited — and must not be
+   * saved over either.
+   * @returns {boolean}
+   */
+  function vocabularyLoaded() {
+    const known = ZC.INTEREST_BY_SLUG;
+    return !!known && typeof known === 'object' && Object.keys(known).length > 0;
+  }
+
   /* ------------------------------------------------------------------------
      8. Location
      ------------------------------------------------------------------------ */
@@ -1108,7 +1119,14 @@
         pronouns: state.pronouns.trim(),
         bio: state.bio.trim(),
         photos: state.photos.slice(),
-        interests: state.interests.slice(),
+        // Left out entirely when the interest list did not load. Loading filters
+        // the stored interests through that list, so without it `state.interests`
+        // is empty — not because the person has none, but because nothing here
+        // could recognise them — and writing it back erased every interest they
+        // had, on a save of their bio, beside a form saying interests "cannot be
+        // edited right now". `undefined` is skipped by the store's merge, so the
+        // stored list stays exactly as it was.
+        interests: vocabularyLoaded() ? state.interests.slice() : undefined,
         personality: personality,
         location: location,
         showAge: !!state.showAge,
@@ -1260,6 +1278,16 @@
     });
 
     refs.city.addEventListener('change', function () {
+      // The placeholder's value is '', and `Number('')` is 0 — which is
+      // CITIES[0], Portland. Choosing "Choose a city…" used to move the account
+      // to Portland, OR, with nothing on screen saying so until the label
+      // changed. '' means "no bundled city", the same thing `syncCitySelect`
+      // means by it; it changes nothing, and the picker goes back to showing
+      // the city the label actually names. "Clear location" is the way to clear.
+      if (refs.city.value === '') {
+        syncCitySelect();
+        return;
+      }
       const city = CITIES[Number(refs.city.value)];
       if (city) applyCity(city);
     });

@@ -162,9 +162,13 @@ module.exports = {
       }
       let calls = 0;
       let badgeCalls = 0;
+      let likeCalls = 0;
       window.__zcBadgeSubs = 0;
+      window.__zcLikeSubs = 0;
       const dead = params.get('zcdead') === '1';
       const deadBadge = params.get('zcdeadbadge') === '1';
+      const deadLikes = params.get('zcdeadlikes') === '1';
+      const deadLater = params.get('zcdeadlater') === '1';
       const silent = params.get('zcsilent') === '1';
       const wrap = function () {
         if (!window.ZC || !window.ZC.store || window.ZC.store.__wrapped) return;
@@ -189,6 +193,36 @@ module.exports = {
           return realMatches.call(window.ZC.store, uid, cb, onError);
         };
 
+        // Which of the two who-liked-you reads the page makes. The free plan must
+        // ask for a number; only premium may ask for the people.
+        window.__zcLikesList = 0;
+        window.__zcLikesCount = 0;
+        const realList = window.ZC.store.getLikesReceived;
+        window.ZC.store.getLikesReceived = function () {
+          window.__zcLikesList += 1;
+          return realList.apply(window.ZC.store, arguments);
+        };
+        const realCount = window.ZC.store.countLikesReceived;
+        window.ZC.store.countLikesReceived = function () {
+          window.__zcLikesCount += 1;
+          return realCount.apply(window.ZC.store, arguments);
+        };
+
+        // The premium who-liked-you badge, killed the same way. Guarded for the
+        // same reason as above: the defect was that no handler was passed.
+        const realLikes = window.ZC.store.listenLikesReceived;
+        window.ZC.store.listenLikesReceived = function (uid, cb, onError) {
+          window.__zcLikeSubs += 1;
+          likeCalls += 1;
+          if (deadLikes && likeCalls === 1) {
+            window.setTimeout(function () {
+              if (typeof onError === 'function') onError(new Error('Missing or insufficient permissions.'));
+            }, 0);
+            return function () { /* already over */ };
+          }
+          return realLikes.call(window.ZC.store, uid, cb, onError);
+        };
+
         const real = window.ZC.store.listenMatchViews;
         window.ZC.store.listenMatchViews = function (uid, onViews, onError) {
           window.__zcSubs += 1;
@@ -196,6 +230,22 @@ module.exports = {
           if (dead && calls === 1) {
             window.setTimeout(function () { onError(new Error('Missing or insufficient permissions.')); }, 0);
             return function () { /* already over */ };
+          }
+          // Dies AFTER delivering — the list has loaded, and then the stream goes.
+          if (deadLater && calls === 1) {
+            let stopReal = null;
+            let killed = false;
+            stopReal = real.call(window.ZC.store, uid, function (views) {
+              onViews(views);
+              if (killed) return;
+              killed = true;
+              window.setTimeout(function () {
+                if (stopReal) stopReal();
+                window.__zcKilledAfterLoad = true;
+                onError(new Error('Missing or insufficient permissions.'));
+              }, 0);
+            }, onError);
+            return function () { if (stopReal) stopReal(); };
           }
           // A stream that is open and simply never delivers — which is what an
           // `onSnapshot` does with no network and no offline persistence.
@@ -232,6 +282,38 @@ module.exports = {
         : 'the list never came back after ' + deadSubs + ' subscription(s); a dead ' +
           'stream the page still holds makes every re-subscribe a no-op');
 
+    // 1a. A list that LOADED, and then lost its stream. Case 1 kills the stream
+    // before its first delivery, so its recovery goes through `firstViews`, the
+    // one place the error was cleared. This one cannot: the first delivery has
+    // already happened, so the retry's rows arrived under an error panel that
+    // never went away — `renderList` hides the list while `state.error` is set.
+    //
+    // Whether the error panel was ever VISIBLE is not the claim, and is not
+    // observable reliably: `pageshow` re-subscribes on its own, so with the fix
+    // the panel can come and go between two polls. The claim is the end state
+    // after a death that is known to have happened, which the hook records.
+    await page.goto(ctx.base + '/matches.html?zcdeadlater=1', { waitUntil: 'domcontentloaded' });
+    const laterFailed = await page.waitForFunction(function () { return window.__zcKilledAfterLoad === true; },
+      null, { timeout: 5000 }).then(function () { return true; }, function () { return false; });
+    await page.evaluate(function () { window.dispatchEvent(new Event('focus')); });
+    const laterBack = await page.waitForFunction(function () {
+      const error = document.getElementById('list-error');
+      const rows = document.querySelectorAll('#match-list .match-row');
+      const list = document.getElementById('match-list');
+      return window.__zcSubs >= 2 && error.classList.contains('hidden') &&
+        rows.length > 0 && !list.classList.contains('hidden');
+    }, null, { timeout: 5000 }).then(function () { return true; }, function () { return false; });
+    const laterState = await page.evaluate(function () {
+      return {
+        subs: window.__zcSubs,
+        errorShown: !document.getElementById('list-error').classList.contains('hidden'),
+        rows: document.querySelectorAll('#match-list .match-row').length
+      };
+    });
+    t.check('a list that loaded, lost its stream and came back clears its error and shows the rows',
+      laterFailed && laterBack,
+      (laterFailed ? '' : 'the stream was never killed, so this tested nothing — ') + JSON.stringify(laterState));
+
     // 1b. The same death, on the NAV BADGE's subscription rather than the list's.
     // `app.js` passed no error handler at all, so when the shared stream died the
     // store cleared its subscribers and deleted the record while `matchStop` kept
@@ -256,6 +338,59 @@ module.exports = {
       badgeSubs + ' badge subscription(s) after a death and a focus (was ' + badgeBefore +
       ' before) — without an onError the handle is never released and every ' +
       're-subscribe is a no-op, so the count stays at 1 forever');
+
+    // 1c. Its sibling, the premium who-liked-you badge, which kept the defect 1b
+    // fixed: `listenLikesReceived` took no error handler and `app.js` passed
+    // none, so a dead likes stream left `likeStop` holding a dead handle and
+    // `if (!likeStop)` refused every re-subscription. Premium is set through the
+    // store as a fixture — the badge only subscribes on a plan that sees likes —
+    // and put back afterwards so nothing below runs on a plan it did not expect.
+    await page.evaluate(function () {
+      return window.ZC.store.updateUser(window.ZC.auth.current.uid, { plan: 'premium' });
+    });
+    ctx.session.expectConsoleError(/badge could not update/);
+    await page.goto(ctx.base + '/matches.html?zcdeadlikes=1', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#match-list .match-row');
+    const likesSubscribed = await page.waitForFunction(function () {
+      return window.__zcLikeSubs >= 1;
+    }, null, { timeout: 5000 }).then(function () { return true; }, function () { return false; });
+    await page.evaluate(function () { window.dispatchEvent(new Event('focus')); });
+    const likesBack = await page.waitForFunction(function () {
+      return window.__zcLikeSubs >= 2;
+    }, null, { timeout: 5000 }).then(function () { return true; }, function () { return false; });
+    const likeSubs = await page.evaluate(function () { return window.__zcLikeSubs; });
+    await page.waitForSelector('#likes-card:not(.hidden)', { timeout: 5000 }).catch(function () { return null; });
+    const premiumReads = await page.evaluate(function () {
+      return { list: window.__zcLikesList, count: window.__zcLikesCount };
+    });
+    await page.evaluate(function () {
+      return window.ZC.store.updateUser(window.ZC.auth.current.uid, { plan: 'free' });
+    });
+    ctx.session.expectConsoleError(/conversation list stopped/);
+    t.check('a premium likes badge whose stream dies re-subscribes instead of freezing',
+      likesSubscribed && likesBack && likeSubs === 2,
+      likeSubs + ' likes subscription(s) after a death and a focus' +
+      (likesSubscribed ? '' : ' — it never subscribed at all, so the plan fixture did not take'));
+
+    // 1d. The free plan's who-liked-you panel draws placeholder faces beside
+    // "free accounts never receive the real ones", and used to fetch the real
+    // ones anyway — `getLikesReceived(...).length` — then draw only the number.
+    // Premium is the control, measured on the page above: it must still ask for
+    // the people, or "free never asks" would pass against a page that asks
+    // nobody anything.
+    await page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#likes-card:not(.hidden)', { timeout: 5000 });
+    const freeReads = await page.evaluate(function () {
+      return {
+        list: window.__zcLikesList,
+        count: window.__zcLikesCount,
+        panel: (document.getElementById('likes-body').textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80)
+      };
+    });
+    t.check('on the free plan the who-liked-you panel asks for a number, never for the people',
+      freeReads.list === 0 && freeReads.count >= 1 && premiumReads.list >= 1,
+      'free: ' + freeReads.list + ' list read(s), ' + freeReads.count + ' count read(s) — "' + freeReads.panel +
+      '"; premium (control): ' + premiumReads.list + ' list read(s)');
 
     // 2. A stream that is merely SLOW — here, a browser that says it is offline, which
     // takes the same path without a twelve-second wait. The subscription is alive and
@@ -367,5 +502,40 @@ module.exports = {
     t.check('a conversation the other side ends says so without discarding what was typed',
       ended && after.typed === typed && after.sendDisabled === true,
       h.show ? h.show(after) : JSON.stringify(after));
+
+    /* ---- and the NEXT conversation is not left disabled ---- */
+
+    // Ending a conversation disables its composer, and only `closeMatch` used to
+    // turn it back on. On desktop the list stays beside the thread, so the
+    // ordinary next move is to click another conversation — which goes through
+    // `openMatch`, not `closeMatch`, and opened it with a textarea nobody could
+    // type into. Mobile cannot reach this: the list is hidden while a thread is
+    // open, so getting back to it means pressing Back, which is `closeMatch`.
+    //
+    // Sending a message is the check rather than reading `disabled`: the point
+    // is that the person can talk, and a field that is enabled but still refused
+    // by a stale flag would pass a property check.
+    if (ctx.viewport.key === 'desktop' && after.rows > 0) {
+      await page.click('#match-list .match-row');
+      await page.waitForFunction(function (endedId) {
+        const params = new URLSearchParams(location.search);
+        return params.get('m') && params.get('m') !== endedId && !document.getElementById('chat-ended');
+      }, openId, { timeout: 3000 });
+      const next = await page.evaluate(function () {
+        return { inputDisabled: document.getElementById('chat-input').disabled };
+      });
+      const reply = 'the next conversation still works ' + Date.now();
+      let delivered = false;
+      if (!next.inputDisabled) {
+        await page.fill('#chat-input', reply);
+        await page.click('#chat-send');
+        delivered = await page.waitForFunction(function (needle) {
+          return document.getElementById('chat-log').textContent.indexOf(needle) !== -1;
+        }, reply, { timeout: 3000 }).then(function () { return true; }, function () { return false; });
+      }
+      t.check('opening another conversation after one ended can be typed into and sent from',
+        !next.inputDisabled && delivered,
+        next.inputDisabled ? 'the textarea is still disabled' : (delivered ? 'sent' : 'typed, but nothing was delivered'));
+    }
   }
 };

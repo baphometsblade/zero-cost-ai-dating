@@ -1391,6 +1391,83 @@ test('listenLikesReceived counts only the likes still waiting for an answer', as
   }
 });
 
+test('countLikesReceived agrees with getLikesReceived, through every way a like stops waiting', async function () {
+  // The free plan's panel asks for this number instead of the list, so the two
+  // must never disagree — about an answer, a block, or anything else that takes
+  // somebody off the list.
+  await resetWorld();
+  for (const uid of ['alice', 'bob', 'cara', 'dev', 'eli']) await store.createUser(uid, {});
+  await store.recordSwipe('bob', 'alice', 'like');
+  await store.recordSwipe('cara', 'alice', 'super');
+  await store.recordSwipe('dev', 'alice', 'like');
+  await store.recordSwipe('eli', 'alice', 'pass');
+
+  async function agree(note) {
+    const list = await store.getLikesReceived('alice');
+    const count = await store.countLikesReceived('alice');
+    assert.equal(count, list.length, note + ': count ' + count + ', list ' + list.length);
+    return count;
+  }
+  assert.equal(await agree('two likes and a super, a pass does not count'), 3);
+  await store.recordSwipe('alice', 'bob', 'pass');
+  assert.equal(await agree('an answered like stops waiting'), 2);
+  await store.updateUser('alice', { blocked: ['cara'] });
+  assert.equal(await agree('a blocked liker stops waiting'), 1);
+  assert.equal(await store.countLikesReceived(''), 0, 'no account, nobody waiting');
+});
+
+test('a like count that cannot be read is reported, not delivered as nobody waiting', async function () {
+  // The sibling of the match-list test above, and the same two lies. The demo
+  // likes listener read through the forgiving helpers, so an unreadable store
+  // arrived as a count of 0 — a badge saying "nobody liked you" because it could
+  // not look — while the Firestore listener took no error handler at all, so its
+  // death was never reported to anyone.
+  await resetWorld();
+  await store.createUser('alice', {});
+  await store.createUser('bob', {});
+  await store.recordSwipe('bob', 'alice', 'like');
+  backing.set(KEYS.swipes, '{not json at all');
+
+  const seen = [];
+  const errors = [];
+  const stop = store.listenLikesReceived('alice', function (count) { seen.push(count); },
+    function (err) { errors.push(err); });
+  await settle();
+  stop();
+
+  assert.deepEqual(seen, [], 'no count may be delivered for likes that were not read');
+  assert.equal(errors.length, 1, 'and the failure is reported exactly once');
+});
+
+test('an unreadable ACCOUNTS store is reported by every likes reader, not counted as nobody', async function () {
+  // Found in review on the change that added the test above: the listener
+  // checked the swipes store and read accounts through the forgiving helper,
+  // which turns a corrupt entry into `{}` — so every liker vanished and the
+  // count, the list and the live badge all said nobody was waiting. Each reader
+  // is given a freshly corrupted store, because a read that reports the fault
+  // also clears it so that the next attempt can succeed.
+  await resetWorld();
+  await store.createUser('alice', {});
+  await store.createUser('bob', {});
+  await store.recordSwipe('bob', 'alice', 'like');
+  assert.equal(await store.countLikesReceived('alice'), 1, 'healthy, to begin with');
+
+  backing.set(KEYS.users, '{not json at all');
+  await assert.rejects(store.countLikesReceived('alice'), 'the free count rejects');
+  backing.set(KEYS.users, '{not json at all');
+  await assert.rejects(store.getLikesReceived('alice'), 'the premium list rejects');
+
+  backing.set(KEYS.users, '{not json at all');
+  const seen = [];
+  const errors = [];
+  const stop = store.listenLikesReceived('alice', function (count) { seen.push(count); },
+    function (err) { errors.push(err); });
+  await settle();
+  stop();
+  assert.deepEqual(seen, [], 'the live count delivers nothing for accounts it could not read');
+  assert.equal(errors.length, 1, 'and reports the failure exactly once');
+});
+
 /** Let the store's async first delivery and any same-tick nudges run. */
 function settle() {
   return new Promise(function (resolve) { setTimeout(resolve, 20); });
