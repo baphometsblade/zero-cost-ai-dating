@@ -248,7 +248,7 @@ npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.
 
 ### Unit suites
 
-Fourteen suites on Node's built-in runner — **266 checks**, no install, no browser, seconds:
+Fourteen suites on Node's built-in runner — **267 checks**, no install, no browser, seconds:
 
 | Suite | What it pins down |
 | --- | --- |
@@ -525,10 +525,14 @@ These are real, and worth knowing before you show this to anyone:
   `net::ERR_FAILED at …/matches` contains the word it was looking for. The server now
   redirects the way Hosting does (`superstatic`, the engine it runs, documents the 301), the
   worker stores each page without its redirect, and the spec fails against the old worker
-  on all four of its navigation checks. Two more things in the same file went with it:
+  on all four of its navigation checks. A rebuilt page also drops `content-encoding` and
+  `content-length`: `blob()` returns decoded bytes, so a gzipped page was being stored as
+  "gzip, 2892 bytes" over 9,119 bytes of plain HTML — Chromium serves that, and nothing should
+  depend on every engine doing so. Two more things in the same file went with it:
   `activate` deleted every cache on the origin — on GitHub Pages every project site a user
-  publishes shares one — and a failed runtime cache write escaped its `.catch` as an
-  unhandled rejection. `tests/pwa.test.js` now runs the worker itself, not just reads it.
+  publishes shares one, so the cache name now carries the deployment's path and cleanup
+  stays inside it — and a failed runtime cache write escaped its `.catch` as an unhandled
+  rejection. `tests/pwa.test.js` now runs the worker itself, not just reads it.
 - **Blocking stops contact, not visibility — and only the rules make even that true.**
   Your block list lives in your private `users/{uid}` document and is deliberately left
   out of the public `discovery/{uid}` projection, because publishing who somebody has

@@ -785,12 +785,23 @@
    * People who have liked this account and are still waiting for an answer, as
    * whole user documents. Shared by `getLikesReceived` and the live count, so
    * the badge and the list can never disagree about who is waiting.
+   *
+   * Reads both stores through `readJsonResult`, and says so when either could
+   * not be read. It used to read them through the forgiving helpers, which turn
+   * an unreadable store into an empty one — so a corrupt users entry came back
+   * as "nobody is waiting": a count of 0 on the free panel, `[]` on premium, and
+   * a live count of 0 with no error. The listener checked the swipes store and
+   * not this one, which is exactly the half that was found missing in review.
    * @param {string} uid the viewer
-   * @returns {Object[]} UserDocs
+   * @returns {Object[]|{fault: Error}} UserDocs, or the reason they could not be read
    */
   function pendingLikers(uid) {
-    const swipes = readSwipes();
-    const users = readUsers();
+    const swipesRead = readJsonResult(KEYS.swipes, {});
+    const usersRead = readJsonResult(KEYS.users, {});
+    if (!swipesRead.ok) return { fault: swipesRead.err || new Error('The stored swipes could not be read.') };
+    if (!usersRead.ok) return { fault: usersRead.err || new Error('The stored accounts could not be read.') };
+    const swipes = isPlainObject(swipesRead.value) ? swipesRead.value : {};
+    const users = isPlainObject(usersRead.value) ? usersRead.value : {};
     const me = users[uid] ? normalizeUser(users[uid]) : null;
     const myBlocks = me ? me.blocked : [];
     const out = [];
@@ -1198,11 +1209,18 @@
     },
 
     async getLikesReceived(uid) {
-      return pendingLikers(uid);
+      // A store that could not be read rejects, as a failed query does on the
+      // Firestore side — and matches.js hides a panel that cannot load rather
+      // than telling somebody nobody liked them.
+      const pending = pendingLikers(uid);
+      if (!Array.isArray(pending)) throw pending.fault;
+      return pending;
     },
 
     async countLikesReceived(uid) {
-      return pendingLikers(uid).length;
+      const pending = pendingLikers(uid);
+      if (!Array.isArray(pending)) throw pending.fault;
+      return pending.length;
     },
 
     async getMatches(uid) {
@@ -1318,9 +1336,8 @@
         cb: cb,
         onError: onError,
         snapshot: function () {
-          const read = readJsonResult(KEYS.swipes, {});
-          if (!read.ok) return { fault: read.err || new Error('The stored swipes could not be read.') };
-          return pendingLikers(uid).length;
+          const pending = pendingLikers(uid);
+          return Array.isArray(pending) ? pending.length : pending;
         },
         signature: function (value) {
           return isPlainObject(value) && value.fault ? 'fault' : String(value);

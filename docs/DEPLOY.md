@@ -242,7 +242,7 @@ firebase use --add          # pick your project, alias it "default"
 Then:
 
 ```bash
-npm test                    # 14 suites, 266 checks, no install required
+npm test                    # 14 suites, 267 checks, no install required
 npm run deploy              # firebase deploy --only hosting,firestore
 ```
 
@@ -418,7 +418,7 @@ Sign-up then completes and the console is clean. This is a local edit, never a c
 the two copies disagree, `npm test` fails *every page carries exactly one CSP meta equal to
 the header minus frame-ancestors* (`tests/csp-sync.test.js`), which is the reminder to revert.
 Be clear about what that guard does **not** catch — relax the header in `firebase.json` to
-match and the suite goes quiet again, all 266 checks passing, and the weakened policy deploys
+match and the suite goes quiet again, all 267 checks passing, and the weakened policy deploys
 to everyone. Change the meta copy only, and change it back.
 
 **Or stop crossing the origin.** Serve the emulator's paths *from the page's own origin* and

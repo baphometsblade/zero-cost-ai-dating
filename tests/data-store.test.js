@@ -1439,6 +1439,35 @@ test('a like count that cannot be read is reported, not delivered as nobody wait
   assert.equal(errors.length, 1, 'and the failure is reported exactly once');
 });
 
+test('an unreadable ACCOUNTS store is reported by every likes reader, not counted as nobody', async function () {
+  // Found in review on the change that added the test above: the listener
+  // checked the swipes store and read accounts through the forgiving helper,
+  // which turns a corrupt entry into `{}` — so every liker vanished and the
+  // count, the list and the live badge all said nobody was waiting. Each reader
+  // is given a freshly corrupted store, because a read that reports the fault
+  // also clears it so that the next attempt can succeed.
+  await resetWorld();
+  await store.createUser('alice', {});
+  await store.createUser('bob', {});
+  await store.recordSwipe('bob', 'alice', 'like');
+  assert.equal(await store.countLikesReceived('alice'), 1, 'healthy, to begin with');
+
+  backing.set(KEYS.users, '{not json at all');
+  await assert.rejects(store.countLikesReceived('alice'), 'the free count rejects');
+  backing.set(KEYS.users, '{not json at all');
+  await assert.rejects(store.getLikesReceived('alice'), 'the premium list rejects');
+
+  backing.set(KEYS.users, '{not json at all');
+  const seen = [];
+  const errors = [];
+  const stop = store.listenLikesReceived('alice', function (count) { seen.push(count); },
+    function (err) { errors.push(err); });
+  await settle();
+  stop();
+  assert.deepEqual(seen, [], 'the live count delivers nothing for accounts it could not read');
+  assert.equal(errors.length, 1, 'and reports the failure exactly once');
+});
+
 /** Let the store's async first delivery and any same-tick nudges run. */
 function settle() {
   return new Promise(function (resolve) { setTimeout(resolve, 20); });

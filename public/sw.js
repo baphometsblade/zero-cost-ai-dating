@@ -9,16 +9,27 @@
    ========================================================================== */
 'use strict';
 
-// Bump the version to retire every previously cached asset on next activate.
-// v4: every earlier shell stored REDIRECTED responses on Firebase Hosting (see
-// `unredirected` below), so none of it may be served again.
-const CACHE_PREFIX = 'zc-static-';
-const CACHE = CACHE_PREFIX + 'v4';
-
 // The directory this worker was served from: '/' on Firebase Hosting, or a
 // project subpath like '/zero-cost-ai-dating/' on GitHub Pages. Every path
 // computed below is relative to it, so the same worker serves both hosts.
 const BASE = new URL('./', self.location).pathname;
+
+// Bump the version to retire every previously cached asset on next activate.
+// v4: every earlier shell stored REDIRECTED responses on Firebase Hosting (see
+// `unredirected` below), so none of it may be served again.
+//
+// The name carries BASE, because Cache Storage belongs to the ORIGIN, and on
+// GitHub Pages every project site a user publishes shares one: two copies of
+// this app there — a fork beside the original — would otherwise share a prefix,
+// and each one's `activate` would delete the other's shell.
+const CACHE_PREFIX = 'zc-static:' + BASE + ':';
+const CACHE = CACHE_PREFIX + 'v4';
+
+// Names this worker used before they were scoped. All of them predate the fix
+// above — and on Hosting all of them hold redirected responses — so they are
+// retired on activation, whichever deployment wrote them: a sibling still
+// running an old worker loses an offline copy it could not have served.
+const LEGACY_CACHE = /^zc-static-v\d+$/;
 
 // The app shell, cached up front so a first visit can go offline immediately.
 const CORE = [
@@ -70,10 +81,20 @@ const CORE = [
 function unredirected(response) {
   if (!response.redirected) return Promise.resolve(response);
   return response.blob().then(function (body) {
+    // `blob()` hands back the DECODED bytes, so the headers that described the
+    // bytes on the wire no longer describe this body. Copied as they were, the
+    // stored page said `content-encoding: gzip` and `content-length: 2892` over
+    // 9,119 bytes of plain HTML — measured, with the e2e server gzipping the
+    // way Hosting does. Chromium serves that anyway; nothing here should depend
+    // on every engine being as forgiving, so the two are dropped and the
+    // browser takes the length from the body itself.
+    const headers = new Headers(response.headers);
+    headers.delete('content-encoding');
+    headers.delete('content-length');
     return new Response(body, {
       status: response.status,
       statusText: response.statusText,
-      headers: response.headers
+      headers: headers
     });
   });
 }
@@ -102,15 +123,17 @@ self.addEventListener('install', function (event) {
 });
 
 self.addEventListener('activate', function (event) {
-  // Drop caches from older versions so a deploy fully replaces the shell — and
-  // ONLY those. Cache Storage belongs to the origin, not to this app, and on
-  // GitHub Pages every project site a user publishes shares one origin
-  // (`user.github.io`). Deleting every name that was not ours wiped the caches
-  // of every other project on it, offline copies included.
+  // Drop caches from THIS deployment's older versions so a deploy fully
+  // replaces the shell — and only those, plus the unscoped names above. Cache
+  // Storage belongs to the origin, and on GitHub Pages every project site a
+  // user publishes shares one (`user.github.io`). Deleting every name that was
+  // not the current one wiped the caches of every other project on it; scoping
+  // by app alone still let two copies of THIS app delete each other's.
   event.waitUntil(
     caches.keys().then(function (names) {
       return Promise.all(names.map(function (name) {
-        return name.indexOf(CACHE_PREFIX) === 0 && name !== CACHE ? caches.delete(name) : null;
+        const older = name.indexOf(CACHE_PREFIX) === 0 && name !== CACHE;
+        return older || LEGACY_CACHE.test(name) ? caches.delete(name) : null;
       }));
     }).then(function () { return self.clients.claim(); })
   );

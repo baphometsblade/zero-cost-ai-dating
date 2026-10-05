@@ -43,7 +43,7 @@ module.exports = {
         }
         function poll() {
           return caches.keys().then(function (names) {
-            const mine = names.filter(function (name) { return name.indexOf('zc-static-') === 0; });
+            const mine = names.filter(function (name) { return name.indexOf('zc-static:') === 0; });
             return Promise.all(mine.map(holdsShell));
           }).then(function (flags) {
             if (flags.some(Boolean)) return true;

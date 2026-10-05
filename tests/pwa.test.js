@@ -173,7 +173,7 @@ function fakeResponse(body, opts) {
     status: o.status || 200,
     statusText: o.statusText || 'OK',
     redirected: !!o.redirected,
-    headers: new Headers({ 'content-type': 'text/html; charset=utf-8' }),
+    headers: new Headers(Object.assign({ 'content-type': 'text/html; charset=utf-8' }, o.headers || {})),
     blob: function () { return Promise.resolve(new Blob([body])); },
     text: function () { return Promise.resolve(body); }
   };
@@ -248,9 +248,14 @@ function runWorker(opts) {
 
 test('install stores every page WITHOUT its redirect, so a navigation may be served it', async function () {
   // What Firebase Hosting hands back for `dashboard.html`: the page, but as the
-  // answer to a 301.
+  // answer to a 301 — and compressed, with the length of the compressed bytes.
   const worker = runWorker({
-    fetch: function (url) { return fakeResponse('<!doctype html>' + url, { redirected: true }); }
+    fetch: function (url) {
+      return fakeResponse('<!doctype html>' + url, {
+        redirected: true,
+        headers: { 'content-encoding': 'gzip', 'content-length': '7' }
+      });
+    }
   });
   await worker.fire('install');
 
@@ -264,6 +269,11 @@ test('install stores every page WITHOUT its redirect, so a navigation may be ser
     assert.equal(stored.redirected, false, file + ' was stored as a redirected response');
     assert.equal(stored.status, 200, file + ' lost its status');
     assert.equal(await stored.text(), '<!doctype html>' + file, file + ' lost its body');
+    // The body is decoded bytes now; headers describing the wire must not travel
+    // with it (found in review, and measured: gzip and 2892 over 9,119 bytes).
+    assert.equal(stored.headers.get('content-encoding'), null, file + ' still claims to be gzipped');
+    assert.equal(stored.headers.get('content-length'), null, file + ' still claims the compressed length');
+    assert.equal(stored.headers.get('content-type'), 'text/html; charset=utf-8', file + ' lost its content type');
   }
 });
 
@@ -278,16 +288,26 @@ test('install still fails as a whole when any shell asset is not a success', asy
   await assert.rejects(worker.fire('install'), /matches\.html answered 404/);
 });
 
-test('activate retires only this app\'s older shells, never another project\'s caches', async function () {
+test('activate retires only this deployment\'s older shells, never another project\'s or another copy\'s', async function () {
+  // This worker is served from the origin's root, so its BASE is '/'. A second
+  // copy of this same app on the same origin — a fork published beside the
+  // original on one github.io — has its own BASE and must keep its shell.
   const worker = runWorker({
     fetch: function () { return fakeResponse('ok'); },
-    existing: ['zc-static-v1', 'zc-static-v2', 'another-project-offline', 'workbox-precache-v2']
+    existing: [
+      'zc-static-v1', 'zc-static-v3',          // unscoped names from before: retired
+      'zc-static:/:v3',                         // this deployment, older: retired
+      'zc-static:/a-fork/:v3',                  // the same app, another deployment: kept
+      'another-project-offline', 'workbox-precache-v2'
+    ]
   });
   await worker.fire('install');
   await worker.fire('activate');
 
-  assert.deepEqual(worker.deleted.slice().sort(), ['zc-static-v1', 'zc-static-v2'],
+  assert.ok(/^zc-static:\/:v\d+$/.test(worker.cacheName), 'the cache name is not scoped to BASE: ' + worker.cacheName);
+  assert.deepEqual(worker.deleted.slice().sort(), ['zc-static-v1', 'zc-static-v3', 'zc-static:/:v3'],
     'activate deleted ' + JSON.stringify(worker.deleted));
+  assert.ok(worker.stores.has('zc-static:/a-fork/:v3'), 'another deployment of this app lost its shell');
   assert.ok(worker.stores.has('another-project-offline'), 'a sibling project\'s cache was deleted');
   assert.ok(worker.stores.has('workbox-precache-v2'), 'a sibling project\'s cache was deleted');
   assert.ok(worker.stores.has(worker.cacheName), 'the current shell was deleted');
