@@ -466,6 +466,17 @@ h3 {
   flex: 1 1 auto;
 }
 
+/* app.js builds the shared header on DOMContentLoaded, so a page's first
+   paint has nothing above <main>, and the header arriving pushed the whole
+   page down by its own height — a layout shift of 0.10 to 0.68 across the
+   signed-in pages, the worst on the plans page. Until the header exists,
+   <main> holds its room. The header is exactly these two lengths (the
+   .nav-inner min-height and the .nav bottom border), so the hand-over moves
+   nothing. A browser without :has() drops the rule and keeps the old jump. */
+.app-shell:not(:has([data-zc-nav])) > main {
+  margin-top: calc(var(--nav-h) + 1px);
+}
+
 .container {
   width: 100%;
   max-width: var(--maxw);
