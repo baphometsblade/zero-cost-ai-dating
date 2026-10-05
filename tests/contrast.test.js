@@ -21,7 +21,9 @@
    three token blocks (`:root`, the `prefers-color-scheme: dark` media query,
    and the `[data-theme="dark"]` override), then the fill/ink pairs the
    stylesheet actually puts together on a flat surface. Where the pairing is
-   not flat, it is left out and said so, rather than measured badly.
+   not flat, it is left out and said so, rather than measured badly. The one
+   kind of gradient that IS measurable — a label on a fill that runs between
+   two flat colours — is measured at its worst point, in the last section.
 
    It found one thing, which is why it exists. `.btn-danger` was `color: #fff`
    on `background: var(--danger)`. Light's `#dc3545` takes white at 4.53:1;
@@ -57,7 +59,9 @@ const AA_NORMAL = 4.5;
  *
  * `.btn-primary` is absent on purpose: its fill is a linear-gradient between
  * two tokens, so there is no single background colour for `--on-brand` to be
- * measured against. Adding it here would mean inventing one.
+ * measured against, and adding it here would mean inventing one. It is
+ * measured instead along its gradient, with every other label on a two-stop
+ * fill, at the end of this file.
  */
 const FLAT_PAIRS = [
   { rule: '.btn-danger', fill: '--danger', ink: '--on-danger' },
@@ -371,4 +375,160 @@ test('every deck action glyph clears the threshold its size calls for, at rest a
   assert.deepEqual(failures, [], 'deck glyphs below contrast:\n  - ' + failures.join('\n  - '));
   assert.equal(measured, GLYPHS.length * Object.keys(all).length * 2,
     'measured ' + measured + ' glyph pairs; expected every glyph, theme and state');
+});
+
+/* ------------------------------------------------------------------------
+   Labels on a two-stop gradient
+
+   The filled treatments — the primary and send buttons, your own chat
+   bubbles, the "how it works" numerals, the plan ribbon and the premium
+   badge — write their label on a linear-gradient between two flat colours.
+   None of them has one background colour, which is why FLAT_PAIRS leaves
+   them out. Each does have a worst one, and a contrast bound needs nothing
+   more: the label has to clear the threshold against every point of its
+   fill, so this walks each gradient in every theme and keeps the lowest
+   ratio it meets.
+
+   It walks the whole line rather than checking the two stops, because the
+   darkest point of a gradient need not be a stop. Black text clears 6.7:1
+   against both ends of a #ff00ff-to-#00ff00 fill and about 5.3:1 at its
+   middle. The dark theme writes near-black ink on bright fills, which is
+   exactly the case the stops alone would under-measure.
+
+   Unlike FLAT_PAIRS, the rules are found rather than listed: every rule in
+   either stylesheet whose background is a two-stop linear-gradient and that
+   sets a colour is measured, so the next filled control is covered without
+   anyone remembering to add it. The risk in deriving — a parser that quietly
+   stops finding anything — is what MEASURED_AT_LEAST is for: it names the
+   rules this must keep measuring, and fails when one of them is not.
+   ------------------------------------------------------------------------ */
+
+/** Rules that must be among those measured, so the sweep cannot go vacuous. */
+const MEASURED_AT_LEAST = ['.btn-primary', '.chat-send', '.msg-me .msg-text', '.step-num', '.plan-ribbon', '.badge-premium'];
+
+/**
+ * Rules the sweep finds but must not hold to a text threshold, each with the
+ * reason. An exemption that no longer matches a rule fails the test, so this
+ * cannot outlive what it excuses.
+ */
+const GRADIENT_EXEMPT = {
+  // White on its lighter stop is 2.72:1 in light and 2.04:1 in both darks,
+  // and that is allowed: the heart is part of the wordmark, and WCAG 1.4.3
+  // exempts text that is part of a logo or brand name.
+  '.nav-brand::before': 'the logo mark'
+};
+
+/** How many points along each gradient are measured, both ends included. */
+const GRADIENT_STEPS = 100;
+
+/**
+ * Every rule in both stylesheets that writes text on a two-stop linear
+ * gradient, as written: the two stops and the ink are still token references.
+ * @returns {{sheet:string, selector:string, from:string, to:string, ink:string, px:number|null}[]}
+ */
+function gradientLabels() {
+  const sheets = { 'style.css': CSS, 'components.css': COMPONENTS };
+  const stop = '([^,()]+(?:\\([^()]*\\))?)';
+  const twoStops = new RegExp('^linear-gradient\\(\\s*(?:-?[\\d.]+deg|to [a-z ]+)\\s*,\\s*' + stop + '\\s*,\\s*' + stop + '\\s*\\)$', 'i');
+  const found = [];
+  Object.keys(sheets).forEach(function (sheet) {
+    // Comments first: a rule that has been commented out is not one the
+    // browser applies, and a selector in prose is not a selector.
+    const css = sheets[sheet].replace(/\/\*[\s\S]*?\*\//g, '');
+    const rule = /([^{}]+)\{([^{}]*)\}/g;
+    let match;
+    while ((match = rule.exec(css)) !== null) {
+      const fill = twoStops.exec(declared(match[2], 'background') || '');
+      const ink = declared(match[2], 'color');
+      if (!fill || !ink) continue;
+      // Text clipped to its own gradient — the match heading, and the hero
+      // title, whose first stop has a position and so never matches above —
+      // is the opposite case: there the gradient IS the ink, and what it sits
+      // on is the page or the burst overlay, which this file cannot know.
+      // The header names clipped text as unmeasurable; this is where that
+      // decision is made, by its mechanism rather than by a list of names.
+      if (declared(match[2], 'background-clip') === 'text') continue;
+      const size = /^([\d.]+)px$/.exec(declared(match[2], 'font-size') || '');
+      found.push({
+        sheet: sheet,
+        selector: match[1].trim().replace(/\s+/g, ' '),
+        from: fill[1].trim(),
+        to: fill[2].trim(),
+        ink: ink,
+        px: size ? Number(size[1]) : null
+      });
+    }
+  });
+  return found;
+}
+
+test('every label on a two-stop gradient clears AA at the worst point of its fill, in every theme', function () {
+  const all = themes();
+  const light = all.light;
+  const labels = gradientLabels();
+  const failures = [];
+  const measured = [];
+
+  labels.forEach(function (label) {
+    if (GRADIENT_EXEMPT[label.selector]) return;
+    // A size this cannot read as px is held to the normal-text bound, which
+    // is the stricter of the two: unknown never makes the check easier.
+    const needed = label.px !== null && label.px >= 24 ? 3 : AA_NORMAL;
+    Object.keys(all).forEach(function (theme) {
+      const tokens = all[theme];
+      const resolve = function (raw) {
+        const ref = /^var\(\s*(--[a-z0-9-]+)\s*\)$/i.exec(raw);
+        return parseColour(deVar(tokens, light, ref ? (tokens[ref[1]] || light[ref[1]]) : raw));
+      };
+      const from = resolve(label.from);
+      const to = resolve(label.to);
+      const ink = resolve(label.ink);
+      if (!from || !to || !ink || from.a !== 1 || to.a !== 1 || ink.a !== 1) {
+        // A translucent stop sits over whatever is behind it, which this file
+        // cannot know. Unmeasurable is reported, never passed.
+        failures.push(theme + ' ' + label.selector + ' (' + label.sheet + '): unmeasurable (' +
+          label.ink + ' on ' + label.from + ' → ' + label.to + ') — make the stops and ink opaque ' +
+          'colours or exempt the rule in GRADIENT_EXEMPT with the reason');
+        return;
+      }
+      // CSS interpolates a gradient between two colours in sRGB, so the fill
+      // at t is the straight line between the stops' channel values.
+      let worst = Infinity;
+      let at = 0;
+      for (let step = 0; step <= GRADIENT_STEPS; step++) {
+        const t = step / GRADIENT_STEPS;
+        const point = { r: from.r + (to.r - from.r) * t, g: from.g + (to.g - from.g) * t, b: from.b + (to.b - from.b) * t };
+        const ratio = contrast(point, ink);
+        if (ratio < worst) {
+          worst = ratio;
+          at = t;
+        }
+      }
+      measured.push(theme + ' ' + label.selector + ' ' + worst.toFixed(2) + ':1');
+      if (worst + 0.005 < needed) {
+        failures.push(theme + ' ' + label.selector + ' (' + label.sheet + '): ' + label.ink + ' on ' +
+          label.from + ' → ' + label.to + ' falls to ' + worst.toFixed(2) + ':1 at ' +
+          Math.round(at * 100) + '% of the fill, below the ' + needed + ':1 it needs');
+      }
+    });
+  });
+
+  MEASURED_AT_LEAST.forEach(function (selector) {
+    if (!labels.some(function (label) { return label.selector === selector; })) {
+      failures.push(selector + ' is no longer found as text on a two-stop gradient, so nothing ' +
+        'measures it — if its fill changed shape on purpose, take it out of MEASURED_AT_LEAST');
+    }
+  });
+  Object.keys(GRADIENT_EXEMPT).forEach(function (selector) {
+    if (!labels.some(function (label) { return label.selector === selector; })) {
+      failures.push('GRADIENT_EXEMPT excuses ' + selector + ', which no longer paints text on a ' +
+        'two-stop gradient — drop the exemption');
+    }
+  });
+
+  assert.deepEqual(failures, [], 'labels on gradients:\n  - ' + failures.join('\n  - ') +
+    '\n  measured: ' + measured.join(', '));
+  assert.ok(measured.length >= MEASURED_AT_LEAST.length * Object.keys(all).length,
+    'measured ' + measured.length + ' gradient labels; expected at least ' +
+    (MEASURED_AT_LEAST.length * Object.keys(all).length));
 });
