@@ -386,9 +386,8 @@ devtools says:
 ```
 Refused to connect to 'http://127.0.0.1:9099/identitytoolkit.googleapis.com/v1/accounts:signUp?key=…'
 because it violates the following Content Security Policy directive: "connect-src 'self'
-https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com
-https://identitytoolkit.googleapis.com https://securetoken.googleapis.com
-https://firestore.googleapis.com".
+https://*.googleapis.com https://identitytoolkit.googleapis.com
+https://securetoken.googleapis.com https://firestore.googleapis.com".
 ```
 
 then the same for Firestore on `http://127.0.0.1:8080/`. Nothing is broken and nothing is
