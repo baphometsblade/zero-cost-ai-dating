@@ -499,7 +499,7 @@ asserted and the other remembered.
   a sentence until it was moved somewhere that runs it. The throttle exists because
   `lastActiveAt` feeds the activity score but is not worth a write per navigation. It is
   called on every auth resolution and on every page that resolves a user, so without the
-  throttle a browsing session is one Firestore write per navigation.
+  throttle every navigation would write both documents, and more than once.
   "Across page loads" is the load-bearing part and was not true until it was measured:
   the last-write times lived in a module-level object, and every page here is its own
   HTML document, so each navigation started with an empty map and wrote again. The bound
@@ -671,11 +671,13 @@ The design system is two files: `style.css` (tokens, layout, forms, buttons, nav
 | Trust boundary | `rules-tests/specs/*.rules.js` | `firestore.rules` executed against the emulator: who can read what, the closed discovery projection, the reciprocal-like proof, the append-only chat, the bounded report queue, and the catch-all deny. |
 
 The table names four of them; `tests/` holds fourteen, and all fourteen `tests/` suites run on
-`node --test` with no dependencies, which is what keeps the `verify` job down to a checkout,
-`npm run check:seed` and `npm test` — no install step, and it finishes in seconds. That short job is run twice, over a `node: ['20', '22']` matrix,
-because a single pinned version once hid a breakage: the runner stopped matching a
-positional `tests/` directory argument after Node 20, so `npm test` ran zero tests on newer
-runtimes while CI stayed green.
+`node --test` with no dependencies, which is what keeps the `verify` job down to a checkout, a
+Node set-up and three commands — `npm run check:seed`, `npm test`, and `npm run check:claims`,
+which runs the suite a second time to read its total back — no install step, and it finishes
+in seconds. That short job is run twice, over a `node: ['20', '22']` matrix, because a single
+pinned version once hid a breakage: the runner stopped matching a positional `tests/`
+directory argument after Node 20, so `npm test` ran zero tests on newer runtimes while CI
+stayed green.
 
 The two layers that need real infrastructure are deliberately kept out of that job. Their
 specs live in `e2e/` and `rules-tests/`, not `tests/`, so `node --test` never discovers

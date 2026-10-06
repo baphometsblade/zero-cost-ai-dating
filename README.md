@@ -28,7 +28,7 @@ has the one setting.)*
 Most dating apps show you a person and a silence. This one shows you a person and its
 reasoning:
 
-> **78.4%** · Strong match
+> **78** match
 > ✨ You both love Hiking, Live music and Cooking
 > 🧭 Very similar outlook — you match closely on warmth and openness
 > 📍 Just 12 km away
@@ -142,18 +142,27 @@ activity          0.903       0.0538      0.0486     last seen 18 hours ago
                                           0.6364  ->  63.6
 ```
 
-Which the engine renders as:
+On Bo's card, the deck turns that into a score ring and three reasons:
 
 ```
-63.6% · Good match
+64 match
 🧭 Very similar outlook — you match closely on warmth and openness
 📍 Just 12 km away
 ✨ You both love Hiking, Live music and Cooking
-🎂 Only 3 years apart
 ```
 
-Note what did *not* appear: the bio component scored 0.134, below the 0.15 threshold, so no
-"your bios both mention…" line was claimed. Reasons are emitted from evidence or not at all.
+The ring rounds the score; the exact 63.6 and its band, *Good match*, are in the details
+sheet that `i` opens. So is a fourth reason, 🎂 *Only 3 years apart*: the engine returns up
+to four, strongest first (`MAX_REASONS`), and the card prints three (`CARD_REASONS` in
+`public/js/dashboard.js`). A fifth qualified as well — ⚡ *Active today*, for somebody seen
+18 hours ago — and is the one the engine's cap drops, its 0.0486 being the smallest
+contribution of the five. (The *📍 12 km away* and *⚡ Active 18h ago* pills in the row
+under Bo's name, either side of *Vancouver, WA*, are not reasons: `buildCard` prints them
+whatever the score.)
+
+Note what did *not* appear anywhere: the bio component scored 0.134, below the 0.15
+threshold, so no "your bios both mention…" line was claimed. Reasons are emitted from
+evidence or not at all.
 
 ### 5. It learns, gently
 
@@ -213,9 +222,11 @@ rather than only for producing this table.
 | No build step at runtime | Plain classic `<script>` tags. No bundler, no npm runtime deps. Node is dev-only, for tests and the seed export. |
 | Must be demoable with zero setup | **Demo mode**: if Firebase is not configured or not reachable, the entire app runs off `localStorage`, seeded from bundled profiles. |
 
-The practical upshot: the free Spark tier's 10 GB/month of hosting bandwidth and 50k/20k daily
-Firestore reads/writes are far more than a project of this size will use, and there is no
-resource in the stack that can bill you by surprise, because none of them are enabled.
+The practical upshot: the free Spark tier's hosting allowance — 10 GB stored, 360 MB a day
+transferred — and its 50k/20k daily Firestore reads/writes are far more than a small
+deployment will use, and there is no resource in the stack that can bill you by surprise,
+because none of them are enabled. The quota table is in
+[docs/DEPLOY.md](docs/DEPLOY.md#11-staying-at-0).
 
 ---
 
@@ -340,8 +351,8 @@ the **shipped** `public/js/data-store.js` into Node — `window` aliased to `glo
 `ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **228
 checks**, including 20 concurrent `bumpUsage` calls on one document storing exactly 20, the
 midnight roll-over happening inside the same transaction, a bump writing `usage` and nothing
-else, 30 swipes replaying the deck's real learning-save-then-bump ordering and storing exactly
-30, an account deletion that has to leave nothing of itself in any collection, a 520-message
+else, 30 bumps each with a whole-document save in flight across it storing exactly 30, an
+account deletion that has to leave nothing of itself in any collection, a 520-message
 conversation that has to stay live at its newest end, survive a rewind, and leave nothing
 underneath it when it is finally unmatched, a page load whose bill is counted
 document by document and has to come out the same against a swipe history twice as long — and
@@ -392,7 +403,8 @@ account from both directions:
 - each runner compares its own summary against the same file at the end of a **complete**
   run, and fails if they disagree. A filtered run counts less by design and is not checked.
 - `npm run check:claims` covers the one total no test inside the run can see: `npm test`'s
-  own. It runs the suite in a child process and reads the count out of the TAP summary.
+  own. It runs the suite in a child process and reads the count out of the TAP summary, and
+  CI's `verify` job runs it straight after `npm test`.
 
 So a suite that grows fails its own run until `scripts/claims.js` is updated, and updating
 that file fails `npm test` until this README agrees. There is no order in which the two can
@@ -401,21 +413,23 @@ while keeping its number — and `scripts/claims.js` says so rather than implyin
 
 ### CI
 
-`.github/workflows/ci.yml` has three jobs. `verify` runs exactly `npm run check:seed` and
-`npm test` on every push and pull request, across a Node 20 and Node 22 matrix (`fail-fast: false`, so one
-version failing still reports the other) — no install, no browser, seconds. Two majors are
-deliberate: pinning a single one once hid a real breakage, because the test runner stopped
-matching a positional `tests/` directory argument after Node 20 and `npm test` silently ran
-nothing on newer runtimes. `e2e` is separate and runs the browser suite, installing
-Playwright and Chromium into the runner's temp directory — never into the repo — in a step
-of its own, so a failed download reads as infrastructure rather than as a red test.
-`emulator` does the same for the Firestore emulator, and runs both suites that need one —
-`firestore.rules`, then the shipped store — inside a single boot, because booting costs more
-than either suite does. The `e2e` job runs the browser suite twice: once bare, which is what
-a contributor with nothing installed gets and which proves the Firebase spec skips rather
-than silently passing, and once inside `emulators:exec`, which is the only run in which every
-spec executes and therefore the only one that can hold the 294-check total to account. There are no secrets and no deploy step — deploying stays a
-deliberate local `npm run deploy`.
+`.github/workflows/ci.yml` has three jobs. `verify` runs `npm run check:seed`, `npm test`
+and `npm run check:claims` — the last runs the unit suite a second time, to hold its total
+to `scripts/claims.js` as described above — on every push and pull request, across a Node 20
+and Node 22 matrix (`fail-fast: false`, so one version failing still reports the other) — no
+install, no browser, seconds. Two majors are deliberate: pinning a single one once hid a
+real breakage, because the test runner stopped matching a positional `tests/` directory
+argument after Node 20 and `npm test` silently ran nothing on newer runtimes. `e2e` is
+separate and runs the browser suite, installing Playwright and Chromium into the runner's
+temp directory — never into the repo — in a step of its own, so a failed download reads as
+infrastructure rather than as a red test. `emulator` does the same for the Firestore
+emulator, and runs both suites that need one — `firestore.rules`, then the shipped store —
+inside a single boot, because booting costs more than either suite does. The `e2e` job runs
+the browser suite twice: once bare, which is what a contributor with nothing installed gets
+and which proves the Firebase spec skips rather than silently passing, and once inside
+`emulators:exec`, which is the only run in which every spec executes and therefore the only
+one that can hold the 294-check total to account. There are no secrets and no deploy step —
+deploying stays a deliberate local `npm run deploy`.
 
 ---
 
@@ -687,18 +701,24 @@ These are real, and worth knowing before you show this to anyone:
   bump is now a single `runTransaction`: the user document is read *inside* the transaction, a
   pure function decides the new `usage` map, and `tx.update` writes that one field. Fixing the
   bump alone turned out not to be enough, and the tests that caught it are the point of this
-  section: `updateUser` was a whole-document read-modify-write, so the deck's un-awaited
-  learning save — fired on every swipe, just before the bump — reliably overwrote the
-  increment the transaction had just committed. Making the bump atomic actually made that
-  *worse*, because a one-round-trip transaction commits early enough to lose the race. So
-  `updateUser` is now transactional too, which is the real fix: any two concurrent writes to
-  the user document used to lose data this way, not just the counter.
+  section: `updateUser` was a whole-document read-modify-write, and the deck then saved the
+  learning map through it on every swipe, un-awaited across the counter bump that followed
+  on a like or a super like — so whenever that save read the document before the bump
+  committed and wrote it back after, it overwrote the increment the transaction had just
+  committed. Making the bump atomic actually made that *worse*, because a one-round-trip
+  transaction commits early enough to lose the race. So `updateUser` is now transactional
+  too, which is the real fix: any two concurrent writes to the user document used to lose
+  data this way, not just the counter.
   None of that is asserted from reading the code. `store-tests/` loads the **shipped**
   `public/js/data-store.js` and drives it against the Firestore emulator, reading back the
   stored document: 20 concurrent bumps store exactly 20 (the old shape stored **1**), 20
-  racing across midnight likewise, and 30 swipes replaying the deck's exact
-  learning-then-bump ordering store exactly 30 — that last check stored **19 of 30** and
-  **17 of 30** against this round's own first attempt, which is how the regression was found.
+  racing across midnight likewise, and 30 bumps each with a whole-document save in flight
+  across it store exactly 30 — that last check, the deck's own ordering when it was written,
+  stored **19 of 30** and **17 of 30** against this round's own first attempt, which is how
+  the regression was found. The deck no longer makes that call: it finishes the bump first,
+  when the swipe has one, and then saves the learning map through `saveLearning`, a
+  single-field write with nothing to read, so the check now stands for the overlap nothing
+  sequences — a profile or settings save landing while a swipe bumps the counter.
   What is *not* fixed, and is worth knowing:
   - **Offline, nothing is stored.** A transaction needs a server round-trip, so it fails with
     no connection; the store warns, persists nothing, and returns the figure it computed —

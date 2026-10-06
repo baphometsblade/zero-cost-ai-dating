@@ -26,18 +26,25 @@ Against a real Firestore emulator, driving the real `public/js/data-store.js`:
   `discovery/{uid}` projection is not republished. That second write used to happen on
   every single bump, mirroring a field that is deliberately excluded from the projection
   and could never appear in it. On a free tier whose whole thesis is staying inside a
-  quota, it is worth a test. Note the scope: this is a saving on the *bump*. A whole swipe
+  quota, it is worth a test. Note the scope: this is a saving on the *bump*. A whole like
   is three writes — the swipe, the counter, the affinity map — since the learning save
-  stopped going through `updateUser` and became a plain field write. A mutual like is four:
-  it also creates the match.
-- **A swipe does not lose its increment to the deck's own learning save.** This is the
-  check that caught this round's first attempt. `dashboard.js` fires an un-awaited
-  `updateUser({learning})` immediately before the bump, and `updateUser` was a
-  whole-document read-modify-write — so it re-wrote `usage` as it had read it and reverted
-  the increment that had just committed. Making the bump atomic made this *worse*, because
-  a one-round-trip transaction commits early enough to lose that race: replaying the deck's
-  exact ordering thirty times stored **19 of 30**, then **17 of 30**. `updateUser` is
-  transactional too now, and the same thirty swipes store thirty.
+  stopped going through `updateUser` and became a plain field write. A pass is two, with
+  no counter to move, and a mutual like is four: it also creates the match.
+  `specs/19-write-cost.store.js` counts all three.
+- **A whole-document save in flight cannot eat a bump's increment, or be eaten by it.** This
+  is the check that caught this round's first attempt. `dashboard.js` used to start an
+  `updateUser({learning})` on every swipe and leave it un-awaited across the counter bump
+  that followed on a like or a super like, and `updateUser` was a whole-document
+  read-modify-write — so whenever it read the document before the bump committed and wrote
+  it back after, it re-wrote `usage` as it had read it and reverted the increment. Making
+  the bump atomic made this *worse*, because a one-round-trip transaction commits early
+  enough to lose that race: replaying that ordering thirty times stored **19 of 30**, then
+  **17 of 30**. `updateUser` is transactional too now, and the same thirty overlaps store
+  thirty. The deck itself no longer overlaps them: it finishes the bump first, when the
+  swipe has one, and then saves the learning map through `saveLearning`, one field and no
+  read. So `specs/05-swipe-race.store.js` stands for the overlap nothing sequences — a
+  profile or settings save landing while a swipe bumps a counter — and keeps a
+  learning-shaped patch only so its payload assertions stay exact.
 - **What the transaction stores is a value `firestore.rules` accepts.** See the caveat
   below for how that one is arranged.
 
@@ -138,7 +145,7 @@ One spec per property. `tests/docs.test.js` fails if a spec exists without a row
 | --- | --- |
 | `specs/01-concurrency.store.js` | concurrent bumps land exactly once each — 20 at a time on one document store 20 |
 | `specs/02-rollover.store.js` | the day roll-over happens inside the transaction, so a bump at midnight cannot resurrect yesterday |
-| `specs/03-writes.store.js` | a bump writes the `usage` field and nothing else, so it can never clobber a profile edit — and `touchActive` honours the one-write-per-five-minutes throttle `docs/ARCHITECTURE.md` claims for it, the only interesting logic in the facade rather than in an adapter, and until now the only such claim nothing executed — including that its stamp lives in storage rather than in a per-page variable, and that a browser which refuses that write is not something the user is told about, and that an origin which can be READ but not written still throttles — the case the move into storage was supposed to survive and did not |
+| `specs/03-writes.store.js` | a bump writes the `usage` field and nothing else, so it can never clobber a profile edit — and `touchActive` honours the one-touch-per-five-minutes throttle `docs/ARCHITECTURE.md` claims for it (its timing, not its cost: a touch is two writes, and `21-navigation-cost` is what counts them), the only interesting logic in the facade rather than in an adapter, and until now the only such claim nothing executed — including that its stamp lives in storage rather than in a per-page variable, and that a browser which refuses that write is not something the user is told about, and that an origin which can be READ but not written still throttles — the case the move into storage was supposed to survive and did not |
 | `specs/04-rules-accept.store.js` | the values the shipped code stores are ones `firestore.rules` accepts — the counter the transaction writes, and the `discovery/{uid}` projection a profile save publishes, each replayed against the real ruleset. The projection half matters most: it is written best-effort, so a refusal there throws nothing and the account just stops appearing in decks |
 | `specs/05-swipe-race.store.js` | a document save in flight cannot eat the counter, or be eaten by it |
 | `specs/06-projection-order.store.js` | a racing save cannot leave the public `discovery/{uid}` projection behind the private document |
