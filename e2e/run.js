@@ -234,7 +234,21 @@ async function main() {
     const onlyFirebaseSkipped = skippedFiles.length === 1 &&
       skippedFiles[0].indexOf('firebase') !== -1;
     const key = skippedFiles.length === 0 ? 'e2eFirebase' : (onlyFirebaseSkipped ? 'e2e' : null);
-    const problem = key ? claims.disagreement(key, results.length) : null;
+    // Nor is such a run a pass. Its count is short by every check the other
+    // skipped specs carry, which is exactly the loss the comparison exists to
+    // catch, and this branch used to fall through to "N/N checks passed" and
+    // exit 0 without a word that nothing had been compared. Measured: with a
+    // second spec made to skip, a complete run did precisely that.
+    if (!key) {
+      process.stderr.write(
+        '\n  ' + skippedFiles.length + ' spec(s) skipped (' + skippedFiles.join(', ') + '), so this run cannot\n' +
+        '  be held to a total: scripts/claims.js claims one only for a complete run in which nothing\n' +
+        '  skipped, or the Firebase spec alone did. Give the skipped specs what they need, or teach\n' +
+        '  e2e/run.js this shape and claim a total for it in scripts/claims.js.\n'
+      );
+      return 1;
+    }
+    const problem = claims.disagreement(key, results.length);
     if (problem) {
       process.stderr.write('\n  ' + problem + '\n');
       return 1;
