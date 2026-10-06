@@ -1512,9 +1512,22 @@
      ------------------------------------------------------------------------ */
 
   /**
+   * Whether this account's plan ranks with the adaptive term. Read from the
+   * plan's `adaptiveWeights` in ZC.config.limits — the table the plans page
+   * prints — rather than from the plan's name, so the deck cannot rank one way
+   * while that page tells the person the other.
+   * @returns {boolean}
+   */
+  function adaptiveRanking() {
+    const plan = state.me && state.me.plan === 'premium' ? 'premium' : 'free';
+    const limits = (ZC.config && ZC.config.limits && ZC.config.limits[plan]) || null;
+    return !!(limits && limits.adaptiveWeights);
+  }
+
+  /**
    * Fetch the candidate pool, build the TF-IDF corpus from it and rank it.
-   * Adaptive weighting is a Premium feature, so free accounts are scored on
-   * the fixed weights only.
+   * Adaptive weighting is on only where the plan's limits say so — Premium,
+   * as shipped — so free accounts are scored on the fixed weights only.
    * @returns {Promise<void>}
    */
   async function load() {
@@ -1535,7 +1548,7 @@
       const ranked = ZC.matching.rankCandidates(state.me, list, {
         corpus: corpus,
         now: new Date().toISOString(),
-        adaptive: state.me.plan === 'premium'
+        adaptive: adaptiveRanking()
       });
       state.queue = Array.isArray(ranked) ? ranked : [];
       state.loading = false;

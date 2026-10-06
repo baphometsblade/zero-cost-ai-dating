@@ -136,8 +136,13 @@
      ------------------------------------------------------------------------ */
 
   /**
-   * Global app configuration. `limits` is the single source of truth for what
-   * each plan may do; the store's canSpend() reads it directly.
+   * Global app configuration. `limits` is what each plan may do. The store's
+   * canSpend() takes the daily budgets from it, app.js and matches.js take
+   * `seeLikedYou`, and the deck takes `adaptiveWeights`; subscription.js prints
+   * the same table, so a value changed here moves the plans page and those
+   * gates together. A limit declared here that no gate reads is a promise the
+   * plans page makes and nothing keeps, which `adaptiveWeights` was until the
+   * deck read it.
    */
   ZC.config = {
     firebase: firebaseConfig,

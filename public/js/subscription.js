@@ -5,9 +5,13 @@
    no payment, no request, no third party. It exists so the daily limits and
    the premium-only paths can actually be exercised.
 
-   Every number on this page is read from ZC.config.limits, the same table the
-   swipe deck enforces, so the page can never advertise something the app does
-   not do.
+   Every limit on this page is read from ZC.config.limits. The store's
+   canSpend() takes the daily budgets from the same table, app.js and
+   matches.js the who-liked-you flag, and the deck its adaptive ranking — and
+   a row here is only honest while the code that applies it reads the same
+   entry. `adaptiveWeights` was printed from this table while the deck decided
+   by the plan's name, so changing it changed this page and nothing else;
+   e2e/specs/11-subscription.e2e.js now changes it and checks both.
    ========================================================================== */
 (function () {
   'use strict';
@@ -278,7 +282,7 @@
 
   /**
    * Repaint the "your plan" card from the user document and today's counters.
-   * @param {Object} usage today's counters from ZC.store.getUsage
+   * @param {Object|null} usage today's counters, or null when they could not be read
    * @returns {void}
    */
   function renderCurrent(usage) {
@@ -296,9 +300,18 @@
 
     clear(dom.usageList);
     dom.usageList.setAttribute('aria-busy', 'false');
-    USAGE_ROWS.forEach(function (row) {
-      dom.usageList.appendChild(usageRow(row, usage, limits));
-    });
+    // Unknown is not zero. Rows of untouched counters here would tell someone
+    // who has used every like today that they have all of them left.
+    if (!usage) {
+      dom.usageList.appendChild(el('p', {
+        class: 'text-muted',
+        text: 'Today\'s usage could not be read, so it is not shown. Reload the page to try again.'
+      }));
+    } else {
+      USAGE_ROWS.forEach(function (row) {
+        dom.usageList.appendChild(usageRow(row, usage, limits));
+      });
+    }
     dom.usageReset.textContent = 'Counters reset at midnight, ' + timeToMidnight() + '. Passing on someone never costs anything.';
   }
 
@@ -323,17 +336,33 @@
 
   /**
    * Re-read today's counters and repaint everything that depends on the plan.
+   * A read that fails is shown as one, on the card and in a toast, the way a
+   * plan that fails to load is in boot() — not painted as a day with nothing
+   * used.
    * @returns {Promise<void>}
    */
   async function refresh() {
-    let usage = { date: util.todayKey(), likes: 0, superLikes: 0, rewinds: 0 };
+    let usage = null;
     try {
       usage = await ZC.store.getUsage(me.uid);
     } catch (err) {
       console.warn('[zc] Could not read today\'s usage.', err);
+      toast('Could not read today\'s usage.', 'error');
     }
     renderCurrent(usage);
     renderPlanCards();
+  }
+
+  /**
+   * Whether a usage record already in hand is today's. The store makes the
+   * same comparison before it trusts a stored record (`usageFromUser` in
+   * data-store.js), and a record from another day goes back to it, because
+   * rolling the day over is its job.
+   * @param {Object} usage a usage record from a user document
+   * @returns {boolean}
+   */
+  function isToday(usage) {
+    return !!usage && usage.date === util.todayKey();
   }
 
   /* ------------------------------------------------------------------------
@@ -351,7 +380,9 @@
       planSince: plan === 'premium' ? new Date().toISOString() : null
     });
     me = updated || me;
-    // Keep the cached doc (nav badges, the deck's adaptive flag) in step.
+    // Keep auth.js's cached copy in step: the badge sync below reads the plan
+    // off it. That costs a read of users/{uid}, because ZC.auth.refresh()
+    // fetches the document rather than taking the one the write returned.
     if (ZC.auth && typeof ZC.auth.refresh === 'function') {
       try {
         await ZC.auth.refresh();
@@ -359,7 +390,17 @@
         console.warn('[zc] Plan saved but the cached profile did not refresh.', err);
       }
     }
-    await refresh();
+    // The write hands back the document it committed, counters included — in
+    // firebase mode, as its own transaction read them. Fetching them again was
+    // a third read of users/{uid} on every switch, for the same bytes.
+    // Counters dated another day still go to the store, whose roll-over
+    // decides what they mean today.
+    if (updated && isToday(updated.usage)) {
+      renderCurrent(updated.usage);
+      renderPlanCards();
+    } else {
+      await refresh();
+    }
     // The "who liked you" badge only exists on the premium plan.
     if (ZC.app && typeof ZC.app.refreshBadges === 'function') ZC.app.refreshBadges(true);
   }
