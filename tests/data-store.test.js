@@ -716,6 +716,28 @@ test('reports that cannot be read are reported as a failure, not listed as none 
   await assert.rejects(store.getMyReports(YOU), 'a corrupt entry rejects');
 });
 
+test('retracting a report from a store that cannot be read fails, rather than calling it gone', async function () {
+  // settings.js shows {removed: false} as "That report had already been
+  // removed." Through the forgiving helper an unreadable store answered exactly
+  // that while the report was still filed — the claim 14-reports forbids the
+  // Firestore adapter to make.
+  await resetWorld();
+  await store.reportUser(YOU, 'maya-okonkwo', 'harassment', 'filed');
+  const realGetItem = localStorageShim.getItem;
+  localStorageShim.getItem = function (key) {
+    if (key === KEYS.reports) throw new Error('storage is unavailable');
+    return realGetItem.apply(this, arguments);
+  };
+  try {
+    await assert.rejects(store.retractReport(YOU, 'maya-okonkwo'), /storage is unavailable/);
+  } finally {
+    localStorageShim.getItem = realGetItem;
+  }
+  assert.equal((await store.getMyReports(YOU)).length, 1, 'the report is still filed');
+  assert.deepEqual(await store.retractReport(YOU, 'maya-okonkwo'), { ok: true, removed: true },
+    'and withdrawing it works once storage is back');
+});
+
 test('the export\'s three reads reject on a store they cannot read, rather than answer with nothing', async function () {
   // settings.js writes what getSwipes, getMatches and getMessages return into a
   // file as the whole record, and says whether it is complete. Through the

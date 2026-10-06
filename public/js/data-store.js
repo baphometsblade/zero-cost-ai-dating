@@ -1427,7 +1427,12 @@
     },
 
     async retractReport(fromUid, aboutUid) {
-      const reports = readReports();
+      // Strict for the reason getMyReports is: read through the forgiving
+      // helper, a store that could not be read was "no such report", so this
+      // answered {removed: false} and the settings page said the report "had
+      // already been removed" while it was still filed. The Firestore adapter
+      // lets the failure through, and store-tests/specs/14-reports pins that.
+      const reports = readMapOrThrow(KEYS.reports, 'reports');
       const id = swipeId(fromUid, aboutUid);
       if (!reports[id]) return { ok: true, removed: false };
       delete reports[id];
