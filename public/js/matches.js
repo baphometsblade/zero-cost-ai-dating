@@ -296,19 +296,28 @@
       : 'You matched — say something first.';
     const stamp = ZC.util.timeAgo(match.lastMessageAt || match.createdAt);
 
-    const label = name +
-      (unread ? ', ' + unread + ' unread ' + (unread === 1 ? 'message' : 'messages') : '') +
-      (stamp ? ', last activity ' + stamp : '');
+    // The row is named by its own text, not by an aria-label. A label replaced
+    // everything visible, so a screen reader heard "Devin A., 1 unread message,
+    // last activity 1d" and never the message the row shows. The hidden spans
+    // add only what the eye gets from styling — the unread state is a bold row
+    // and a dot, the stamp is just "1d" — and the punctuation that keeps the
+    // parts apart when they are read as one name. Placement is load-bearing:
+    // a browser puts a space at every block boundary, so punctuation leads
+    // nothing ("Sam W. : …" when it did); .match-row-name is read back as the
+    // person's name and .match-row-time is rewritten by refreshStamps(), so
+    // neither holds hidden text; and nothing hidden follows the preview, whose
+    // unwrapped text an out-of-flow span at its end would carry past the
+    // right edge (measured: the page grew to 688px wide on a 390px phone).
+    // Reading the stamp from the DOM also ends a staleness: the label was
+    // never refreshed, so its "last activity" outlived the stamp beside it.
+    const unreadText = unread ? unread + ' unread ' + (unread === 1 ? 'message' : 'messages') + ': ' : '';
 
     const row = el('a', {
       class: 'match-row' +
         (unread ? ' is-unread' : '') +
         (state.active && state.active.matchId === match.matchId ? ' is-active' : ''),
       dataset: { matchId: match.matchId },
-      attrs: {
-        href: 'matches.html?m=' + encodeURIComponent(match.matchId),
-        'aria-label': label
-      }
+      attrs: { href: 'matches.html?m=' + encodeURIComponent(match.matchId) }
     }, [
       el('img', {
         class: 'match-row-avatar',
@@ -316,8 +325,12 @@
       }),
       el('span', { class: 'match-row-body' }, [
         el('span', { class: 'match-row-name', text: name }),
-        el('span', { class: 'match-row-preview', text: preview })
+        el('span', { class: 'match-row-preview' }, [
+          unreadText ? el('span', { class: 'sr-only', text: unreadText }) : null,
+          preview
+        ])
       ]),
+      stamp ? el('span', { class: 'sr-only', text: 'last activity' }) : null,
       el('span', { class: 'match-row-time', text: stamp }),
       el('span', { class: 'match-row-dot', attrs: { 'aria-hidden': 'true' } })
     ]);

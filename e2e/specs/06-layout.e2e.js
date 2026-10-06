@@ -81,13 +81,15 @@ function measureReach(page) {
 }
 
 /**
- * Load each page and add up the layout shift that moved <main> itself while
- * it loaded. Layout shift is reported per element, so content arriving later
- * inside a page does not count here — only the page as a whole jumping.
+ * Load each page, add up the layout shift that moved <main> itself while it
+ * loaded, and measure whether the page can be scrolled sideways once it has.
+ * Layout shift is reported per element, so content arriving later inside a
+ * page does not count as a jump — only the page as a whole moving.
  * @param {Object} page a Playwright Page, signed in
  * @param {string} base the site's base URL, without a trailing slash
  * @param {string[]} names page names, without .html
- * @returns {Promise<string[]>} "name shift" for every page that jumped
+ * @returns {Promise<{jumped:string[], wide:string[]}>} "name shift" for every
+ *   page that jumped, "name width" for every page wider than the viewport
  */
 async function mainShifts(page, base, names) {
   await page.context().addInitScript(function () {
@@ -101,21 +103,27 @@ async function mainShifts(page, base, names) {
     }).observe({ type: 'layout-shift', buffered: true });
   });
   const jumped = [];
+  const wide = [];
   for (const name of names) {
     await page.goto(base + '/' + name + '.html', { waitUntil: 'load' });
     await page.waitForSelector('[data-zc-nav]');
     // Two frames, so a shift the header's arrival caused has been painted and
     // delivered to the observer before it is read.
-    const shift = await page.evaluate(function () {
+    const seen = await page.evaluate(function () {
       return new Promise(function (resolve) {
         requestAnimationFrame(function () {
-          requestAnimationFrame(function () { resolve(window.__zcMainShift); });
+          requestAnimationFrame(function () {
+            const doc = document.documentElement;
+            resolve({ shift: window.__zcMainShift, width: doc.scrollWidth, viewport: doc.clientWidth });
+          });
         });
       });
     });
-    if (shift > 0) jumped.push(name + ' ' + shift.toFixed(3));
+    if (seen.shift > 0) jumped.push(name + ' ' + seen.shift.toFixed(3));
+    // The same one-pixel allowance measureDeck makes for sub-pixel rounding.
+    if (seen.width > seen.viewport + 1) wide.push(name + ' ' + seen.width + 'px');
   }
-  return jumped;
+  return { jumped: jumped, wide: wide };
 }
 
 module.exports = {
@@ -169,8 +177,15 @@ module.exports = {
     // height: measured as shift on <main>, 0.66 on the plans page and 0.34 on
     // matches at the phone size. style.css now holds the header's room until
     // it exists. Removing that rule fails this on every page listed.
-    const jumps = await mainShifts(page, ctx.base, ['dashboard', 'matches', 'profile', 'settings', 'subscription']);
-    t.check('no page jumps when the shared header mounts', jumps.length === 0,
-      jumps.length ? 'shifted: ' + jumps.join(', ') : 'no shift on <main>');
+    const pages = await mainShifts(page, ctx.base, ['dashboard', 'matches', 'profile', 'settings', 'subscription']);
+    t.check('no page jumps when the shared header mounts', pages.jumped.length === 0,
+      pages.jumped.length ? 'shifted: ' + pages.jumped.join(', ') : 'no shift on <main>');
+
+    // Only the deck was measured for sideways overflow, so a conversation row
+    // that carried a hidden span past the right edge made the matches page
+    // 688px wide on a 390px phone with every spec green. Every signed-in page
+    // is held to the viewport's width now, at both sizes.
+    t.check('no signed-in page scrolls sideways', pages.wide.length === 0,
+      pages.wide.length ? 'wider than the viewport: ' + pages.wide.join(', ') : 'all within the viewport');
   }
 };
