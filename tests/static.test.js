@@ -486,17 +486,26 @@ test('(f) sw.js CORE precache list matches the shipped assets', function () {
   // And every shell asset must be listed — an app shell that silently skips a
   // page or script is not usable offline. The worker itself is excluded (the
   // browser manages its lifecycle; caching it would pin old versions).
+  //
+  // Everything Hosting deploys, not a list of directories and extensions: this
+  // walked '', 'css' and 'js' for five extensions, so an image or font added in
+  // its own folder shipped uncached with this check green. Measured: a
+  // public/img/hero.png the landing page linked passed. Skipped here is what
+  // firebase.json's "ignore" keeps off Hosting — dotfiles, node_modules and
+  // *.test.js — because what is never deployed cannot be precached.
   const expected = [];
-  ['', 'css', 'js'].forEach(function (dir) {
-    const abs = path.join(PUBLIC_DIR, dir);
-    fs.readdirSync(abs).forEach(function (name) {
+  (function walk(dir) {
+    fs.readdirSync(path.join(PUBLIC_DIR, dir)).forEach(function (name) {
       const rel = dir ? dir + '/' + name : name;
+      if (name.charAt(0) === '.' || name === 'node_modules' || /\.test\.js$/.test(name)) return;
+      if (fs.statSync(path.join(PUBLIC_DIR, rel)).isDirectory()) { walk(rel); return; }
       if (rel === 'sw.js') return;
-      if (!/\.(html|css|js|svg|webmanifest)$/.test(name)) return;
-      if (!fs.statSync(path.join(abs, name)).isFile()) return;
       expected.push(rel);
     });
-  });
+  })('');
+  // A walk that stopped finding things would pass by checking nothing.
+  assert.ok(expected.length >= listed.length,
+    'the walk of public/ found ' + expected.length + ' files, fewer than the ' + listed.length + ' CORE lists');
   expected.forEach(function (rel) {
     if (listed.indexOf(rel) === -1) {
       problems.push('public/' + rel + ' is not in sw.js CORE — it will not be available offline');
