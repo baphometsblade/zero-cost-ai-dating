@@ -36,10 +36,15 @@ const path = require('node:path');
 const ROOT = path.resolve(__dirname, '..');
 
 /**
- * Every script this project actually ships to a browser. Deliberately not a
- * recursive walk of `public/`: a walk that silently stopped matching would
- * check nothing and stay green, and the file list here is short enough that a
- * new script is a deliberate line in this array.
+ * Every script this project ships to a browser: each file in public/js, the
+ * service worker, and the body of every inline <script> in a public page.
+ *
+ * The inline half is the one the CSP itself runs. The policy allows exactly
+ * one inline script, by its sha256, and that hash pins the bytes but says
+ * nothing about what they do: an edit re-hashed into firebase.json and the
+ * page metas passes check (c) in static.test.js. This used to read public/js
+ * and sw.js only, so it never saw 404.html's script — measured: a
+ * document.write planted in that body left this file green.
  * @returns {Array<{rel:string, source:string}>}
  */
 function shippedScripts() {
@@ -52,6 +57,19 @@ function shippedScripts() {
     });
   const sw = path.join(ROOT, 'public', 'sw.js');
   if (fs.existsSync(sw)) files.push({ rel: 'public/sw.js', source: fs.readFileSync(sw, 'utf8') });
+  const publicDir = path.join(ROOT, 'public');
+  fs.readdirSync(publicDir)
+    .filter(function (name) { return name.endsWith('.html'); })
+    .forEach(function (name) {
+      const html = fs.readFileSync(path.join(publicDir, name), 'utf8');
+      const inline = /<script\b(?![^>]*\bsrc\s*=)[^>]*>([\s\S]*?)<\/script>/gi;
+      let match;
+      let n = 0;
+      while ((match = inline.exec(html)) !== null) {
+        n += 1;
+        files.push({ rel: 'public/' + name + ' inline script ' + n, source: match[1] });
+      }
+    });
   return files;
 }
 
