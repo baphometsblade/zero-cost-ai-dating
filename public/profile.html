@@ -66,7 +66,11 @@
 
         <!-- Hero: how you read at a glance, plus the completeness meter. -->
         <section class="profile-hero">
-          <img class="profile-photo" id="hero-photo" alt="" width="92" height="92">
+          <!-- Both photos start as an empty SVG: an <img> must have a src to be
+               valid, and this one loads (an error would race profile.js's
+               onerror fallback) and paints nothing until the script points it
+               at your photo or your generated avatar. -->
+          <img class="profile-photo" id="hero-photo" src="data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27/%3E" alt="" width="92" height="92">
           <div class="profile-body">
             <p class="profile-name" id="hero-name">Your profile</p>
             <p class="row">
@@ -191,46 +195,46 @@
                 <div class="personality-grid">
 
                   <div class="personality-axis">
-                    <label class="axis-label" for="range-openness">
-                      <span>Openness</span>
+                    <div class="axis-label">
+                      <label for="range-openness">Openness</label>
                       <output id="value-openness" for="range-openness">50</output>
-                    </label>
+                    </div>
                     <input class="range" type="range" id="range-openness" name="openness" min="0" max="100" step="1" value="50" aria-describedby="ends-openness">
                     <p class="axis-ends" id="ends-openness"><span>Happy with the familiar</span><span>Always chasing the new</span></p>
                   </div>
 
                   <div class="personality-axis">
-                    <label class="axis-label" for="range-conscientiousness">
-                      <span>Reliability</span>
+                    <div class="axis-label">
+                      <label for="range-conscientiousness">Reliability</label>
                       <output id="value-conscientiousness" for="range-conscientiousness">50</output>
-                    </label>
+                    </div>
                     <input class="range" type="range" id="range-conscientiousness" name="conscientiousness" min="0" max="100" step="1" value="50" aria-describedby="ends-conscientiousness">
                     <p class="axis-ends" id="ends-conscientiousness"><span>Wing it, cheerfully</span><span>Planned and on time</span></p>
                   </div>
 
                   <div class="personality-axis">
-                    <label class="axis-label" for="range-extraversion">
-                      <span>Social energy</span>
+                    <div class="axis-label">
+                      <label for="range-extraversion">Social energy</label>
                       <output id="value-extraversion" for="range-extraversion">50</output>
-                    </label>
+                    </div>
                     <input class="range" type="range" id="range-extraversion" name="extraversion" min="0" max="100" step="1" value="50" aria-describedby="ends-extraversion">
                     <p class="axis-ends" id="ends-extraversion"><span>Recharge on my own</span><span>Recharge in a crowd</span></p>
                   </div>
 
                   <div class="personality-axis">
-                    <label class="axis-label" for="range-agreeableness">
-                      <span>Warmth</span>
+                    <div class="axis-label">
+                      <label for="range-agreeableness">Warmth</label>
                       <output id="value-agreeableness" for="range-agreeableness">50</output>
-                    </label>
+                    </div>
                     <input class="range" type="range" id="range-agreeableness" name="agreeableness" min="0" max="100" step="1" value="50" aria-describedby="ends-agreeableness">
                     <p class="axis-ends" id="ends-agreeableness"><span>Blunt and direct</span><span>Warm and accommodating</span></p>
                   </div>
 
                   <div class="personality-axis">
-                    <label class="axis-label" for="range-stability">
-                      <span>Emotional steadiness</span>
+                    <div class="axis-label">
+                      <label for="range-stability">Emotional steadiness</label>
                       <output id="value-stability" for="range-stability">50</output>
-                    </label>
+                    </div>
                     <input class="range" type="range" id="range-stability" name="stability" min="0" max="100" step="1" value="50" aria-describedby="ends-stability">
                     <p class="axis-ends" id="ends-stability"><span>Feel everything, loudly</span><span>Even keel under stress</span></p>
                   </div>
@@ -334,7 +338,7 @@
               </div>
               <div class="card-body stack">
                 <article class="swipe-card" id="preview-card">
-                  <img class="swipe-photo" id="preview-photo" alt="">
+                  <img class="swipe-photo" id="preview-photo" src="data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27/%3E" alt="">
                   <div class="swipe-gradient" aria-hidden="true"></div>
                   <div class="swipe-info">
                     <p class="swipe-name">
