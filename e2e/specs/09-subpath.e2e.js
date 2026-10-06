@@ -40,8 +40,13 @@ module.exports = {
       // The worker registers relatively, so its scope must be the mount, not
       // the origin — scope is what decides which navigations it may answer.
       await page.goto(base + 'index.html', { waitUntil: 'domcontentloaded' });
+      // Raced against a deadline for the reason 07-offline gives: `ready`
+      // never settles when install fails, and page.evaluate would wait forever.
       const scope = await page.evaluate(function () {
-        return navigator.serviceWorker.ready.then(function (reg) { return reg.scope; });
+        return Promise.race([
+          navigator.serviceWorker.ready.then(function (reg) { return reg.scope; }),
+          new Promise(function (resolve) { setTimeout(function () { resolve('no active worker after 15 s'); }, 15000); })
+        ]);
       });
       t.check('the service worker scope is the subpath, not the origin', scope === base, scope);
 
@@ -123,24 +128,32 @@ module.exports = {
       if (ctx.session) ctx.session.expectNetworkErrors(true);
       await server.stop();
 
+      // A navigation that failed is kept apart from the title of one that
+      // landed, as 07-offline does and for the same reason: the failure text
+      // carries the URL, so `/Matches/i` passed on ".../zero-cost-ai-dating/
+      // matches" itself. Measured: with the worker's install broken, the
+      // matches check below printed PASS over net::ERR_CONNECTION_REFUSED.
       const seen = {};
       for (const url of [base, base + 'matches']) {
         try {
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
-          seen[url] = await page.title();
+          seen[url] = { title: await page.title() };
         } catch (err) {
-          seen[url] = 'NAVIGATION FAILED: ' + (err && err.message ? err.message.split('\n')[0] : err);
+          seen[url] = { title: '', failed: err && err.message ? err.message.split('\n')[0] : String(err) };
         }
       }
+      const shown = function (url) {
+        return seen[url].failed ? 'NAVIGATION FAILED: ' + seen[url].failed : seen[url].title;
+      };
 
       // The exact navigations the old fallback arithmetic got wrong: it read
       // the page name straight out of url.pathname, so the bare base computed
       // 'zero-cost-ai-dating.html' and served the 404 shell. With the base
       // stripped first, '' maps to index.html and 'matches' to matches.html.
       t.check('offline, the bare subpath serves the landing page',
-        /explains itself/i.test(seen[base]), seen[base]);
+        /explains itself/i.test(seen[base].title), shown(base));
       t.check('offline, the clean matches URL serves the matches page',
-        /Matches/i.test(seen[base + 'matches']), seen[base + 'matches']);
+        /Matches/i.test(seen[base + 'matches'].title), shown(base + 'matches'));
     } finally {
       // The cleanup half of the stop pair — the only one that runs when an
       // earlier check bails out. Idempotent when the mid-test stop ran too.
