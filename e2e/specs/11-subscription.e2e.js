@@ -175,6 +175,25 @@ module.exports = {
     t.check('the upgrade button itself says there is no payment',
       cta.indexOf('no payment') !== -1, JSON.stringify(cta.trim()));
 
+    // The tick and the cross are the only thing separating an included feature
+    // from a missing one, so they have to reach a screen reader as words. Read
+    // as the accessibility tree has them: a crossed-out row used to be a bare
+    // "✕" in front of its name, and the rewinds row "✕ No rewinds".
+    await page.waitForSelector('#free-features .plan-feature');
+    const rows = (await page.locator('#free-features').ariaSnapshot())
+      .split('\n')
+      .map(function (line) { return /listitem: "?(.*?)"?$/.exec(line.trim()); })
+      .filter(Boolean)
+      .map(function (match) { return match[1]; });
+    const offCount = await page.locator('#free-features .plan-feature.is-off').count();
+    const unspoken = rows.filter(function (name) {
+      return !/^(Included|Not included): \S/.test(name) || /^Not included: No /.test(name);
+    });
+    t.check('every free-plan row says whether it is included, and a missing one names the feature',
+      rows.length > 0 && offCount > 0 && unspoken.length === 0 &&
+        rows.filter(function (name) { return name.indexOf('Not included: ') === 0; }).length === offCount,
+      unspoken.length ? 'read as: ' + JSON.stringify(unspoken) : rows.length + ' rows, ' + offCount + ' not included');
+
     /* ---- declining has to mean declining ---- */
 
     const planOf = function () {

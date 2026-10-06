@@ -514,3 +514,34 @@ test('(f) sw.js CORE precache list matches the shipped assets', function () {
 
   assert.equal(problems.length, 0, report('Service worker precache problems:', problems));
 });
+
+test('(g) every glyph the stylesheets generate has alternative text', function () {
+  // Generated content is read aloud, so a decorative glyph is noise and a
+  // meaningful one needs words: the brand link was "♥ Zero Cost Dating", and a
+  // missing plan feature was a bare "✕". Each glyph is declared twice — plain,
+  // then with alternative text after the slash, which a browser that does not
+  // know the form ignores (style.css explains, above .nav-brand::before). A
+  // glyph declared only plainly fails here; '' alternative text is the honest
+  // way to say "decoration".
+  const problems = [];
+  let glyphs = 0;
+  ['style.css', 'components.css'].forEach(function (name) {
+    const css = fs.readFileSync(path.join(PUBLIC_DIR, 'css', name), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    const rule = /([^{}]+)\{([^{}]*)\}/g;
+    let m;
+    while ((m = rule.exec(css)) !== null) {
+      const plain = /(?:^|[;\s])content\s*:\s*('(?:[^'\\\n]|\\.)+'|"(?:[^"\\\n]|\\.)+")\s*;/.exec(m[2]);
+      if (!plain) continue;
+      glyphs += 1;
+      const literal = plain[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const alt = new RegExp('content\\s*:\\s*' + literal + '\\s*/\\s*(?:\'[^\'\\n]*\'|"[^"\\n]*")\\s*;');
+      if (!alt.test(m[2])) {
+        problems.push(name + ' ' + m[1].trim().replace(/\s+/g, ' ') + ': content ' + plain[1] +
+          ' has no alternative text — add content: ' + plain[1] + " / '…'; after it");
+      }
+    }
+  });
+  // Fourteen today; a parser that stopped finding them would pass by checking nothing.
+  assert.ok(glyphs >= 14, 'found only ' + glyphs + ' generated glyphs in the stylesheets');
+  assert.equal(problems.length, 0, report('Generated glyphs a screen reader reads raw:', problems));
+});

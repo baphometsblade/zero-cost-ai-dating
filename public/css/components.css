@@ -541,6 +541,7 @@
 
 .limit-banner::before {
   content: '⏳';
+  content: '⏳' / '';
   font-size: var(--fs-lg);
 }
 
@@ -662,6 +663,7 @@
 
 .icebreaker::before {
   content: '💬 ';
+  content: '💬 ' / '';
 }
 
 /* --------------------------------------------------------------------------
@@ -1283,9 +1285,12 @@
 }
 
 /* The tick and the cross are what separate an included feature from a missing
-   one, so both are read at text contrast, not at fill contrast. */
+   one, so both are read at text contrast, not at fill contrast — and both are
+   given words: without them a missing feature reached a screen reader as a
+   bare "✕" in front of the feature's name. */
 .plan-feature::before {
   content: '✓';
+  content: '✓' / 'Included: ';
   flex: 0 0 auto;
   font-weight: 800;
   color: var(--ok-ink);
@@ -1297,6 +1302,7 @@
 
 .plan-feature.is-off::before {
   content: '✕';
+  content: '✕' / 'Not included: ';
   color: var(--text-faint);
 }
 

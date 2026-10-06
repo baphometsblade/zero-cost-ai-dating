@@ -89,7 +89,11 @@
   ];
 
   /**
-   * Render a daily allowance as a plan bullet.
+   * Render a daily allowance as a plan bullet. A zero allowance is just the
+   * feature's name, because its row is crossed out — the cross says "not
+   * included", and to a screen reader the stylesheet says it in words. This
+   * returned "No rewinds", which under the cross read "✕ No rewinds", and
+   * aloud "Not included: No rewinds".
    * @param {number} value a limit from ZC.config.limits
    * @param {string} singular e.g. 'like'
    * @param {string} plural e.g. 'likes'
@@ -97,14 +101,17 @@
    */
   function countText(value, singular, plural) {
     if (value === Infinity) return 'Unlimited ' + plural;
-    if (!value) return 'No ' + plural;
+    if (!value) return plural.charAt(0).toUpperCase() + plural.slice(1);
     return value + ' ' + (value === 1 ? singular : plural) + ' a day';
   }
 
-  /** Bullet lists on the two plan cards. `on: false` renders as a crossed-out row. */
+  /**
+   * Bullet lists on the two plan cards. `on: false` renders as a crossed-out
+   * row, so every count row is on exactly when its allowance is non-zero.
+   */
   const FREE_BULLETS = [
-    { text: countText(LIMITS.free.likesPerDay, 'like', 'likes'), on: true },
-    { text: countText(LIMITS.free.superLikesPerDay, 'super like', 'super likes'), on: true },
+    { text: countText(LIMITS.free.likesPerDay, 'like', 'likes'), on: !!LIMITS.free.likesPerDay },
+    { text: countText(LIMITS.free.superLikesPerDay, 'super like', 'super likes'), on: !!LIMITS.free.superLikesPerDay },
     { text: 'Every score explained, in plain language', on: true },
     { text: 'Unlimited messages with your matches', on: true },
     { text: 'No ads, no trackers, no data sales', on: true },
@@ -115,8 +122,8 @@
   ];
 
   const PREMIUM_BULLETS = [
-    { text: countText(LIMITS.premium.likesPerDay, 'like', 'likes'), on: true },
-    { text: countText(LIMITS.premium.superLikesPerDay, 'super like', 'super likes'), on: true },
+    { text: countText(LIMITS.premium.likesPerDay, 'like', 'likes'), on: !!LIMITS.premium.likesPerDay },
+    { text: countText(LIMITS.premium.superLikesPerDay, 'super like', 'super likes'), on: !!LIMITS.premium.superLikesPerDay },
     { text: countText(LIMITS.premium.rewinds, 'rewind', 'rewinds'), on: !!LIMITS.premium.rewinds },
     { text: 'See everyone who liked you', on: !!LIMITS.premium.seeLikedYou },
     { text: 'Ranking learns from what you swipe on', on: !!LIMITS.premium.adaptiveWeights },
