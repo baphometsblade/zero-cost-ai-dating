@@ -41,7 +41,14 @@
   const DISTANCE_MIN = 1;
   const DISTANCE_MAX = 500;          // the slider maximum reads "Anywhere"
   const DELETE_PHRASE = 'DELETE';
-  const EXPORT_MESSAGE_LIMIT = 500;  // messages pulled per conversation for the export
+  // The most messages the export takes from one conversation: the newest ones.
+  // In firebase mode every message is a document read, so this bounds the
+  // messages half of one press of the button; the swipe history is read whole.
+  // Measured against the emulator: 750 swipes and ten conversations of 40
+  // messages cost 1,170 reads, and ten of 600 cost 5,780, of the 50,000 a day
+  // the whole deployment shares. A conversation longer than this is cut, and
+  // the file says so (see collectExport).
+  const EXPORT_MESSAGE_LIMIT = 500;
 
   /** Where the Firebase override lives, mirroring firebase-config.js. */
   const OVERRIDE_KEY = (ZC.config && ZC.config.overrideKey) || 'zc.firebaseConfig';
@@ -435,8 +442,13 @@
       await saveUser({ preferences: { notifications: !!enabled } });
     } catch (err) {
       console.error('[zc] Could not save the notification preference:', err);
-      // Put the control back where the stored value says it should be.
+      // Put the control back where the stored value says it should be — and the
+      // status line with it. It had already announced the change, and unlike the
+      // toast it stays on the page, so leaving it alone kept stating a setting
+      // the switch beside it no longer showed.
       dom.notifications.checked = !enabled;
+      setStatus(dom.appearanceStatus,
+        'Could not save that, so in-app notifications are still ' + (enabled ? 'off' : 'on') + '.');
       toast('Could not save that preference. Please try again.', 'error');
     }
   }
@@ -734,6 +746,17 @@
   /**
    * Build the export payload: everything of yours, and only a name and an id
    * for the people you matched with.
+   *
+   * Complete, or saying where it is not. Each conversation carries `complete`,
+   * with a `note` when it is false, and the file carries `complete` for the
+   * whole. It used to take the newest EXPORT_MESSAGE_LIMIT messages and write
+   * them out with nothing beside them, so a file holding 500 messages read the
+   * same whether the conversation had 500 or 501 — and a conversation that
+   * could not be read went out as an empty list, which in a file means "no
+   * messages". For the rest `complete` leans on the store: the three reads
+   * behind it reject when they cannot read what is stored — an unreadable demo
+   * entry, or a Firestore answer from the cache instead of the server — so an
+   * export comes out whole, marked where it is not, or not at all.
    * @param {string} uid the account being exported
    * @returns {Promise<Object>} JSON-serialisable export
    */
@@ -747,17 +770,30 @@
     for (let i = 0; i < matches.length; i += 1) {
       const view = matches[i];
       let messages = [];
+      let note = '';
       try {
-        messages = await ZC.store.getMessages(view.matchId, { limit: EXPORT_MESSAGE_LIMIT });
+        // One more than the limit, so a conversation that goes past it can be
+        // told from one that stops exactly on it. It costs a read only when there
+        // is a message there to read.
+        const newest = await ZC.store.getMessages(view.matchId, { limit: EXPORT_MESSAGE_LIMIT + 1 });
+        messages = newest.slice(Math.max(0, newest.length - EXPORT_MESSAGE_LIMIT));
+        if (newest.length > EXPORT_MESSAGE_LIMIT) {
+          note = 'Longer than ' + EXPORT_MESSAGE_LIMIT + ' messages: only the newest ' +
+            EXPORT_MESSAGE_LIMIT + ' are included.';
+        }
       } catch (err) {
         console.warn('[zc] Could not read one conversation for the export.', err);
+        note = 'This conversation could not be read when the export was made, so its messages are missing.';
       }
-      conversations.push({
+      const entry = {
         matchId: view.matchId,
         with: { uid: view.otherUid, displayName: (view.other && view.other.displayName) || '' },
         matchedAt: view.createdAt || null,
-        messages: messages
-      });
+        complete: !note
+      };
+      if (note) entry.note = note;
+      entry.messages = messages;
+      conversations.push(entry);
     }
 
     return {
@@ -765,6 +801,7 @@
       version: (ZC.config && ZC.config.version) || '1.0.0',
       storage: ZC.store.mode,
       exportedAt: new Date().toISOString(),
+      complete: conversations.every(function (entry) { return entry.complete; }),
       account: me,
       swipes: swipes,
       conversations: conversations
@@ -780,7 +817,14 @@
     try {
       const payload = await collectExport(me.uid);
       downloadJson('zero-cost-ai-dating-' + util.todayKey() + '.json', JSON.stringify(payload, null, 2));
-      toast('Export downloaded.', 'success');
+      const short = payload.conversations.filter(function (entry) { return !entry.complete; }).length;
+      if (short) {
+        toast('Export downloaded, but it is not complete: ' + short +
+          (short === 1 ? ' conversation is' : ' conversations are') +
+          ' missing messages. The file marks which, and why.', 'warn', 8000);
+      } else {
+        toast('Export downloaded.', 'success');
+      }
     } catch (err) {
       console.error('[zc] Export failed:', err);
       toast('Could not build the export. Please try again.', 'error');
@@ -1072,7 +1116,9 @@
     });
 
     // The reports list is a plain semantic <ul> with no dedicated CSS class,
-    // so the marker comes off here via CSSOM (the CSP forbids style="...").
+    // so the marker comes off here via CSSOM. Not for the CSP's sake: the
+    // shipped `style-src 'self' 'unsafe-inline'` would allow style="...", and a
+    // CSSOM write is not governed by `style-src` either way.
     dom.reportsList.style.setProperty('list-style', 'none');
 
     dom.exportData.addEventListener('click', onExport);

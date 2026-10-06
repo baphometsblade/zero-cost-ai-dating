@@ -690,6 +690,54 @@ test('getMyReports sorts newest first and returns copies; retractReport removes 
   await assert.rejects(store.retractReport(YOU, ''), /both accounts/);
 });
 
+test('reports that cannot be read are reported as a failure, not listed as none filed', async function () {
+  // The settings page draws an empty list as "You have not reported anyone." —
+  // on the one panel that is also the only way to retract a report. Reading the
+  // store through the forgiving helper turned an unreadable entry into exactly
+  // that list. Both ways storage fails are tried: a read that throws, and an
+  // entry that is not JSON.
+  await resetWorld();
+  await store.reportUser(YOU, 'maya-okonkwo', 'harassment', 'filed');
+  assert.equal((await store.getMyReports(YOU)).length, 1, 'healthy, to begin with');
+
+  const realGetItem = localStorageShim.getItem;
+  localStorageShim.getItem = function (key) {
+    if (key === KEYS.reports) throw new Error('storage is unavailable');
+    return realGetItem.apply(this, arguments);
+  };
+  try {
+    await assert.rejects(store.getMyReports(YOU), /storage is unavailable/, 'a read that throws rejects');
+  } finally {
+    localStorageShim.getItem = realGetItem;
+  }
+  assert.equal((await store.getMyReports(YOU)).length, 1, 'and the report was there all along');
+
+  backing.set(KEYS.reports, '{not json at all');
+  await assert.rejects(store.getMyReports(YOU), 'a corrupt entry rejects');
+});
+
+test('the export\'s three reads reject on a store they cannot read, rather than answer with nothing', async function () {
+  // settings.js writes what getSwipes, getMatches and getMessages return into a
+  // file as the whole record, and says whether it is complete. Through the
+  // forgiving helpers an unreadable entry came back as no swipes, no matches or
+  // an empty conversation: an export missing all of it, saying nothing.
+  await resetWorld();
+  await store.recordSwipe(YOU, 'theo-lindqvist', 'pass');
+  assert.ok((await store.getSwipes(YOU)).length > 0, 'swipes, to begin with');
+  assert.ok((await store.getMatches(YOU)).length > 0, 'matches, to begin with');
+  assert.ok((await store.getMessages(DEVIN_MATCH, {})).length > 0, 'messages, to begin with');
+
+  const reads = [
+    [KEYS.swipes, function () { return store.getSwipes(YOU); }],
+    [KEYS.matches, function () { return store.getMatches(YOU); }],
+    [KEYS.messages, function () { return store.getMessages(DEVIN_MATCH, {}); }]
+  ];
+  for (const [key, read] of reads) {
+    backing.set(key, '{not json at all');
+    await assert.rejects(read(), key + ' that cannot be read must reject');
+  }
+});
+
 /* ------------------------------------------------------------------------
    9. Account deletion
    ------------------------------------------------------------------------ */

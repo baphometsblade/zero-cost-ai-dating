@@ -611,6 +611,22 @@
   function readReports() { return readJson(KEYS.reports, {}); }
   function writeReports(map) { return writeJson(KEYS.reports, map); }
 
+  /**
+   * One stored map, for a reader whose empty answer somebody is shown as a fact:
+   * "You have not reported anyone.", or an export with no swipes in it. The
+   * helpers above turn an entry that cannot be read into `{}`, which such a
+   * reader would pass on as "none"; this rejects instead — what the Firestore
+   * adapter does when its query fails or the server cannot be reached.
+   * @param {string} key localStorage key
+   * @param {string} what what is stored there, for the error
+   * @returns {Object} the stored map
+   */
+  function readMapOrThrow(key, what) {
+    const read = readJsonResult(key, {});
+    if (!read.ok) throw read.err || new Error('The stored ' + what + ' could not be read.');
+    return isPlainObject(read.value) ? read.value : {};
+  }
+
   /* ------------------------------------------------------------------------
      4. Demo message listeners (storage event + poll)
      ------------------------------------------------------------------------ */
@@ -1095,7 +1111,10 @@
     },
 
     async getSwipes(uid) {
-      const swipes = readSwipes();
+      // Strict, like getMatches and getMessages: the data export is the app's
+      // only caller of all three, and it writes what they return into a file as
+      // the whole record.
+      const swipes = readMapOrThrow(KEYS.swipes, 'swipes');
       return Object.keys(swipes)
         .map(function (key) { return swipes[key]; })
         .filter(function (swipe) { return isPlainObject(swipe) && swipe.from === uid; })
@@ -1224,8 +1243,9 @@
     },
 
     async getMatches(uid) {
+      // The accounts stay forgiving: they only lend each view a name and a face.
       const users = readUsers();
-      const matches = readMatches();
+      const matches = readMapOrThrow(KEYS.matches, 'matches');
       return Object.keys(matches)
         .map(function (key) { return matches[key]; })
         .filter(function (match) { return isPlainObject(match) && Array.isArray(match.users) && match.users.indexOf(uid) !== -1; })
@@ -1262,7 +1282,7 @@
 
     async getMessages(matchId, options) {
       const limit = Math.max(1, Number((options || {}).limit) || DEFAULT_MESSAGE_LIMIT);
-      const all = readMessages();
+      const all = readMapOrThrow(KEYS.messages, 'messages');
       const list = Array.isArray(all[matchId]) ? all[matchId] : [];
       return cloneDeep(list.slice(Math.max(0, list.length - limit)));
     },
@@ -1392,7 +1412,11 @@
     },
 
     async getMyReports(uid) {
-      const reports = readReports();
+      // Not the forgiving readReports: read as `{}`, a store that could not be
+      // read came out as an empty list, which the settings page states as "You
+      // have not reported anyone." — on the one panel a report can be retracted
+      // from, while the report is still filed.
+      const reports = readMapOrThrow(KEYS.reports, 'reports');
       return Object.keys(reports)
         .map(function (key) { return reports[key]; })
         .filter(function (report) { return isPlainObject(report) && report.from === uid; })
@@ -1648,6 +1672,27 @@
     const data = snap.data() || {};
     data.uid = data.uid || snap.id;
     return normalizeUser(data);
+  }
+
+  /**
+   * Refuse a query answer the server did not give. Offline, `get()` does not
+   * fail: it answers from the local cache, and with no persistence enabled that
+   * holds only what this page has read or written itself. Measured against the
+   * emulator with the network disabled: a filed report, five swipes and a match,
+   * none of them read by this client before, all came back as nothing at all.
+   * For a list whose emptiness somebody is shown as a fact, that answer has to
+   * be a failure.
+   * @param {Object} snap a QuerySnapshot
+   * @param {string} what what was being read, for the error
+   * @returns {Object} the same snapshot, when it came from the server
+   */
+  function fromServer(snap, what) {
+    if (snap && snap.metadata && snap.metadata.fromCache) {
+      const offline = new Error(what + ' could not be fetched: the server was not reached.');
+      offline.code = 'unavailable';
+      throw offline;
+    }
+    return snap;
   }
 
   /**
@@ -2479,6 +2524,9 @@
         console.warn('[zc.store] Ordered swipe query unavailable, falling back.', err);
         snap = await db().collection('swipes').where('from', '==', uid).get();
       }
+      // The data export is the app's only caller, and it writes this into a file
+      // as the whole swipe history; see fromServer.
+      fromServer(snap, 'Your swipes');
       const out = [];
       snap.forEach(function (doc) {
         const data = doc.data() || {};
@@ -2635,6 +2683,8 @@
         console.warn('[zc.store] Ordered match query unavailable, sorting client-side.', err);
         snap = await collection.where('users', 'array-contains', uid).get();
       }
+      // The data export is the app's only caller; see fromServer.
+      fromServer(snap, 'Your matches');
       const docs = [];
       snap.forEach(function (doc) {
         const data = doc.data() || {};
@@ -2675,8 +2725,9 @@
 
     async getMessages(matchId, options) {
       const limit = Math.max(1, Number((options || {}).limit) || DEFAULT_MESSAGE_LIMIT);
-      const snap = await db().collection('matches').doc(matchId).collection('messages')
-        .orderBy('createdAt', 'desc').limit(limit).get();
+      // The data export is the app's only caller; see fromServer.
+      const snap = fromServer(await db().collection('matches').doc(matchId).collection('messages')
+        .orderBy('createdAt', 'desc').limit(limit).get(), 'This conversation');
       const out = [];
       snap.forEach(function (doc) {
         const data = doc.data() || {};
@@ -2956,16 +3007,15 @@
     },
 
     async getMyReports(uid) {
-      // The rules permit exactly this query (author-only read). Anything that
-      // still goes wrong degrades to an empty list so the settings page keeps
-      // rendering — a permissions hiccup must never take the page down.
-      let snap;
-      try {
-        snap = await db().collection('reports').where('from', '==', uid).get();
-      } catch (err) {
-        console.warn('[zc.store] Could not load the filed reports.', err);
-        return [];
-      }
+      // The rules permit exactly this query (author-only read). If it fails
+      // anyway, that rejects. It used to degrade to an empty list "so the settings
+      // page keeps rendering", but the page never needed that: it loads this list
+      // on its own and catches the failure itself, with "Could not load your
+      // reports". What the empty list did instead was put "You have not reported
+      // anyone." on the one panel a report can be retracted from, while the
+      // reports sat in the queue. Offline is the case that does not reject by
+      // itself; see fromServer.
+      const snap = fromServer(await db().collection('reports').where('from', '==', uid).get(), 'Your reports');
       const out = [];
       snap.forEach(function (doc) {
         const data = doc.data() || {};
@@ -3748,7 +3798,9 @@
     },
 
     /**
-     * Every swipe this user has made, newest first.
+     * Every swipe this user has made, newest first. Rejects rather than answer
+     * with less than the whole history: an unreadable demo store, or a Firestore
+     * answer that came from the cache instead of the server.
      * @param {string} uid swiper id
      * @returns {Promise<Object[]>} SwipeDocs
      */
@@ -3885,6 +3937,7 @@
 
     /**
      * All of this user's matches as render-ready views, newest activity first.
+     * Rejects, like getSwipes, when the matches cannot be read in full.
      * @param {string} uid viewer id
      * @returns {Promise<Object[]>} MatchViews
      */
@@ -3924,7 +3977,8 @@
     },
 
     /**
-     * Conversation history, oldest first.
+     * Conversation history, oldest first. Rejects, like getSwipes, when the
+     * messages cannot be read in full.
      * @param {string} matchId match id
      * @param {{limit?:number}} [options] how many of the newest messages (default 200)
      * @returns {Promise<Object[]>} MessageDocs
@@ -4146,9 +4200,10 @@
     },
 
     /**
-     * Every report this user has filed, newest first. Read problems (offline,
-     * a rules mismatch) degrade to an empty list with a console warning — the
-     * settings page has to render either way.
+     * Every report this user has filed, newest first. Rejects when the reports
+     * cannot be read (offline, a rules mismatch, an unreadable demo store), in
+     * both adapters: an empty list here means none were filed, and the settings
+     * page says exactly that, so a failure must not arrive as one.
      * @param {string} uid the reporter
      * @returns {Promise<Object[]>} ReportDocs ({id, from, about, reason, details, createdAt})
      */

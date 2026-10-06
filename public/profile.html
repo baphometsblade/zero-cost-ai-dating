@@ -86,7 +86,8 @@
         </section>
 
         <!-- Editor on the left, live card on the right (profile.js widens this
-             into two columns via CSSOM; inline style attributes are CSP-blocked). -->
+             into two columns via CSSOM, because the stylesheet has no class for
+             it; the shipped CSP would allow an inline style attribute too). -->
         <div class="stack-lg" id="profile-layout">
 
           <form class="stack-lg" id="profile-form" novalidate>
