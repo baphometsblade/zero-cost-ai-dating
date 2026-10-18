@@ -92,7 +92,8 @@
     sending: false,
     firstPaint: true,    // suppresses "new message" announcements on open
     gotFirst: false,     // whether the live list has delivered at least once
-    ended: false         // the open conversation was ended by the other side
+    ended: false,        // the open conversation was ended by the other side
+    readRefused: null    // matchId whose unread counter the store last refused to clear
   };
 
   // Wide enough for both panes at once — the same breakpoint .two-pane uses.
@@ -107,9 +108,16 @@
   // Fingerprint of the left pane as it is currently painted. Rebuilding a row
   // the user has already pressed down on cancels their click: mousedown lands
   // on the old node, the rebuild detaches it, and with no common ancestor left
-  // for mouseup the browser never fires a click at all. Both the 20s poll and
-  // the window-focus refresh repaint, so without this a tap on a conversation
-  // silently does nothing every time one of them lands mid-press.
+  // for mouseup the browser never fires a click at all. `renderList` runs on
+  // every delivery of the live list, and some deliveries change nothing this
+  // pane draws: in firebase mode the other person reading what was sent
+  // rewrites their own unread counter on the shared match document, and that
+  // alone is a delivery; in both modes `markRead`'s own write comes back as one
+  // after the row has already been drawn as read. This is what lets those
+  // leave the rows alone. Without it, a tap on a conversation silently does
+  // nothing whenever one of them lands mid-press. (This comment used to blame
+  // a 20-second poll and a refresh on window focus. Both are gone; the reason
+  // this exists is not.)
   let listPainted = null;
 
   /* ------------------------------------------------------------------------
@@ -348,13 +356,14 @@
 
   /**
    * Everything the strip and the rows draw, in one comparable string, so a
-   * refresh that found nothing new can leave their nodes alone.
+   * delivery that brings nothing new can leave their nodes alone.
    *
    * Deliberately built from raw timestamps rather than their timeAgo text: a
    * relative stamp changes as the clock advances even when nothing about the
-   * conversation has, and a fingerprint that drifts on its own would repaint
-   * the list on almost every poll — exactly what it exists to prevent. The
-   * displayed stamps are kept honest separately, in refreshStamps().
+   * conversation has, and a fingerprint that drifted on its own would turn
+   * deliveries that change nothing into repaints — exactly what it exists to
+   * prevent. The displayed stamps are kept honest separately, in
+   * refreshStamps(), by a ticker that runs for as long as the page does.
    * @param {Object[]} fresh matches nobody has written to yet
    * @param {Object[]} rows every match, in the order they are listed
    * @returns {string}
@@ -713,10 +722,50 @@
   }
 
   /**
+   * Where a delivery carries on from what is already on screen: the index of
+   * its first message not yet drawn, or -1 when it does not carry on at all.
+   *
+   * "Carries on from", not "starts with". The Firestore adapter delivers the
+   * newest LIVE_MESSAGE_WINDOW (200) messages, so past that length every new
+   * message slides the window and the delivery starts somewhere INSIDE what is
+   * drawn. This used to demand that it start with the first message drawn, so
+   * a slid window read as history changing: every bubble was rebuilt, any text
+   * the reader had selected went with them, and every message from the other
+   * side in the window was announced as new. Measured in firebase mode: one
+   * new message in a 205-message conversation was announced as "100 new
+   * messages from" its sender. The demo adapter delivers everything, so it
+   * never slid.
+   * @param {Object[]} messages a delivery, oldest first
+   * @returns {number}
+   */
+  function continuationOf(messages) {
+    const shown = state.rendered;
+    if (!shown.length || !messages.length) return -1;
+    let from = -1;
+    for (let i = 0; i < shown.length; i += 1) {
+      if (shown[i].id === messages[0].id) {
+        from = i;
+        break;
+      }
+    }
+    if (from === -1) return -1;
+    // Everything drawn from there on has to be where the delivery has it.
+    const overlap = shown.length - from;
+    if (messages.length < overlap) return -1;
+    for (let j = 0; j < overlap; j += 1) {
+      if (messages[j].id !== shown[from + j].id) return -1;
+    }
+    return overlap;
+  }
+
+  /**
    * Paint a delivery from ZC.store.listenMessages. Messages only ever arrive
-   * at the end, so when the list still starts with what is already on screen
-   * we append the tail and leave the reader's scroll position alone.
-   * @param {Object[]} list the full ascending message list
+   * at the end, so a delivery that carries on from what is on screen has its
+   * tail appended and nothing else touched — not the reader's scroll position,
+   * not what they have selected. What a slid window drops off its far end
+   * stays drawn: the reader may be in the middle of reading it.
+   * @param {Object[]} list ascending messages: all of them in demo mode, the
+   *   newest LIVE_MESSAGE_WINDOW in firebase mode
    * @returns {void}
    */
   function renderMessages(list) {
@@ -735,26 +784,20 @@
     const stick = state.firstPaint || isNearBottom();
 
     // Can we extend what is already rendered, or has history changed under us?
-    let canAppend = state.rendered.length > 0 && messages.length >= state.rendered.length;
-    if (canAppend) {
-      for (let i = 0; i < state.rendered.length; i += 1) {
-        if (!messages[i] || messages[i].id !== state.rendered[i].id) {
-          canAppend = false;
-          break;
-        }
-      }
-    }
-
+    const next = continuationOf(messages);
     let added = [];
-    if (canAppend) {
-      added = messages.slice(state.rendered.length);
+    if (next !== -1) {
+      added = messages.slice(next);
       added.forEach(appendMessage);
     } else {
+      // Even a real rebuild announces only what was not on screen before it.
+      const seen = {};
+      state.rendered.forEach(function (message) { seen[message.id] = true; });
       fill(dom.log, null);
       state.rendered = [];
       state.lastDay = null;
       messages.forEach(appendMessage);
-      added = messages;
+      added = messages.filter(function (message) { return !seen[message.id]; });
     }
 
     refreshStamps();
@@ -776,7 +819,8 @@
   /** Re-render the relative stamps so '4m' does not sit there all afternoon. */
   function refreshStamps() {
     // Conversation list rows: their timestamps are deliberately absent from
-    // the list fingerprint, so this is the only thing that keeps them honest.
+    // the list fingerprint, so while nothing else about the list changes this
+    // is the only thing that keeps them honest.
     if (dom.list) {
       $$('.match-row', dom.list).forEach(function (row) {
         const stamp = $('.match-row-time', row);
@@ -909,24 +953,50 @@
    * Clear this conversation's unread counter and repaint what depends on it.
    * The stored counter is only written when there is something to clear, or
    * when `force` says a message just landed in a thread that is already open.
+   *
+   * A refusal is something this has to hear, and both adapters say it by
+   * resolving `false` — neither rejects. Ignoring the answer left the row
+   * drawn as read and `#unread-badge` lowered while the stored counter, and
+   * the nav badge drawn from it, stayed put; coming back to the tab did not
+   * ask again. The next delivery of the list carried the stored count back in
+   * only for this to zero the row and write again at once, so the two went on
+   * disagreeing. That delivery was the only retry, and in firebase mode the
+   * refusal makes one itself — the SDK rolls the write back — so retrying on
+   * it was a loop: about sixty refused writes in four seconds against the
+   * emulator. Now the count goes back at once, and the conversation is not
+   * asked about again until there is a reason to: the reader opening it or
+   * coming back to the tab, or a new message landing.
    * @param {boolean} [force=false] write even when the local count is zero
    * @returns {Promise<void>}
    */
   async function markRead(force) {
     const match = state.active;
     if (!match || !state.me) return;
-    const had = Number(match.unread) > 0;
+    if (!force && state.readRefused === match.matchId) return;
+    const before = Math.max(0, Number(match.unread) || 0);
+    const had = before > 0;
     if (had) {
       match.unread = 0;
       renderList();
     }
     if (!had && !force) return;
+    let cleared = false;
     try {
-      await ZC.store.markRead(match.matchId, state.me.uid);
-      if (ZC.app && typeof ZC.app.refreshBadges === 'function') ZC.app.refreshBadges(true);
+      cleared = (await ZC.store.markRead(match.matchId, state.me.uid)) !== false;
     } catch (err) {
-      // The badge will correct itself on the next poll.
       console.warn('[zc] Could not clear the unread counter:', err);
+    }
+    if (cleared) {
+      if (state.readRefused === match.matchId) state.readRefused = null;
+      if (ZC.app && typeof ZC.app.refreshBadges === 'function') ZC.app.refreshBadges(true);
+      return;
+    }
+    state.readRefused = match.matchId;
+    // Back to what the store still says, unless a delivery has already put it
+    // back with a fresher row — which is what the firebase rollback does.
+    if (had && state.active === match && Number(match.unread) === 0) {
+      match.unread = before;
+      renderList();
     }
   }
 
@@ -1045,10 +1115,11 @@
       renderMessages(list);
     });
 
+    // Opening a conversation is a reason to try a refused counter again.
+    state.readRefused = null;
     markRead();
     announce('Conversation with ' + nameOf(match.other) + ' opened.');
     focusConversation(fromUser);
-    startStampTicker();
   }
 
   /**
@@ -1071,7 +1142,6 @@
     if (!state.active || state.ended) return;
     state.ended = true;
     stopListening();
-    stopStampTicker();
     state.rendered = [];
     state.lastDay = null;
     if (dom.log) {
@@ -1114,7 +1184,6 @@
     const had = state.active;
     reopenComposer();
     stopListening();
-    stopStampTicker();
     state.active = null;
     state.rendered = [];
     state.lastDay = null;
@@ -1135,7 +1204,15 @@
     }
   }
 
-  /** Keep relative stamps fresh while a conversation is open. */
+  /**
+   * Keep relative stamps fresh for as long as the page is up: the list's rows
+   * as much as an open conversation's bubbles. It used to start when a
+   * conversation opened and stop when one closed or ended, so a list loaded
+   * with no `?m=` — or returned to with Back — had nothing rewriting its stamps
+   * at all, and their fingerprint leaves them out on purpose. Started once by
+   * `boot`, stopped only by `teardown`, and started again by `pageshow`.
+   * @returns {void}
+   */
   function startStampTicker() {
     if (stampTimer) return;
     stampTimer = window.setInterval(function () {
@@ -1653,7 +1730,12 @@
     // back-forward cache has run `teardown` and needs its subscription back —
     // and so does a page whose stream died while it was in the background.
     subscribeList();
-    if (state.active) markRead();
+    if (state.active) {
+      // A person looking at the conversation again is the retry a refused
+      // counter waits for; see markRead.
+      state.readRefused = null;
+      markRead();
+    }
   }
 
   /** Release the message listener, the subscription and the timers. */
@@ -1722,7 +1804,9 @@
     // chat log froze for good — no inbound message, and not even the reader's
     // own — while the list beside it kept updating and `markRead` kept clearing
     // the unread count for messages they could not see. Re-entering the
-    // conversation restores both the message listener and the stamp ticker.
+    // conversation restores the message listener; the stamp ticker is started
+    // again below whether or not a conversation is open, since it belongs to
+    // the page rather than to any one conversation.
     // `stopListDeadline` is the one that needs nothing: `subscribeList` starts
     // it again, and it returns early once the first delivery has landed.
     window.addEventListener('pageshow', function (event) {
@@ -1770,6 +1854,7 @@
       state.draft = ZC.util.qs('draft');
       wire();
       syncComposer();
+      startStampTicker();
       await load();
     } catch (err) {
       console.error('[zc] The matches page could not start:', err);

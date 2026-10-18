@@ -2304,6 +2304,48 @@
   }
 
   /**
+   * Everyone still waiting on this account's answer: taken from a live count
+   * that has not yet delivered its first count, or read here when there is
+   * none. Shared by `getLikesReceived` and `countLikesReceived` for the
+   * reason `likeSenders` is.
+   *
+   * matches.html on premium asks for this (`renderLikes`, on the conversation
+   * list's first delivery) while `app.js`'s nav badge is counting the same
+   * people, and it asks at the worst moment: run in firebase mode in a
+   * browser, the list's call landed before the badge's first count on every
+   * load measured. Both then did the whole job.
+   * The sender query was not paid twice — a `get` of a query that a listener
+   * already holds is answered from that listener's target — but the account
+   * read and the answered-lookups were: each of the list's went out after the
+   * badge's had finished, so the SDK had nothing to share them with, and the
+   * server saw three reads more at twelve people waiting.
+   *
+   * Only until the count's FIRST count is delivered, deliberately: until then,
+   * everything it knows it has learned since it subscribed. After that it
+   * remembers what it learned rather than asking again, and a remembered
+   * answer goes stale in a direction its own query cannot see: an answer this
+   * account gives from another tab never fires `swipes where to == me`, so the
+   * badge keeps counting that person until a reload. A list that took a
+   * remembered answer would inherit that — a correctness regression paid for a
+   * cost win. So it never joins a count that has delivered, even while that
+   * count still has a lookup out: a lookup after the first asks about
+   * newcomers alone, and the count it ends in is built on everybody else's
+   * remembered answers. A list that joins before the first count gets an
+   * answer no staler than the lookups it waited on.
+   * @param {string} uid the viewer
+   * @returns {Promise<string[]>} the uids still waiting for an answer
+   */
+  async function waitingLikers(uid) {
+    const watcher = likeWatchers.filter(function (w) { return w.uid === uid && w.looking; })[0];
+    // Handed the count's answer, or null: a lookup that failed, or a count that
+    // stopped or died first, sends this back to look for itself.
+    const joined = watcher
+      ? await new Promise(function (resolve) { watcher.waiters.push(resolve); })
+      : null;
+    return joined || pendingOf(uid, await likeSenders(uid));
+  }
+
+  /**
    * The match document for a pair that has just been found mutual: created once
    * and only once, and answered as "no match" when the rules refuse it.
    * @param {string} fromUid the swiper
@@ -2753,7 +2795,7 @@
     },
 
     async getLikesReceived(uid) {
-      const pending = await pendingOf(uid, await likeSenders(uid));
+      const pending = await waitingLikers(uid);
       if (!pending.length) return [];
       const users = await fetchProfiles(pending);
       // No "and they have not blocked me" filter, because there cannot be one here.
@@ -2774,7 +2816,7 @@
       // `getLikesReceived` without its last step, which is the whole point:
       // no `fetchProfiles`, so no profile is read, billed, or left behind in
       // the face cache.
-      return (await pendingOf(uid, await likeSenders(uid))).length;
+      return (await waitingLikers(uid)).length;
     },
 
     async getMatches(uid) {
@@ -2911,11 +2953,42 @@
         answered: {},
         blocks: [],
         stopped: false,
+        // True from the subscription until the first count is delivered, and
+        // never again. Until then every answer the count holds was learned
+        // since it subscribed; after it, a lookup asks about newcomers alone
+        // and hands on what is remembered for the rest — answers that can have
+        // gone stale without this count hearing, which is what `waitingLikers`
+        // must not take. It joins a count only while this holds, and `waiters`
+        // is where it waits. A first lookup that fails, or a count that stops,
+        // clears it too, and sends anyone waiting to read for themselves.
+        looking: true,
+        waiters: [],
+        waiting: function () {
+          return watcher.senders.filter(function (from) {
+            return watcher.answered[from] === false && watcher.blocks.indexOf(from) === -1;
+          });
+        },
+        // Release everyone waiting, with the answer — or with null when there is
+        // none to give, because a lookup failed or the count has stopped, which
+        // sends them to look for themselves. Never on a partial answer: an
+        // earlier lookup can land while a later delivery's newcomers are out.
+        settle: function (failed) {
+          const complete = watcher.senders.every(function (from) {
+            return watcher.answered[from] !== undefined;
+          });
+          if (!complete && !failed) return;
+          watcher.looking = false;
+          const answer = complete && !failed && !watcher.stopped ? watcher.waiting() : null;
+          watcher.waiters.splice(0).forEach(function (resolve) { resolve(answer); });
+        },
         deliver: function () {
           if (watcher.stopped) return;
-          const count = watcher.senders.filter(function (from) {
-            return watcher.answered[from] === false && watcher.blocks.indexOf(from) === -1;
-          }).length;
+          // Here and not in `settle`, which waits for every sender to have an
+          // answer: somebody who likes this account while the first lookup is
+          // out sends a second one, the first lands and is counted without
+          // them, and from then on the count is remembering answers.
+          watcher.looking = false;
+          const count = watcher.waiting().length;
           try {
             cb(count);
           } catch (err) {
@@ -2938,6 +3011,7 @@
         watcher.stopped = true;
         const index = likeWatchers.indexOf(watcher);
         if (index !== -1) likeWatchers.splice(index, 1);
+        watcher.settle(true);
         if (typeof onError !== 'function') return;
         if (later) Promise.resolve().then(function () { onError(err); });
         else onError(err);
@@ -2959,6 +3033,7 @@
               return watcher.answered[from] === undefined;
             });
             if (!unknown.length) {
+              watcher.settle();
               watcher.deliver();
               return;
             }
@@ -2980,9 +3055,11 @@
               return alreadySwiped(uid, unknown);
             }).then(function (answered) {
               unknown.forEach(function (from) { watcher.answered[from] = answered[from] === true; });
+              watcher.settle();
               watcher.deliver();
             }, function (err) {
               console.warn('[zc.store] Live like count failed.', err);
+              watcher.settle(true);
             });
           }, function (err) {
             // No client-side fallback for the `in` query, unlike getLikesReceived:
@@ -3007,6 +3084,7 @@
         watcher.stopped = true;
         const index = likeWatchers.indexOf(watcher);
         if (index !== -1) likeWatchers.splice(index, 1);
+        watcher.settle(true);
         stop();
       };
     },
