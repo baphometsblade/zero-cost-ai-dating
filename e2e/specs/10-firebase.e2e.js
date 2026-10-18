@@ -532,6 +532,40 @@ module.exports = {
         !!resetSays.known && resetSays.unknown === resetSays.known && !/password/i.test(resetSays.unknown),
         JSON.stringify(resetSays));
 
+      // A sign-in in flight owns the form. The request is held at the network
+      // until "Create account" has been clicked, then answered (wrong password,
+      // so it fails). The tabs used to stay live: the view switched under the
+      // busy button, the failure restored its "Sign in" label onto the Create
+      // account view, and pressing that button created an account.
+      await page.waitForSelector('#auth-form');
+      let release = null;
+      const held = new Promise(function (resolve) { release = resolve; });
+      const SIGN_IN_CALL = '**/accounts:signInWithPassword*';
+      await page.route(SIGN_IN_CALL, async function (route) { await held; await route.continue(); });
+      if (ctx.session) ctx.session.expectConsoleError(/status of 400/);
+      await page.fill('#input-email', email);
+      await page.fill('#input-password', 'not-' + password);
+      await page.click('#submit-btn');
+      await page.waitForFunction(function () { return document.getElementById('submit-btn').disabled; });
+      await page.click('#tab-signup');
+      release();
+      await page.waitForFunction(function () {
+        const box = document.getElementById('auth-alert');
+        return !!box && !box.classList.contains('hidden') && (box.textContent || '').trim().length > 0;
+      });
+      const formAfter = await page.evaluate(function () {
+        return {
+          signInSelected: document.getElementById('tab-signin').getAttribute('aria-selected'),
+          nameShown: !document.getElementById('field-name').classList.contains('hidden'),
+          button: (document.getElementById('submit-btn').textContent || '').trim()
+        };
+      });
+      await page.unroute(SIGN_IN_CALL);
+      if (ctx.session) ctx.session.expectConsoleError(null);
+      t.check('switching tabs during a sign-in changes nothing until it answers',
+        formAfter.signInSelected === 'true' && !formAfter.nameShown && formAfter.button === 'Sign in',
+        JSON.stringify(formAfter));
+
       await page.waitForSelector('#auth-form');
       await page.fill('#input-email', email);
       await page.fill('#input-password', password);

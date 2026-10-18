@@ -1243,6 +1243,11 @@
     root.style.setProperty('margin-inline', 'auto');
 
     let view = 'signin';
+    // A sign-in or sign-up in flight owns the form. The tabs stayed live under
+    // it: switching relabelled the busy button, and when the request failed
+    // the restored label ("Sign in") sat on the Create account view — and
+    // pressing it created an account. View switches wait until it answers.
+    let submitting = false;
 
     /* --- small helpers ---------------------------------------------------- */
 
@@ -1518,12 +1523,13 @@
     /* --- events ----------------------------------------------------------- */
 
     // Segmented control: click plus full arrow-key support.
-    dom.tabSignin.addEventListener('click', function () { setView('signin', true); });
-    dom.tabSignup.addEventListener('click', function () { setView('signup', true); });
+    dom.tabSignin.addEventListener('click', function () { if (!submitting) setView('signin', true); });
+    dom.tabSignup.addEventListener('click', function () { if (!submitting) setView('signup', true); });
     dom.tabs.addEventListener('keydown', function (event) {
       const key = event.key;
       if (key !== 'ArrowLeft' && key !== 'ArrowRight' && key !== 'Home' && key !== 'End') return;
       event.preventDefault();
+      if (submitting) return;
       const next = (key === 'ArrowRight' || key === 'End') ? 'signup' : 'signin';
       setView(next, false);
       (next === 'signup' ? dom.tabSignup : dom.tabSignin).focus();
@@ -1569,6 +1575,7 @@
 
     // Forgot password: swap to the reset view and carry the typed email over.
     dom.forgotBtn.addEventListener('click', function () {
+      if (submitting) return;
       if (dom.emailInput.value && !dom.resetInput.value) dom.resetInput.value = dom.emailInput.value;
       setView('reset', true);
     });
@@ -1584,6 +1591,7 @@
 
       const copy = PAGE_COPY[view];
       const signingUp = view === 'signup';
+      submitting = true;
       busy(dom.submit, true, copy.busy);
       try {
         const result = signingUp
@@ -1591,6 +1599,7 @@
           : await ZC.auth.signIn(dom.emailInput.value, dom.passwordInput.value);
 
         if (!result.ok) {
+          submitting = false;
           busy(dom.submit, false);
           showAlert(result.error, 'warn');
           (signingUp ? dom.emailInput : dom.passwordInput).focus();
@@ -1599,6 +1608,7 @@
         toast(signingUp ? 'Account created — your profile is next.' : 'Signed in.', 'success');
         leaveTo(signingUp ? signUpDestination() : signInDestination());
       } catch (err) {
+        submitting = false;
         busy(dom.submit, false);
         showAlert(humanError(err), 'warn');
       }
