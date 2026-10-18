@@ -344,6 +344,14 @@ function bufferingWrites(target, pending, tally, committed) {
  * never counted. Each of those routes now hands out a stand-in when what
  * leaves is a handle (see `isHandle`), and only then.
  *
+ * One count runs the other way. A `get()` of a query that a live listener on
+ * the same page already holds is counted document by document, as a fresh
+ * query would be; the SDK can answer it from the listener's existing target,
+ * and whether Firestore bills those documents again is not something a
+ * wrapper around the SDK can see. Treat such a count as an upper bound, and
+ * measure a listener and a read of the same query in separate runs when the
+ * difference matters.
+ *
  * These ways out are known to be left open, and data-store.js takes none of
  * them; the list is what has been found, not a proof that there is no other.
  *   - A reference stored as a field's value comes back from `data()` as the
