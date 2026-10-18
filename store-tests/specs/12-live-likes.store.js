@@ -463,6 +463,32 @@ module.exports = {
       (lookupOutcome === null ? 'the list was still waiting after 5s'
         : (lookupOutcome.err ? 'rejected: ' + lookupOutcome.err.message : 'list ' + lookupOutcome.list.length)));
 
+    // And one whose FIRST snapshot never comes — the SDK offline and holding
+    // back even its cache answer. The list joins it, as it joins any count
+    // that has not delivered, and the join used to have no bound: the panel
+    // waited on a count that was never going to speak. It waits a few seconds
+    // now, then looks for itself.
+    k.ctx.ZC.firebase.db = stallListeners(real);
+    let stalledOutcome = null;
+    let stopStalled = function () { /* replaced below */ };
+    try {
+      stopStalled = k.store.listenLikesReceived(page, function () { /* never called */ });
+      stalledOutcome = await Promise.race([
+        k.store.getLikesReceived(page).then(function (list) { return { list: list }; },
+          function (err) { return { err: err }; }),
+        settle(8000).then(function () { return null; })
+      ]);
+    } finally {
+      stopStalled();
+      k.ctx.ZC.firebase.db = real;
+    }
+    k.ctx.drainWarnings();
+    t.check('and one whose first snapshot never comes holds the list only a few seconds, then it looks for itself',
+      !!stalledOutcome && !stalledOutcome.err && Array.isArray(stalledOutcome.list) &&
+      stalledOutcome.list.length === PAGE_WAITING - 1,
+      stalledOutcome === null ? 'the list was still waiting after 8s'
+        : (stalledOutcome.err ? 'rejected: ' + stalledOutcome.err.message : 'list ' + stalledOutcome.list.length));
+
     // "Until the first count" means until the first count is DELIVERED, not
     // until every sender has an answer. They differ when somebody likes this
     // account while the first lookup is out: their delivery sends a second
@@ -550,6 +576,30 @@ function until(ready, ms) {
       setTimeout(poll, 10);
     })();
   });
+}
+
+/**
+ * A database whose snapshot listeners never deliver, while every read and
+ * write goes through to the real one — the SDK offline, holding back even the
+ * answer it could give from cache.
+ * @param {Object} target the real database
+ * @returns {Object} the stand-in
+ */
+function stallListeners(target) {
+  const wrap = function (obj) {
+    return new Proxy(obj, {
+      get: function (o, prop) {
+        if (prop === 'onSnapshot') return function () { return function () { /* nothing to stop */ }; };
+        const value = o[prop];
+        if (typeof value !== 'function') return value;
+        return function () {
+          const out = value.apply(o, arguments);
+          return out && typeof out === 'object' && typeof out.onSnapshot === 'function' ? wrap(out) : out;
+        };
+      }
+    });
+  };
+  return wrap(target);
 }
 
 /**

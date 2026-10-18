@@ -2314,6 +2314,15 @@
   }
 
   /**
+   * How long a list waits on a live count's first answer before it looks for
+   * itself. Joining saves reads only when the count is about to answer anyway;
+   * a count that has not answered in this long is one the list is better off
+   * not depending on, and asking for itself costs it the reads it would have
+   * spent with no count to join.
+   */
+  const LIKES_JOIN_MS = 3000;
+
+  /**
    * Everyone still waiting on this account's answer: taken from a live count
    * that has not yet delivered its first count, or read here when there is
    * none. Shared by `getLikesReceived` and `countLikesReceived` for the
@@ -2324,8 +2333,9 @@
    * people, and it asks at the worst moment: run in firebase mode in a
    * browser, the list's call landed before the badge's first count on every
    * load measured. Both then did the whole job.
-   * The sender query was not paid twice — a `get` of a query that a listener
-   * already holds is answered from that listener's target — but the account
+   * The sender query need not have been paid twice — a `get` of a query that
+   * a listener already holds can be answered from that listener's target —
+   * but the account
    * read and the answered-lookups were: each of the list's went out after the
    * badge's had finished, so the SDK had nothing to share them with, and the
    * server saw three reads more at twelve people waiting.
@@ -2348,9 +2358,19 @@
   async function waitingLikers(uid) {
     const watcher = likeWatchers.filter(function (w) { return w.uid === uid && w.looking; })[0];
     // Handed the count's answer, or null: a lookup that failed, or a count that
-    // stopped or died first, sends this back to look for itself.
+    // stopped or died first, sends this back to look for itself. So does a
+    // count that has not answered within LIKES_JOIN_MS. Its first snapshot is
+    // the SDK's to deliver, and offline that can be late or never; unbounded,
+    // the panel waited on a count that was not going to speak.
     const joined = watcher
-      ? await new Promise(function (resolve) { watcher.waiters.push(resolve); })
+      ? await new Promise(function (resolve) {
+        watcher.waiters.push(resolve);
+        setTimeout(function () {
+          const at = watcher.waiters.indexOf(resolve);
+          if (at !== -1) watcher.waiters.splice(at, 1);
+          resolve(null);
+        }, LIKES_JOIN_MS);
+      })
       : null;
     return joined || pendingOf(uid, await likeSenders(uid));
   }
