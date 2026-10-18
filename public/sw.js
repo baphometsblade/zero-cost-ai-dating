@@ -17,13 +17,15 @@ const BASE = new URL('./', self.location).pathname;
 // Bump the version to retire every previously cached asset on next activate.
 // v4: every earlier shell stored REDIRECTED responses on Firebase Hosting (see
 // `unredirected` below), so none of it may be served again.
+// v5: v4 shells were precached through the browser's HTTP cache, which held
+// scripts for an hour against pages it did not, so one may mix two deploys.
 //
 // The name carries BASE, because Cache Storage belongs to the ORIGIN, and on
 // GitHub Pages every project site a user publishes shares one: two copies of
 // this app there — a fork beside the original — would otherwise share a prefix,
 // and each one's `activate` would delete the other's shell.
 const CACHE_PREFIX = 'zc-static:' + BASE + ':';
-const CACHE = CACHE_PREFIX + 'v4';
+const CACHE = CACHE_PREFIX + 'v5';
 
 // Names this worker used before they were scoped. All of them predate the fix
 // above — and on Hosting all of them hold redirected responses — so they are
@@ -79,7 +81,16 @@ const CORE = [
  * @returns {Promise<Response>} one that is safe to hand to a navigation
  */
 function unredirected(response) {
-  if (!response.redirected) return Promise.resolve(response);
+  return response.redirected ? rebuilt(response) : Promise.resolve(response);
+}
+
+/**
+ * The response read in full and built again from its bytes: never redirected,
+ * and holding no connection open.
+ * @param {Response} response
+ * @returns {Promise<Response>}
+ */
+function rebuilt(response) {
   return response.blob().then(function (body) {
     // `blob()` hands back the DECODED bytes, so the headers that described the
     // bytes on the wire no longer describe this body. Copied as they were, the
@@ -108,20 +119,33 @@ self.addEventListener('install', function (event) {
   // Not `cache.addAll(CORE)`, which stores what it fetched as it fetched it —
   // redirects and all. Each asset is fetched, refused if it is not a success
   // (the same rule addAll applies), and stored without its redirect.
+  //
+  // Every asset is in hand before any is stored. This worker writes into the
+  // cache its predecessor is still serving offline from whenever sw.js changes
+  // without a version bump, and storing each as it arrived meant one failure
+  // rejected the install — the old worker stays — after the others had
+  // overwritten its copies: an offline shell half from each deploy.
   event.waitUntil(
-    caches.open(CACHE)
-      .then(function (cache) {
-        // `no-cache`: asked of the server, not of the browser's HTTP cache.
-        // A new worker installs because a deploy changed it, and a script or
-        // page the browser cached before that deploy is exactly what must not
-        // be stored as this deploy's offline copy. GitHub Pages caches every
-        // file for ten minutes and cannot be told otherwise.
-        return Promise.all(CORE.map(function (path) {
-          return fetch(path, { cache: 'no-cache' }).then(function (response) {
-            if (!response.ok) throw new Error('precache: ' + path + ' answered ' + response.status);
-            return unredirected(response).then(function (clean) { return cache.put(path, clean); });
-          });
-        }));
+    Promise.all(CORE.map(function (path) {
+      // `no-cache`: asked of the server, not of the browser's HTTP cache.
+      // A new worker installs because a deploy changed it, and a script or
+      // page the browser cached before that deploy is exactly what must not
+      // be stored as this deploy's offline copy. GitHub Pages caches every
+      // file for ten minutes and cannot be told otherwise.
+      //
+      // Read in full as it arrives, redirected or not. Holding two dozen
+      // responses unread until the last one landed kept each one's connection
+      // busy, and a browser opens six to a host: the seventh fetch waited for a
+      // connection that never came, and the install never finished.
+      return fetch(path, { cache: 'no-cache' }).then(function (response) {
+        if (!response.ok) throw new Error('precache: ' + path + ' answered ' + response.status);
+        return rebuilt(response).then(function (clean) { return { path: path, response: clean }; });
+      });
+    }))
+      .then(function (shell) {
+        return caches.open(CACHE).then(function (cache) {
+          return Promise.all(shell.map(function (entry) { return cache.put(entry.path, entry.response); }));
+        });
       })
       .then(function () { return self.skipWaiting(); })
   );

@@ -298,6 +298,68 @@ test('install asks the server for the shell, not the browser\'s HTTP cache', asy
     'fetched without `cache: \'no-cache\'`, so the browser may answer from its HTTP cache');
 });
 
+test('an install that fails leaves the cache it found exactly as it was', async function () {
+  // A worker installs into the cache its predecessor is still serving offline
+  // from whenever sw.js changes without a version bump. Writing each asset as
+  // it arrived meant that one asset failing rejected the install — the old
+  // worker stays — after the others had already overwritten its copies, and
+  // the shell it went on serving offline was half this deploy, half the last.
+  const worker = runWorker({
+    fetch: function (url) {
+      return /matches\.html$/.test(url) ? fakeResponse('gone', { ok: false, status: 404 }) : fakeResponse('new ' + url);
+    }
+  });
+  const before = new Map([['https://example.test/index.html', fakeResponse('old index.html')]]);
+  worker.stores.set(worker.cacheName, new Map(before));
+  await assert.rejects(worker.fire('install'), /matches\.html answered 404/);
+  // The assets that did arrive settle after the rejection; let them.
+  for (let i = 0; i < 10; i += 1) await new Promise(function (resolve) { setImmediate(resolve); });
+  const after = worker.stores.get(worker.cacheName);
+  assert.deepEqual(Array.from(after.keys()), Array.from(before.keys()), 'a failed install wrote into the cache it found');
+  assert.equal(await after.get('https://example.test/index.html').text(), 'old index.html',
+    'a failed install overwrote the copy the old worker serves offline');
+});
+
+test('install reads each asset as it arrives, so six connections are enough', async function () {
+  // A browser opens six HTTP/1.1 connections to a host, and a response holds
+  // its connection until its body is read. Gathering the shell by holding every
+  // response unread until the last one arrived left the seventh fetch waiting
+  // for a connection that never freed: in Chromium the new worker sat in
+  // `installing` for good. Modelled here: six responses at a time may be
+  // unread, and the next fetch waits for one of them to be.
+  const CONNECTIONS = 6;
+  let unread = 0;
+  const queued = [];
+  const worker = runWorker({
+    fetch: function (url) {
+      function answer() {
+        unread += 1;
+        const res = fakeResponse('ok ' + url);
+        const read = res.blob;
+        let freed = false;
+        res.blob = function () {
+          if (!freed) {
+            freed = true;
+            unread -= 1;
+            const next = queued.shift();
+            if (next) next();
+          }
+          return read();
+        };
+        return res;
+      }
+      if (unread < CONNECTIONS) return answer();
+      return new Promise(function (resolve) { queued.push(function () { resolve(answer()); }); });
+    }
+  });
+  const outcome = await Promise.race([
+    worker.fire('install').then(function () { return 'installed'; }),
+    new Promise(function (resolve) { setTimeout(function () { resolve('stalled'); }, 1000); })
+  ]);
+  assert.equal(outcome, 'installed', 'install stalled with ' + queued.length + ' of ' + worker.core.length +
+    ' fetches waiting on a connection held by an unread response');
+});
+
 test('install still fails as a whole when any shell asset is not a success', async function () {
   // The rule cache.addAll applied, kept on purpose: a half-precached shell must
   // not activate and then delete the old, working one.
