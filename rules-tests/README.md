@@ -138,10 +138,13 @@ another's preconditions and mask a missing rule.
   them, was already over the limit. So the shipped upgrade to premium, run as that
   account's owner, came back as a flat `permission-denied`, while the same account without
   its location upgraded and the spec reported five clauses to spare. The shape of the cost
-  was measured against the rules file rather than by the spec, and it is not what it looks
-  like: `firestore.rules` records a call such as `stampOk(d.createdAt)` at about 2.2 plain
-  clauses, where its body alone is worth about 1.5, so factoring repeated bounds into
-  helpers — the obvious tidy-up — spends the margin rather than saving it.
+  is measured by the spec too, on a small ruleset of its own built the way `userDocOk` is,
+  and it is not what it looks like: a call such as `stampOk(d.createdAt)` costs about 2.4
+  plain clauses and the same check written inline about 2.2, so factoring repeated bounds
+  into helpers — the obvious tidy-up — spends the margin rather than saving it. Both
+  figures are printed on every run. They used to be written down from memory as 2.2 and
+  1.5, and a comment built on them called a forwarding wrapper "pure overhead"; put back,
+  it moved the headroom by nothing.
 
   These figures are a measurement of the rules engine's accounting rather than of anything
   in this repository, so an emulator upgrade could move them with nothing here changing.

@@ -129,7 +129,7 @@ Open [`firestore.rules`](../firestore.rules). It is the only server-side securit
 has, so it is worth the five minutes.
 
 Everything below is also *executed* — `npm run test:rules` runs the real rules file against
-the Firestore emulator, **213 checks** including the attacks each rule exists to stop. If you
+the Firestore emulator, **216 checks** including the attacks each rule exists to stop. If you
 change the data model, run it. See [`rules-tests/README.md`](../rules-tests/README.md).
 `npm run test:emulator` adds the store suite to the same emulator boot: **261 more checks** that
 drive the shipped `public/js/data-store.js` against a real Firestore, which is where the
@@ -211,9 +211,10 @@ anywhere else was free to rot. It now reads every document.
   whose profile filled in every optional field, a location among them, the upgrade to
   premium came back as that flat `permission-denied`, with nothing saying why.
   If you are adding a rule here, read its number first — and know that the costs are not
-  where they look: a function call is worth about 2.2 plain clauses, `in` on a map is
-  cheaper than reading a field, and factoring repeated bounds into helpers spends the
-  margin rather than saving it.
+  where they look: a call such as `stampOk(d.createdAt)` is worth about 2.4 plain clauses
+  and the same check inline about 2.2 (the spec measures both and prints them), `in` on a
+  map is cheaper than reading a field, and factoring repeated bounds into helpers spends
+  the margin rather than saving it.
 - `matches/{matchId}` — read and update only if you are one of the two `users`; create only
   with `users.size() == 2`, yourself among them, an id equal to the sorted join, proof the
   other person actually liked you first, **and** that they have not blocked you. That last

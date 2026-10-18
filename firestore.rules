@@ -76,14 +76,15 @@ service cloud.firestore {
     // A rules request may evaluate at most 1000 expressions, and this file's user
     // document validator sits close enough to that ceiling that the margin is
     // measured by a test (`rules-tests/specs/08-budget.rules.js`). Folding the
-    // repeated comparisons into helpers reads better and costs more: measured
-    // against this very file, a clause that is a call — `stampOk(d.createdAt)` —
-    // costs about 2.2 times a plain `d.uid is string`, where its body alone is
-    // worth about 1.5. Wrapping every bound in one spent the remaining margin and
-    // every user document write began failing, as a flat `permission-denied`
-    // naming no field, which is how running out of budget always looks. (The
-    // per-call overhead that leaves is under one clause, so deleting a lone
-    // pass-through wrapper buys clarity and no measurable budget.)
+    // repeated comparisons into helpers reads better and costs more: that spec
+    // measures a clause that is a call — `stampOk(d.createdAt)` — at about 2.4
+    // times a plain `d.uid is string`, where the same check written inline is
+    // about 2.2, and prints both on every run. Wrapping every bound in one spent the
+    // remaining margin and every user document write began failing, as a flat
+    // `permission-denied` naming no field, which is how running out of budget
+    // always looks. (A fifth of a clause per call is also why deleting a lone
+    // pass-through wrapper buys clarity and no measurable budget: putting
+    // `bookkeepingOk` back leaves the headroom exactly where it is.)
     //
     // `stampOk` and `listCharsOk` stay because each is called for a construct
     // there is no short way to write, and each earns its call.
@@ -315,9 +316,9 @@ service cloud.firestore {
           && profileOk(d.profile)
           && prefsOk(d.preferences)
           // These three were behind a `bookkeepingOk(d)` wrapper that did nothing but
-          // forward them. A function call costs about 2.2 plain clauses here, so a
-          // pass-through is one of the few things in this file that is pure overhead —
-          // and one hop less to follow when reading what a user document may contain.
+          // forward them. Removing it bought no measurable budget — a call's own
+          // overhead is about a fifth of a clause (see the note above `users/{uid}`) —
+          // only one hop less to follow when reading what a user document may contain.
           && (!('learning' in d) || learningOk(d.learning))
           && (!('usage' in d) || usageOk(d.usage))
           // 1000 uids at 48 characters each. A Firebase Auth uid is 28.
