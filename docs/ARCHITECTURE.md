@@ -684,15 +684,16 @@ Page guards live in `auth.js` and run first in each controller:
 
 | Guard | Behaviour |
 | --- | --- |
-| `requireAuth()` | Redirects to `auth.html` (preserving `?next=`) and never resolves when signed out. |
+| `requireAuth()` | Redirects to `auth.html` (preserving `?next=`) and never resolves when signed out. Once it has resolved, the page also leaves for `auth.html?next=…` if another tab signs out or signs in as someone else — as soon as the new account's uid is known, not after its profile loads. The page's own sign-out and account deletion call `endingSession()` first, so they are not mistaken for that. |
 | `requireGuest()` | The inverse, for `auth.html`. |
-| `requireProfile()` | `requireAuth` plus a redirect to `profile.html?onboarding=1` when the profile is incomplete. |
+| `requireProfile()` | `requireAuth` plus a redirect to `profile.html?onboarding=1&next=<this page>` when the profile is incomplete. "Start matching" then goes on to `resolveNext('dashboard.html')`: the page that was asked for, or the deck when there is none or it is unsafe. |
 
 Because these never resolve on the redirect path, a controller can safely `await` one and then
 assume it has a user document.
 
 Cross-page state travels in the URL, not in globals: `matches.html?m=<matchId>&draft=<text>`,
-`profile.html?onboarding=1`, `auth.html?mode=signup&next=…`. `history.replaceState` keeps the
+`profile.html?onboarding=1&next=…`, `auth.html?mode=signup&next=…`. A `next` is only ever
+followed through `safePath`, which keeps it on this site. `history.replaceState` keeps the
 match id current without adding history entries.
 
 ---

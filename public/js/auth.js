@@ -48,7 +48,12 @@
   const NAME_MAX = 40;
 
   // Deliberately loose: the only authority on a valid address is the mail server.
-  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[A-Za-z]{2,}$/;
+  // The last label may be any letters, or punycode: a browser hands over
+  // `ivan@почта.рф` as `ivan@xn--80a1acny.xn--p1ai`, whose TLD has digits and
+  // hyphens, and an ASCII-letters-only TLD turned every internationalised
+  // domain away with "That does not look like an email address" — an address
+  // Firebase Auth accepts, measured against the emulator.
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.(?:\p{L}{2,}|xn--[A-Za-z0-9-]+)$/u;
 
   // If Firebase never reports an auth state (blocked network, dead SDK) the app
   // must still become usable rather than hang on ZC.auth.ready forever.
@@ -293,6 +298,34 @@
         console.error('[zc.auth] An onChange listener threw.', err);
       }
     });
+  }
+
+  /* A guarded page, and the account it was guarded for. requireAuth records
+     the uid it handed the page; when the session under the page changes from
+     somewhere else — signed out, or signed in as someone else, in another tab
+     — the page leaves for the sign-in page rather than carry on as an account
+     that is no longer here. It used to carry on: after a sign-out in another
+     tab, an open conversation stayed on screen with its composer live, and a
+     message sent from it was stored as the account that had just signed out.
+
+     A session this page ends on purpose (its own sign-out, deleting the
+     account) is marked first, because that code already knows where it is
+     going next. */
+  let guardedUid = null;
+  let endingHere = false;
+
+  /**
+   * Leave a guarded page whose account is no longer the signed-in one.
+   * @param {string|null} [nextUid] the account taking over, when it is known
+   *   before its profile has loaded; by default, the one already published
+   * @returns {void}
+   */
+  function followSessionChange(nextUid) {
+    if (!guardedUid || endingHere) return;
+    const uid = nextUid !== undefined ? nextUid : (api.current ? api.current.uid : null);
+    if (uid === guardedUid) return;
+    guardedUid = null;
+    leaveTo(withNext('auth.html'));
   }
 
   /**
@@ -704,12 +737,31 @@
     const path = String(value).trim();
     // A backslash can be read as a slash by some parsers, so refuse it outright.
     if (!path || path.indexOf('\\') !== -1) return null;
+    // So is nothing at all: the URL parser deletes every tab and newline before
+    // it reads a URL, and "/<tab>/evil.example" — which the slash check below
+    // saw as a path — reached location.replace() as the protocol-relative
+    // "//evil.example". No control character belongs in a page address.
+    if (/[\u0000-\u001F\u007F]/.test(path)) return null;
+    let candidate = null;
     // Absolute site paths are fine; protocol-relative "//host" is not.
-    if (path.charAt(0) === '/') return path.charAt(1) === '/' ? null : path;
-    // Bare page names, with or without the .html suffix (hosting uses cleanUrls).
-    // Anything carrying a scheme, such as javascript:, fails this test.
-    if (/^[a-z0-9][a-z0-9._-]*(\.html)?([?#].*)?$/i.test(path)) return path;
-    return null;
+    if (path.charAt(0) === '/') {
+      candidate = path.charAt(1) === '/' ? null : path;
+    } else if (/^[a-z0-9][a-z0-9._-]*(\.html)?([?#].*)?$/i.test(path)) {
+      // Bare page names, with or without the .html suffix (hosting uses
+      // cleanUrls). Anything carrying a scheme, such as javascript:, fails.
+      candidate = path;
+    }
+    if (!candidate) return null;
+    // And whatever passed is resolved the way the browser will resolve it,
+    // and has to stay on this origin: the checks above are a list of known
+    // tricks, and this is the property they exist to protect.
+    try {
+      const here = window.location && window.location.href;
+      if (here && new URL(candidate, here).origin !== new URL(here).origin) return null;
+    } catch (err) {
+      return null;
+    }
+    return candidate;
   }
 
   /**
@@ -886,6 +938,7 @@
      * @returns {Promise<{ok:boolean, error?:string}>}
      */
     async signOut() {
+      endingHere = true;
       let failure = null;
       if (MODE === 'firebase') {
         try {
@@ -898,6 +951,9 @@
       removeKey(SESSION_KEY);
       setSignedOut();
       settle();
+      // A sign-out that failed leaves this page where it is, so a later change
+      // made in another tab must still move it.
+      if (failure) endingHere = false;
       return failure ? { ok: false, error: humanError(failure) } : { ok: true };
     },
 
@@ -919,6 +975,12 @@
         await fbAuth().sendPasswordResetEmail(address);
         return { ok: true };
       } catch (err) {
+        // A project with email-enumeration protection off — every one made
+        // before Firebase turned it on by default — rejects an unknown address
+        // with auth/user-not-found. Shown, it was the sign-in sentence about a
+        // password on a form with no password field, and it told anyone which
+        // addresses have no account. Unknown and known get the same answer.
+        if (err && err.code === 'auth/user-not-found') return { ok: true };
         return { ok: false, error: humanError(err) };
       }
     },
@@ -979,9 +1041,24 @@
       // happened after settling must count.
       await ready;
       const doc = api.doc;
-      if (doc) return doc;
+      if (doc) {
+        guardedUid = doc.uid;
+        return doc;
+      }
       leaveTo(withNext(opts.redirect || 'auth.html'));
       return pending();
+    },
+
+    /**
+     * Say that this page is about to end its own session — deleting the
+     * account ends the Firebase session before signOut runs — so the change
+     * is not mistaken for one made in another tab. Pass false when that
+     * attempt failed and the page is staying.
+     * @param {boolean} [ending] false to withdraw the notice
+     * @returns {void}
+     */
+    endingSession: function (ending) {
+      endingHere = ending !== false;
     },
 
     /**
@@ -1006,8 +1083,20 @@
     async requireProfile(options) {
       const doc = await api.requireAuth(options);
       if (doc && doc.profileComplete) return doc;
-      leaveTo('profile.html?onboarding=1');
+      // Carrying the page it was asked for, so onboarding can hand them back.
+      leaveTo(withNext('profile.html?onboarding=1'));
       return pending();
+    },
+
+    /**
+     * Where this page was asked to send people on, if anywhere safe: the
+     * ?next= it carries, refused if it leaves the site or loops back here.
+     * Onboarding ends with this, so a deep link survives signing up.
+     * @param {string} fallback where to go when there is no usable ?next=
+     * @returns {string} a relative URL
+     */
+    resolveNext: function (fallback) {
+      return resolveNext(fallback);
     }
   };
 
@@ -1023,6 +1112,9 @@
    * @returns {Promise<void>}
    */
   async function onFirebaseUser(user) {
+    // Leave on the new account's uid, before its profile loads: until then
+    // the page would still be acting as the account that left.
+    followSessionChange(user && user.uid ? user.uid : null);
     try {
       if (user && user.uid) {
         // Use the sign-up's own seed when one is in flight: this callback runs
@@ -1041,6 +1133,7 @@
     } finally {
       settle();
     }
+    followSessionChange();
   }
 
   /**
@@ -1056,6 +1149,7 @@
             console.warn('[zc.auth] Firebase stopped reporting auth state.', err);
             setSignedOut();
             settle();
+            followSessionChange();
           }
         );
       } catch (err) {
@@ -1087,10 +1181,12 @@
     const uid = sessionUid(readJson(SESSION_KEY, null));
     if (!uid) {
       setSignedOut();
+      followSessionChange();
       return;
     }
     if (api.current && api.current.uid === uid) return;
-    adoptDemoSession(uid).catch(function (err) {
+    followSessionChange(uid);
+    adoptDemoSession(uid).then(function () { followSessionChange(); }, function (err) {
       console.warn('[zc.auth] Could not follow the session change.', err);
     });
   });
@@ -1213,6 +1309,11 @@
     root.style.setProperty('margin-inline', 'auto');
 
     let view = 'signin';
+    // A sign-in or sign-up in flight owns the form. The tabs stayed live under
+    // it: switching relabelled the busy button, and when the request failed
+    // the restored label ("Sign in") sat on the Create account view — and
+    // pressing it created an account. View switches wait until it answers.
+    let submitting = false;
 
     /* --- small helpers ---------------------------------------------------- */
 
@@ -1488,12 +1589,13 @@
     /* --- events ----------------------------------------------------------- */
 
     // Segmented control: click plus full arrow-key support.
-    dom.tabSignin.addEventListener('click', function () { setView('signin', true); });
-    dom.tabSignup.addEventListener('click', function () { setView('signup', true); });
+    dom.tabSignin.addEventListener('click', function () { if (!submitting) setView('signin', true); });
+    dom.tabSignup.addEventListener('click', function () { if (!submitting) setView('signup', true); });
     dom.tabs.addEventListener('keydown', function (event) {
       const key = event.key;
       if (key !== 'ArrowLeft' && key !== 'ArrowRight' && key !== 'Home' && key !== 'End') return;
       event.preventDefault();
+      if (submitting) return;
       const next = (key === 'ArrowRight' || key === 'End') ? 'signup' : 'signin';
       setView(next, false);
       (next === 'signup' ? dom.tabSignup : dom.tabSignin).focus();
@@ -1539,6 +1641,7 @@
 
     // Forgot password: swap to the reset view and carry the typed email over.
     dom.forgotBtn.addEventListener('click', function () {
+      if (submitting) return;
       if (dom.emailInput.value && !dom.resetInput.value) dom.resetInput.value = dom.emailInput.value;
       setView('reset', true);
     });
@@ -1554,6 +1657,7 @@
 
       const copy = PAGE_COPY[view];
       const signingUp = view === 'signup';
+      submitting = true;
       busy(dom.submit, true, copy.busy);
       try {
         const result = signingUp
@@ -1561,6 +1665,7 @@
           : await ZC.auth.signIn(dom.emailInput.value, dom.passwordInput.value);
 
         if (!result.ok) {
+          submitting = false;
           busy(dom.submit, false);
           showAlert(result.error, 'warn');
           (signingUp ? dom.emailInput : dom.passwordInput).focus();
@@ -1569,6 +1674,7 @@
         toast(signingUp ? 'Account created — your profile is next.' : 'Signed in.', 'success');
         leaveTo(signingUp ? signUpDestination() : signInDestination());
       } catch (err) {
+        submitting = false;
         busy(dom.submit, false);
         showAlert(humanError(err), 'warn');
       }

@@ -501,7 +501,71 @@ module.exports = {
       });
       t.check('signing out ends the Firebase session', signedOut === true, 'current=' + (signedOut ? 'null' : 'set'));
 
+      // A reset request answers the same for any address. The Auth emulator
+      // runs with email-enumeration protection off, as projects made before
+      // Firebase turned it on by default do: an unknown address rejects with
+      // auth/user-not-found, which the reset form used to show as the sign-in
+      // sentence "That email and password do not match an account" — on a
+      // form with no password field, and telling anyone which addresses have
+      // no account here. The real one is asked too, so the two can be compared.
       await page.goto(base + '/auth.html', { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#auth-form');
+      const resetSays = {};
+      for (const address of ['nobody-' + Date.now() + '@example.com', email]) {
+        // The emulator answers the unknown address with a 400, which Chromium
+        // logs as a failed resource; that is the answer under test, and the
+        // window closes again before the real address is asked.
+        if (ctx.session) ctx.session.expectConsoleError(address === email ? null : /status of 400/);
+        await page.click('#forgot-btn');
+        await page.fill('#input-reset-email', address);
+        await page.click('#reset-submit');
+        await page.waitForFunction(function () {
+          const box = document.getElementById('auth-alert');
+          return !!box && !box.classList.contains('hidden') && (box.textContent || '').trim().length > 0;
+        });
+        resetSays[address === email ? 'known' : 'unknown'] =
+          (await page.textContent('#auth-alert') || '').replace(/\s+/g, ' ').trim();
+        await page.click('#reset-back');
+      }
+      if (ctx.session) ctx.session.expectConsoleError(null);
+      t.check('a password reset answers an unknown address exactly as it answers a real one',
+        !!resetSays.known && resetSays.unknown === resetSays.known && !/password/i.test(resetSays.unknown),
+        JSON.stringify(resetSays));
+
+      // A sign-in in flight owns the form. The request is held at the network
+      // until "Create account" has been clicked, then answered (wrong password,
+      // so it fails). The tabs used to stay live: the view switched under the
+      // busy button, the failure restored its "Sign in" label onto the Create
+      // account view, and pressing that button created an account.
+      await page.waitForSelector('#auth-form');
+      let release = null;
+      const held = new Promise(function (resolve) { release = resolve; });
+      const SIGN_IN_CALL = '**/accounts:signInWithPassword*';
+      await page.route(SIGN_IN_CALL, async function (route) { await held; await route.continue(); });
+      if (ctx.session) ctx.session.expectConsoleError(/status of 400/);
+      await page.fill('#input-email', email);
+      await page.fill('#input-password', 'not-' + password);
+      await page.click('#submit-btn');
+      await page.waitForFunction(function () { return document.getElementById('submit-btn').disabled; });
+      await page.click('#tab-signup');
+      release();
+      await page.waitForFunction(function () {
+        const box = document.getElementById('auth-alert');
+        return !!box && !box.classList.contains('hidden') && (box.textContent || '').trim().length > 0;
+      });
+      const formAfter = await page.evaluate(function () {
+        return {
+          signInSelected: document.getElementById('tab-signin').getAttribute('aria-selected'),
+          nameShown: !document.getElementById('field-name').classList.contains('hidden'),
+          button: (document.getElementById('submit-btn').textContent || '').trim()
+        };
+      });
+      await page.unroute(SIGN_IN_CALL);
+      if (ctx.session) ctx.session.expectConsoleError(null);
+      t.check('switching tabs during a sign-in changes nothing until it answers',
+        formAfter.signInSelected === 'true' && !formAfter.nameShown && formAfter.button === 'Sign in',
+        JSON.stringify(formAfter));
+
       await page.waitForSelector('#auth-form');
       await page.fill('#input-email', email);
       await page.fill('#input-password', password);
@@ -614,6 +678,35 @@ module.exports = {
       // 400 included. The drains above take out only commits refused before it —
       // 403, 409 and 400 — and their own checks require there to be none: nothing
       // in this spec may lose a transaction to a write the same page made.
+
+      // A sign-out that fails leaves the page where it is, and must not leave
+      // it deaf to the next change: a page marks its own sign-out so that the
+      // session ending is not mistaken for another tab's doing, and that mark
+      // used to outlive a failure. A sign-out in another tab afterwards then
+      // changed nothing here, and the page stayed up as the account that had
+      // left. Run last, because it ends the session.
+      const failed = await page.evaluate(function () {
+        const fb = window.ZC.firebase.auth;
+        const real = fb.signOut;
+        fb.signOut = function () {
+          fb.signOut = real;
+          const err = new Error('Sign-out held by the e2e suite.');
+          err.code = 'auth/network-request-failed';
+          return Promise.reject(err);
+        };
+        return window.ZC.auth.signOut();
+      });
+      const elsewhere = await ctx.session.context.newPage();
+      await elsewhere.goto(base + '/index.html', { waitUntil: 'domcontentloaded' });
+      await elsewhere.waitForFunction(function () { return !!(window.ZC && window.ZC.auth && window.ZC.auth.current); });
+      await elsewhere.evaluate(function () { return window.ZC.auth.signOut(); });
+      await page.waitForURL(h.pageUrl('auth'), { timeout: 10000 }).catch(function () {});
+      const movedTo = page.url();
+      await elsewhere.close();
+      t.check('after a sign-out that failed, a sign-out in another tab still moves the page on',
+        failed && failed.ok === false && movedTo.indexOf(base + '/') === 0 &&
+          h.pageUrl('auth').test(movedTo) && /[?&]next=/.test(movedTo),
+        JSON.stringify(failed) + ' · ' + movedTo);
     } finally {
       await server.stop();
     }

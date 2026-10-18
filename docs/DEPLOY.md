@@ -263,7 +263,7 @@ firebase use --add          # pick your project, alias it "default"
 Then:
 
 ```bash
-npm test                    # 14 suites, 287 checks, no install required
+npm test                    # 14 suites, 288 checks, no install required
 npm run deploy              # firebase deploy --only hosting,firestore
 ```
 
@@ -458,7 +458,7 @@ the suite still fails: *connect-src allows only what the three Firebase SDKs the
 can contact*, in the same file, holds every source in that directive to a list of the
 sources the shipped code actually connects to, each with its reason, and names both
 loopback origins as sources nothing in this app connects to. Be clear about what that does
-**not** catch — add them to that list as well and the suite goes quiet again, all 287
+**not** catch — add them to that list as well and the suite goes quiet again, all 288
 checks passing, and the weakened policy deploys to everyone. Change the meta copy only, and
 change it back.
 

@@ -266,11 +266,22 @@ test('signUp validates the email, the password length and the display name', asy
   assert.equal((await auth.signUp('alice@example.com', 'longenough', 'x'.repeat(41))).error,
     'Please use a display name between 2 and 40 characters.');
 
+  assert.equal((await auth.signUp('alice@example.12', 'longenough', 'Alice')).error,
+    'That email address does not look right.', 'a numeric TLD is not one');
+
+  // Internationalised domains, as a browser's email field hands them over
+  // (punycode) and as typed. Both are addresses Firebase Auth accepts.
+  assert.equal((await auth.signUp('ivan@xn--80a1acny.xn--p1ai', 'longenough', 'Ivan')).ok, true,
+    'a punycode TLD is a TLD');
+  assert.equal((await auth.signUp('li@例子.中国', 'longenough', 'Li')).ok, true,
+    'a TLD in another script is a TLD');
+
   // An 8-character password is exactly on the allowed side of the boundary.
   assert.equal((await auth.signUp('alice@example.com', 'eightchr', 'Al')).ok, true);
 
   // Nothing that failed validation left a trace.
-  assert.deepEqual(Object.keys(raw(CREDENTIALS_KEY)), ['alice@example.com']);
+  assert.deepEqual(Object.keys(raw(CREDENTIALS_KEY)).sort(),
+    ['alice@example.com', 'ivan@xn--80a1acny.xn--p1ai', 'li@例子.中国'].sort());
   assert.equal(auth.current.email, 'alice@example.com');
 });
 
@@ -669,6 +680,9 @@ test('requireGuest refuses an off-site ?next= and will not loop back to this pag
     'javascript:alert(1)',         // a scheme, not a path
     '\\\\evil.example',            // backslashes some parsers read as slashes
     '/\\evil.example',             // mixed slash trick
+    '/\t/evil.example/x',          // a tab the URL parser deletes, leaving //evil.example
+    '/\n/evil.example/x',          // the same with a newline
+    '/\r/evil.example/x',          // and a carriage return
     ''                             // empty
   ];
   for (let i = 0; i < hostile.length; i += 1) {
@@ -708,11 +722,29 @@ test('requireProfile insists on onboarding, and defers to requireAuth when signe
   assert.equal(doc.uid, DEMO_UID);
   assert.deepEqual(locationShim.replaced, []);
 
-  // Signed in without one: off to onboarding.
+  // Signed in without one: off to onboarding, carrying the page it was asked
+  // for so onboarding can hand them back to it.
   await store.updateUser(DEMO_UID, { profileComplete: false });
   await auth.refresh();
   assert.equal(await navigates(auth.requireProfile()), 'pending');
-  assert.deepEqual(locationShim.replaced, ['profile.html?onboarding=1']);
+  assert.deepEqual(locationShim.replaced, ['profile.html?onboarding=1&next=%2Fdashboard.html']);
+});
+
+test('resolveNext hands onboarding back the page it was asked for, and nothing it should not', async function () {
+  const auth = await resetWorld();
+  locationShim.pathname = '/profile.html';
+
+  // The deep link a guard or the sign-up form carried in, query and all.
+  locationShim.search = '?onboarding=1&next=' + encodeURIComponent('/matches.html?m=a_b');
+  assert.equal(auth.resolveNext('dashboard.html'), '/matches.html?m=a_b');
+
+  // No next, a hostile one, or one that loops back to onboarding: the fallback.
+  locationShim.search = '?onboarding=1';
+  assert.equal(auth.resolveNext('dashboard.html'), 'dashboard.html');
+  locationShim.search = '?onboarding=1&next=' + encodeURIComponent('/\t/evil.example/x');
+  assert.equal(auth.resolveNext('dashboard.html'), 'dashboard.html');
+  locationShim.search = '?onboarding=1&next=' + encodeURIComponent('/profile?onboarding=1');
+  assert.equal(auth.resolveNext('dashboard.html'), 'dashboard.html');
 });
 
 /* ------------------------------------------------------------------------

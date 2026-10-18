@@ -1216,7 +1216,13 @@
     });
     if (!ok) return;
     leaving = true;
-    window.location.href = 'dashboard.html';
+    // Back to wherever they were headed before signing up — the auth page and
+    // requireProfile both carry it as ?next= — and the deck otherwise. It used
+    // to be the deck always, so a link to a conversation or the plans page was
+    // lost the moment someone made an account to see it.
+    window.location.href = ZC.auth && typeof ZC.auth.resolveNext === 'function'
+      ? ZC.auth.resolveNext('dashboard.html')
+      : 'dashboard.html';
   }
 
   /* ------------------------------------------------------------------------

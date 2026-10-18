@@ -313,5 +313,70 @@ module.exports = {
     await page.waitForSelector('#deck-stack .swipe-card');
     t.check('the chosen theme carries to the next page',
       (await page.getAttribute('html', 'data-theme')) === 'light');
+
+    // Onboarding hands people back to the page they were headed for. A guard
+    // or the sign-up form sends someone to profile.html?onboarding=1 with the
+    // page they asked for as ?next=, and "Start matching" used to go to the
+    // deck regardless: a link to a conversation or the plans page was lost the
+    // moment someone made an account to see it.
+    await page.goto(ctx.base + '/profile.html?onboarding=1&next=' + encodeURIComponent('/subscription.html'),
+      { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#profile-main:not(.hidden)');
+    await page.click('#start-btn');
+    await page.waitForURL(function (url) { return !h.pageUrl('profile').test(url.href); });
+    const landed = page.url();
+    t.check('finishing onboarding goes on to the page it was asked for',
+      landed.indexOf(ctx.base + '/') === 0 && h.pageUrl('subscription').test(landed), landed);
+
+    // Signing in as someone else in another tab moves a signed-in page on as
+    // soon as the new account is known, not once its profile has loaded: until
+    // then the page is still acting as the account that left. The watching
+    // tab's profile read is held so it never loads, and its sign-in page is
+    // stubbed so nothing there acts on the made-up account. A context of its
+    // own, with the service worker kept out, so the stub is what loads.
+    const solo = await h.openSession(ctx.session.context.browser(), ctx.viewport, { serviceWorkers: 'block' });
+    try {
+      const watcher = solo.page;
+      await h.signIn(watcher, ctx.base);
+      await watcher.route(function (url) { return h.pageUrl('auth').test(url.href); }, function (route) {
+        return route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>held</title>' });
+      });
+      await watcher.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
+      await watcher.waitForSelector('#match-list .match-row');
+      await watcher.evaluate(function () {
+        window.ZC.store.getUser = function () { return new Promise(function () {}); };
+      });
+      const switcher = await solo.context.newPage();
+      await switcher.goto(ctx.base + '/index.html', { waitUntil: 'domcontentloaded' });
+      await switcher.evaluate(function () {
+        localStorage.setItem('zc.demo.session', JSON.stringify({ uid: 'e2e-someone-else' }));
+      });
+      await watcher.waitForURL(h.pageUrl('auth'), { timeout: 10000 }).catch(function () {});
+      const movedTo = watcher.url();
+      const stubbed = (await watcher.title()) === 'held';
+      t.check('another tab signing in as someone else moves this one on before the new profile loads',
+        stubbed && movedTo.indexOf(ctx.base + '/') === 0 && /[?&]next=/.test(movedTo), movedTo);
+      t.check('and the tabs doing it log no errors', solo.errors.length === 0, solo.errors.slice(0, 3).join(' | '));
+    } finally {
+      await solo.context.close();
+    }
+
+    // Signing out in one tab is signing out in all of them. The other tab used
+    // to carry on as the account that had just left: its open conversations
+    // stayed on screen, the composer live, and a message sent from it was
+    // stored under that account. Run last, because it ends the session.
+    const other = await ctx.session.context.newPage();
+    await other.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
+    await other.waitForSelector('#match-list .match-row');
+    await page.goto(ctx.base + '/settings.html', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('main [data-signout]');
+    await page.click('main [data-signout]');
+    await page.waitForURL(h.pageUrl('index'));
+    await other.waitForURL(h.pageUrl('auth'), { timeout: 10000 }).catch(function () {});
+    const otherTab = other.url();
+    await other.close();
+    t.check('signing out in one tab takes the other tabs off their signed-in pages',
+      otherTab.indexOf(ctx.base + '/') === 0 && h.pageUrl('auth').test(otherTab) && /[?&]next=/.test(otherTab),
+      otherTab);
   }
 };
