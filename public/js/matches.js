@@ -49,6 +49,7 @@
      ------------------------------------------------------------------------ */
 
   const dom = {
+    pageHead: document.querySelector('#main .page-head'),
     listPane: document.getElementById('list-pane'),
     chatPane: document.getElementById('chat-pane'),
     newCard: document.getElementById('new-matches-card'),
@@ -261,6 +262,12 @@
     show(dom.placeholder, wide && !open);
     // The back button only means something where the list is off screen.
     show(dom.back, !wide);
+    // On a phone an open conversation is sized to the screen between the
+    // header and the tab bar (components.css, .chat), and the page heading
+    // above it pushed it down by its own height: the composer sat below the
+    // screen and the newest message under the tab bar. The heading is only
+    // hidden from sight — the page keeps its h1 for a screen reader.
+    if (dom.pageHead) dom.pageHead.classList.toggle('sr-only', !wide && open);
   }
 
   /* ------------------------------------------------------------------------

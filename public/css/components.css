@@ -669,11 +669,20 @@
 /* --------------------------------------------------------------------------
    6. Chat
    -------------------------------------------------------------------------- */
+/* On a phone the open conversation is the only pane on screen, so it takes
+   the screen: everything between the sticky header and the fixed tab bar. The
+   log then scrolls inside it, which is what matches.js's scrollToBottom() and
+   isNearBottom() assume. Sized by its content instead, the log never
+   scrolled — the page did — so a 36-message conversation opened at its oldest
+   message, with the newest and the composer about 2,000px further down. The
+   wide layout sets its own height below. */
 .chat {
   display: flex;
   flex-direction: column;
-  min-height: 60vh;
-  height: 100%;
+  min-height: 320px;
+  height: calc(100vh - var(--nav-h) - 1px - var(--tabbar-h) - env(safe-area-inset-bottom, 0px) - 2 * var(--space-4));
+  height: calc(100dvh - var(--nav-h) - 1px - var(--tabbar-h) - env(safe-area-inset-bottom, 0px) - 2 * var(--space-4));
+  scroll-margin-top: calc(var(--nav-h) + 1px + var(--space-4));
   overflow: hidden;
   background: var(--surface);
   border: 1px solid var(--border);

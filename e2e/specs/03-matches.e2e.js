@@ -245,9 +245,34 @@ module.exports = {
     await page.waitForFunction(function (size) {
       return document.querySelectorAll('#chat-log .msg').length === size;
     }, WINDOW);
+
+    // On a phone the open conversation used to be sized by its content: the
+    // log never scrolled, the page did, and a long thread opened at its oldest
+    // message with the newest and the composer far below the screen. It is now
+    // the screen between the header and the tab bar, and its log scrolls.
+    if (ctx.viewport.key === 'mobile') {
+      const opened = await page.evaluate(function () {
+        const msgs = document.querySelectorAll('#chat-log .msg');
+        const newest = msgs[msgs.length - 1].getBoundingClientRect();
+        const form = document.getElementById('chat-form').getBoundingClientRect();
+        const bar = document.querySelector('.tabbar');
+        const floor = bar ? bar.getBoundingClientRect().top : window.innerHeight;
+        return {
+          newest: [Math.round(newest.top), Math.round(newest.bottom)],
+          composerBottom: Math.round(form.bottom),
+          floor: Math.round(floor),
+          pageScroll: document.scrollingElement.scrollHeight - window.innerHeight
+        };
+      });
+      t.check('a long conversation opens at its newest message, with the composer on screen',
+        opened.newest[0] >= 0 && opened.newest[1] <= opened.floor && opened.composerBottom <= opened.floor &&
+          opened.pageScroll <= 1,
+        JSON.stringify(opened));
+    }
+
     // Part way up, so a jump in either direction is distinguishable from staying.
-    // Whichever box actually scrolls: the log is its own scroller beside the
-    // list on a desktop, and on a phone it grows and the page scrolls instead.
+    // Whichever box actually scrolls: the log is its own scroller at both
+    // sizes now, but this measures whichever one moves rather than assuming.
     const placed = await page.evaluate(function () {
       const log = document.getElementById('chat-log');
       const scroller = log.scrollHeight > log.clientHeight + 1 ? log : document.scrollingElement;
