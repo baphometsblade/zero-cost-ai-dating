@@ -1036,8 +1036,20 @@
     async requireProfile(options) {
       const doc = await api.requireAuth(options);
       if (doc && doc.profileComplete) return doc;
-      leaveTo('profile.html?onboarding=1');
+      // Carrying the page it was asked for, so onboarding can hand them back.
+      leaveTo(withNext('profile.html?onboarding=1'));
       return pending();
+    },
+
+    /**
+     * Where this page was asked to send people on, if anywhere safe: the
+     * ?next= it carries, refused if it leaves the site or loops back here.
+     * Onboarding ends with this, so a deep link survives signing up.
+     * @param {string} fallback where to go when there is no usable ?next=
+     * @returns {string} a relative URL
+     */
+    resolveNext: function (fallback) {
+      return resolveNext(fallback);
     }
   };
 

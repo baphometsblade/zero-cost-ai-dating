@@ -722,11 +722,29 @@ test('requireProfile insists on onboarding, and defers to requireAuth when signe
   assert.equal(doc.uid, DEMO_UID);
   assert.deepEqual(locationShim.replaced, []);
 
-  // Signed in without one: off to onboarding.
+  // Signed in without one: off to onboarding, carrying the page it was asked
+  // for so onboarding can hand them back to it.
   await store.updateUser(DEMO_UID, { profileComplete: false });
   await auth.refresh();
   assert.equal(await navigates(auth.requireProfile()), 'pending');
-  assert.deepEqual(locationShim.replaced, ['profile.html?onboarding=1']);
+  assert.deepEqual(locationShim.replaced, ['profile.html?onboarding=1&next=%2Fdashboard.html']);
+});
+
+test('resolveNext hands onboarding back the page it was asked for, and nothing it should not', async function () {
+  const auth = await resetWorld();
+  locationShim.pathname = '/profile.html';
+
+  // The deep link a guard or the sign-up form carried in, query and all.
+  locationShim.search = '?onboarding=1&next=' + encodeURIComponent('/matches.html?m=a_b');
+  assert.equal(auth.resolveNext('dashboard.html'), '/matches.html?m=a_b');
+
+  // No next, a hostile one, or one that loops back to onboarding: the fallback.
+  locationShim.search = '?onboarding=1';
+  assert.equal(auth.resolveNext('dashboard.html'), 'dashboard.html');
+  locationShim.search = '?onboarding=1&next=' + encodeURIComponent('/\t/evil.example/x');
+  assert.equal(auth.resolveNext('dashboard.html'), 'dashboard.html');
+  locationShim.search = '?onboarding=1&next=' + encodeURIComponent('/profile?onboarding=1');
+  assert.equal(auth.resolveNext('dashboard.html'), 'dashboard.html');
 });
 
 /* ------------------------------------------------------------------------

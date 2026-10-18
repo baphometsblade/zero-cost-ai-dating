@@ -313,5 +313,19 @@ module.exports = {
     await page.waitForSelector('#deck-stack .swipe-card');
     t.check('the chosen theme carries to the next page',
       (await page.getAttribute('html', 'data-theme')) === 'light');
+
+    // Onboarding hands people back to the page they were headed for. A guard
+    // or the sign-up form sends someone to profile.html?onboarding=1 with the
+    // page they asked for as ?next=, and "Start matching" used to go to the
+    // deck regardless: a link to a conversation or the plans page was lost the
+    // moment someone made an account to see it.
+    await page.goto(ctx.base + '/profile.html?onboarding=1&next=' + encodeURIComponent('/subscription.html'),
+      { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#profile-main:not(.hidden)');
+    await page.click('#start-btn');
+    await page.waitForURL(function (url) { return !h.pageUrl('profile').test(url.href); });
+    const landed = page.url();
+    t.check('finishing onboarding goes on to the page it was asked for',
+      h.pageUrl('subscription').test(landed), landed);
   }
 };
