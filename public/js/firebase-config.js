@@ -138,7 +138,8 @@
   /**
    * Global app configuration. `limits` is what each plan may do. The store's
    * canSpend() takes the daily budgets from it, app.js and matches.js take
-   * `seeLikedYou`, and the deck takes `adaptiveWeights`; subscription.js prints
+   * `seeLikedYou`, and the deck and the matches page's profile card take
+   * `adaptiveWeights`, all through planAllows() below; subscription.js prints
    * the same table, so a value changed here moves the plans page and those
    * gates together. A limit declared here that no gate reads is a promise the
    * plans page makes and nothing keeps, which `adaptiveWeights` was until the
@@ -153,6 +154,22 @@
     limits: {
       free: { likesPerDay: 25, superLikesPerDay: 1, rewinds: 0, seeLikedYou: false, adaptiveWeights: false },
       premium: { likesPerDay: Infinity, superLikesPerDay: 5, rewinds: Infinity, seeLikedYou: true, adaptiveWeights: true }
+    },
+
+    /**
+     * Whether a user's plan grants one of the yes/no features in `limits`
+     * (`seeLikedYou`, `adaptiveWeights`). Every gate asks this rather than
+     * repeating the plan → row → flag lookup: four copies of it is how the
+     * deck and the matches page came to decide `adaptiveWeights` differently.
+     * Reads `this.limits` when called, so the table as it stands is the one
+     * asked.
+     * @param {Object|null} user a UserDoc, or null for nobody signed in
+     * @param {string} feature a key of a `limits` row
+     * @returns {boolean}
+     */
+    planAllows: function (user, feature) {
+      var row = this.limits[user && user.plan === 'premium' ? 'premium' : 'free'];
+      return !!(row && row[feature]);
     }
   };
 

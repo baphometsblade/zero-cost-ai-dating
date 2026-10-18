@@ -444,22 +444,19 @@
 
   /** True when this plan is allowed to see who liked them. */
   function canSeeLikes() {
-    const plan = state.me && state.me.plan === 'premium' ? 'premium' : 'free';
-    const limits = (ZC.config && ZC.config.limits && ZC.config.limits[plan]) || null;
-    return !!(limits && limits.seeLikedYou);
+    return !!(ZC.config && ZC.config.planAllows(state.me, 'seeLikedYou'));
   }
 
   /**
-   * Whether this account's plan ranks with the adaptive term, read from the
-   * limits table as dashboard.js reads it for the deck. The profile card here
-   * asked the plan's name instead, so with the table saying otherwise it
-   * scored a match with a term the deck that found them did not use.
+   * Whether this account's plan ranks with the adaptive term, asked of the
+   * limits table through ZC.config.planAllows, as the deck asks it. The
+   * profile card here asked the plan's name instead, so with the table saying
+   * otherwise it scored a match with a term the deck that found them did not
+   * use.
    * @returns {boolean}
    */
   function adaptiveRanking() {
-    const plan = state.me && state.me.plan === 'premium' ? 'premium' : 'free';
-    const limits = (ZC.config && ZC.config.limits && ZC.config.limits[plan]) || null;
-    return !!(limits && limits.adaptiveWeights);
+    return !!(ZC.config && ZC.config.planAllows(state.me, 'adaptiveWeights'));
   }
 
   /**

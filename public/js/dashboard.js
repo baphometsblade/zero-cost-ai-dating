@@ -1544,9 +1544,7 @@
    * @returns {boolean}
    */
   function adaptiveRanking() {
-    const plan = state.me && state.me.plan === 'premium' ? 'premium' : 'free';
-    const limits = (ZC.config && ZC.config.limits && ZC.config.limits[plan]) || null;
-    return !!(limits && limits.adaptiveWeights);
+    return !!(ZC.config && ZC.config.planAllows(state.me, 'adaptiveWeights'));
   }
 
   /**

@@ -97,9 +97,7 @@
 
   /** True when this user's plan may see who liked them. */
   function planSeesLikes(doc) {
-    const plan = doc && doc.plan === 'premium' ? 'premium' : 'free';
-    const limits = (ZC.config && ZC.config.limits && ZC.config.limits[plan]) || null;
-    return !!(limits && limits.seeLikedYou);
+    return !!(ZC.config && ZC.config.planAllows(doc, 'seeLikedYou'));
   }
 
   /* ------------------------------------------------------------------------
