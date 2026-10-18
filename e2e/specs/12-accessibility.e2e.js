@@ -350,6 +350,35 @@ module.exports = {
           listTree.children.every(function (role) { return role === 'listitem'; }),
         JSON.stringify({ tree: listTree, rows: rowCount }));
 
+      // Each row's name, as the accessibility tree has it, must carry what the
+      // row shows. An aria-label of name, unread count and stamp replaced the
+      // row's content, so a screen reader heard "Devin A., 1 unread message,
+      // last activity 1d" and never the message the row displays.
+      // Matched by role and accessible name, which is what a screen reader
+      // goes by: the preview and the stamp each row shows, in that order.
+      const escape = function (text) { return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); };
+      const shownRows = await page.locator('#match-list .match-row').evaluateAll(function (nodes) {
+        return nodes.map(function (node) {
+          const visible = function (selector) {
+            const part = node.querySelector(selector).cloneNode(true);
+            Array.prototype.forEach.call(part.querySelectorAll('.sr-only'), function (hidden) { hidden.remove(); });
+            return part.textContent.replace(/\s+/g, ' ').trim();
+          };
+          return { id: node.dataset.matchId, preview: visible('.match-row-preview'), stamp: visible('.match-row-time') };
+        });
+      });
+      const unnamed = [];
+      for (const shown of shownRows) {
+        const named = page.locator('#match-list').getByRole('link', {
+          name: new RegExp(escape(shown.preview) + '.*' + escape(shown.stamp))
+        });
+        const ids = await named.evaluateAll(function (nodes) { return nodes.map(function (node) { return node.dataset.matchId; }); });
+        if (!shown.preview || ids.indexOf(shown.id) === -1) unnamed.push(shown.id + ' shows "' + shown.preview + '"');
+      }
+      t.check('every conversation row is named by what it shows, the message included',
+        shownRows.length > 0 && unnamed.length === 0,
+        unnamed.length ? 'not in the name: ' + unnamed.join('; ') : shownRows.length + ' rows');
+
       await row.focus();
       const fromRow = await activeElement(page);
       t.check('a conversation row takes focus before it is opened',
