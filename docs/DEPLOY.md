@@ -280,8 +280,9 @@ one round trip per file — nine or ten on a page, sent together — and no byte
 stylesheets used to carry `max-age=3600` against pages that did not, so for an hour after
 every deploy a returning visitor ran the previous deploy's scripts against the new pages;
 the service worker did not help, because its network-first fetch reads the same HTTP cache.
-The file names carry no version, so a cache lifetime of any length on them reopens that
-window; `e2e/specs/07-offline.e2e.js` deploys a changed script under a returning visitor,
+The first deploy carrying this header still meets copies cached under the old one, which
+keep their hour — once. The file names carry no version, so a cache lifetime of any length
+on them reopens that window; `e2e/specs/07-offline.e2e.js` deploys a changed script under a returning visitor,
 with Hosting's headers, and fails if a reload runs the old one, with a service worker or
 without. Images and fonts keep their year-long `immutable` lifetime. The only one in
 `public/` is `favicon.svg`, which no code depends on — but a changed icon reaches someone who

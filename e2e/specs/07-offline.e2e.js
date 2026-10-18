@@ -32,12 +32,17 @@ const path = require('node:path');
  */
 async function deployedScriptRuns(h, workers) {
   const site = fs.mkdtempSync(path.join(os.tmpdir(), 'zc-deploy-'));
-  fs.cpSync(h.PUBLIC_DIR, site, { recursive: true });
-  const server = await h.startServer(site, { cacheHeaders: true });
-  const browser = await h.loadPlaywright().chromium.launch({
-    args: ['--host-resolver-rules=MAP www.gstatic.com ~NOTFOUND, MAP apis.google.com ~NOTFOUND']
-  });
+  let server = null;
+  let browser = null;
+  // Everything after the copy is inside the try, so a server that started
+  // and a browser that did not still end with the server stopped and the
+  // copy gone, rather than a listening port holding the run open.
   try {
+    fs.cpSync(h.PUBLIC_DIR, site, { recursive: true });
+    server = await h.startServer(site, { cacheHeaders: true });
+    browser = await h.loadPlaywright().chromium.launch({
+      args: ['--host-resolver-rules=MAP www.gstatic.com ~NOTFOUND, MAP apis.google.com ~NOTFOUND']
+    });
     const context = await browser.newContext({ serviceWorkers: workers });
     const page = await context.newPage();
     await h.signIn(page, server.origin);
@@ -54,8 +59,8 @@ async function deployedScriptRuns(h, workers) {
     const ran = await page.evaluate(function () { return window.__zcDeployed || null; });
     return { controlled: controlled, ran: ran };
   } finally {
-    await browser.close();
-    await server.stop();
+    if (browser) await browser.close();
+    if (server) await server.stop();
     fs.rmSync(site, { recursive: true, force: true });
   }
 }
