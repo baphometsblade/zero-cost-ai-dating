@@ -257,7 +257,7 @@
   function usageRow(row, usage, limits) {
     const used = Math.max(0, Number(usage[row.field]) || 0);
     const limit = limits[row.limitKey];
-    const wrap = el('div', { class: 'stack stack-sm' });
+    const wrap = el('div', { class: 'stack stack-sm usage-row' });
 
     if (limit === Infinity) {
       wrap.appendChild(el('div', { class: 'spread' }, [
@@ -480,6 +480,19 @@
      ------------------------------------------------------------------------ */
 
   /**
+   * Settle the plan card on a page that cannot start, whichever way it failed:
+   * say so where the plan would be, and take down the placeholder usage rows.
+   * The rows the page arrives with are placeholders, and left standing they
+   * would read as a usage record with its numbers still on the way.
+   * @returns {void}
+   */
+  function cannotStart() {
+    dom.planSummary.textContent = 'Your plan could not be loaded. Reload the page to try again.';
+    clear(dom.usageList);
+    dom.usageList.setAttribute('aria-busy', 'false');
+  }
+
+  /**
    * Start the page: require an account, then paint the plans and the usage.
    * @returns {Promise<void>}
    */
@@ -492,6 +505,7 @@
 
     if (!ZC.auth || typeof ZC.auth.requireAuth !== 'function' || !ZC.store) {
       console.error('[zc] subscription.js needs auth.js and data-store.js.');
+      cannotStart();
       toast('The app scripts did not all load. Try reloading the page.', 'error');
       return;
     }
@@ -506,11 +520,7 @@
       dom.freeCta.addEventListener('click', onDowngrade);
     } catch (err) {
       console.error('[zc] The plans page could not start:', err);
-      dom.planSummary.textContent = 'Your plan could not be loaded. Reload the page to try again.';
-      // The rows the page arrives with are placeholders, and left standing
-      // they would read as a usage record with its numbers still on the way.
-      clear(dom.usageList);
-      dom.usageList.setAttribute('aria-busy', 'false');
+      cannotStart();
       toast('Could not load your plan.', 'error');
     }
   }

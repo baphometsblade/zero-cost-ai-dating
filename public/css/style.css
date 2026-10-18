@@ -1855,6 +1855,17 @@ legend {
   border: 1px solid var(--border);
 }
 
+/* A usage row on the plans page is as tall as a metered one — a line of text,
+   the gap, the meter — whether or not it draws a meter. The page arrives with
+   metered placeholder rows, and Premium's unlimited ones, a pill and no meter,
+   came out 10px shorter each, pulling the plan cards up the page as the
+   counters landed. 1.55em is 1lh under the body's unitless line-height, for a
+   browser that does not know the unit. */
+.usage-row {
+  min-height: calc(1.55em + var(--space-2) + 8px);
+  min-height: calc(1lh + var(--space-2) + 8px);
+}
+
 .meter-fill {
   height: 100%;
   width: 0;

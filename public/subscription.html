@@ -57,21 +57,22 @@
           <!-- role="group" so the aria-labelledby is allowed: ARIA prohibits
                naming a plain generic div. -->
           <!-- Until today's counters arrive this holds rows in the shape
-               subscription.js draws for the Free plan, which it replaces. It
+               subscription.js draws, which it replaces (.usage-row keeps a
+               row without a meter the same height as one with). It
                used to start empty, and filling it pushed the plan cards below —
                switch buttons and all — 200px down the page as they were painted,
                a layout shift of 0.14 on a laptop and 0.17 on a phone.
                tests/static.test.js holds these rows to USAGE_ROWS. -->
           <div class="stack" id="usage-list" role="group" aria-labelledby="usage-heading" aria-busy="true">
-            <div class="stack stack-sm" aria-hidden="true">
+            <div class="stack stack-sm usage-row" aria-hidden="true">
               <div class="spread"><span>Likes</span><span class="text-muted">…</span></div>
               <div class="meter"></div>
             </div>
-            <div class="stack stack-sm" aria-hidden="true">
+            <div class="stack stack-sm usage-row" aria-hidden="true">
               <div class="spread"><span>Super likes</span><span class="text-muted">…</span></div>
               <div class="meter"></div>
             </div>
-            <div class="stack stack-sm" aria-hidden="true">
+            <div class="stack stack-sm usage-row" aria-hidden="true">
               <div class="spread"><span>Rewinds</span><span class="text-muted">…</span></div>
               <div class="meter"></div>
             </div>
