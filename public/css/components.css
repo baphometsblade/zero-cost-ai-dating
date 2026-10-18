@@ -1498,6 +1498,17 @@
   }
 }
 
+/* From 721px the tab bar is gone (style.css hides it and drops the page's
+   bottom padding to --space-5), so the one-pane chat stops reserving room for
+   it — it left a 62px band under the composer on a tablet. From 900px the
+   two-pane layout sets its own height, below. */
+@media (min-width: 721px) {
+  .chat {
+    height: calc(100vh - var(--nav-h) - 1px - 2 * var(--space-5));
+    height: calc(100dvh - var(--nav-h) - 1px - 2 * var(--space-5));
+  }
+}
+
 @media (min-width: 900px) {
   .deck-stack {
     height: clamp(500px, 64vh, 640px);
