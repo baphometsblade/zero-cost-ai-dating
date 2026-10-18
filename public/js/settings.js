@@ -1031,6 +1031,9 @@
       // 2. The sign-in itself. In firebase mode this reauthenticates a stale
       //    session first and throws if the login could not be removed — the
       //    flow never claims success while the identity is still usable.
+      //    Deleting it ends the Firebase session, which a guarded page reads
+      //    as a sign-out in another tab unless told this one is on purpose.
+      if (ZC.auth && typeof ZC.auth.endingSession === 'function') ZC.auth.endingSession();
       if (ZC.store.mode === 'firebase') await deleteFirebaseSignIn();
       else removeDemoCredentials(email);
 

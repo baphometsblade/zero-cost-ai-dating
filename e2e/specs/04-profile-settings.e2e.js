@@ -327,5 +327,22 @@ module.exports = {
     const landed = page.url();
     t.check('finishing onboarding goes on to the page it was asked for',
       h.pageUrl('subscription').test(landed), landed);
+
+    // Signing out in one tab is signing out in all of them. The other tab used
+    // to carry on as the account that had just left: its open conversations
+    // stayed on screen, the composer live, and a message sent from it was
+    // stored under that account. Run last, because it ends the session.
+    const other = await ctx.session.context.newPage();
+    await other.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
+    await other.waitForSelector('#match-list .match-row');
+    await page.goto(ctx.base + '/settings.html', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('main [data-signout]');
+    await page.click('main [data-signout]');
+    await page.waitForURL(h.pageUrl('index'));
+    await other.waitForURL(h.pageUrl('auth'), { timeout: 10000 }).catch(function () {});
+    const otherTab = other.url();
+    await other.close();
+    t.check('signing out in one tab takes the other tabs off their signed-in pages',
+      h.pageUrl('auth').test(otherTab) && /[?&]next=/.test(otherTab), otherTab);
   }
 };

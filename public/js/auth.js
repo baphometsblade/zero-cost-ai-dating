@@ -300,6 +300,32 @@
     });
   }
 
+  /* A guarded page, and the account it was guarded for. requireAuth records
+     the uid it handed the page; when the session under the page changes from
+     somewhere else — signed out, or signed in as someone else, in another tab
+     — the page leaves for the sign-in page rather than carry on as an account
+     that is no longer here. It used to carry on: after a sign-out in another
+     tab, an open conversation stayed on screen with its composer live, and a
+     message sent from it was stored as the account that had just signed out.
+
+     A session this page ends on purpose (its own sign-out, deleting the
+     account) is marked first, because that code already knows where it is
+     going next. */
+  let guardedUid = null;
+  let endingHere = false;
+
+  /**
+   * Leave a guarded page whose account is no longer the signed-in one.
+   * @returns {void}
+   */
+  function followSessionChange() {
+    if (!guardedUid || endingHere) return;
+    const uid = api.current ? api.current.uid : null;
+    if (uid === guardedUid) return;
+    guardedUid = null;
+    leaveTo(withNext('auth.html'));
+  }
+
   /**
    * Publish a signed-in account.
    * @param {{uid:string, email:string, displayName:string}} account identity
@@ -910,6 +936,7 @@
      * @returns {Promise<{ok:boolean, error?:string}>}
      */
     async signOut() {
+      endingHere = true;
       let failure = null;
       if (MODE === 'firebase') {
         try {
@@ -1009,9 +1036,22 @@
       // happened after settling must count.
       await ready;
       const doc = api.doc;
-      if (doc) return doc;
+      if (doc) {
+        guardedUid = doc.uid;
+        return doc;
+      }
       leaveTo(withNext(opts.redirect || 'auth.html'));
       return pending();
+    },
+
+    /**
+     * Say that this page is about to end its own session — deleting the
+     * account ends the Firebase session before signOut runs — so the change
+     * is not mistaken for one made in another tab.
+     * @returns {void}
+     */
+    endingSession: function () {
+      endingHere = true;
     },
 
     /**
@@ -1083,6 +1123,7 @@
     } finally {
       settle();
     }
+    followSessionChange();
   }
 
   /**
@@ -1129,10 +1170,11 @@
     const uid = sessionUid(readJson(SESSION_KEY, null));
     if (!uid) {
       setSignedOut();
+      followSessionChange();
       return;
     }
     if (api.current && api.current.uid === uid) return;
-    adoptDemoSession(uid).catch(function (err) {
+    adoptDemoSession(uid).then(followSessionChange, function (err) {
       console.warn('[zc.auth] Could not follow the session change.', err);
     });
   });
