@@ -250,13 +250,20 @@ module.exports = {
     // log never scrolled, the page did, and a long thread opened at its oldest
     // message with the newest and the composer far below the screen. It is now
     // the screen between the header and the tab bar, and its log scrolls.
-    if (ctx.viewport.key === 'mobile') {
+    //
+    // On a laptop the chat was min(74vh, 720px) tall wherever the page heading
+    // ended: at 1280x800 its composer finished at 826px, below the window, and
+    // the page scrolled 475px to reach it. The page fills the window there now.
+    {
       const opened = await page.evaluate(function () {
         const msgs = document.querySelectorAll('#chat-log .msg');
         const newest = msgs[msgs.length - 1].getBoundingClientRect();
         const form = document.getElementById('chat-form').getBoundingClientRect();
+        // The tab bar is the floor where it shows; on a wide screen it is
+        // hidden and measures nothing, and the window's edge is the floor.
         const bar = document.querySelector('.tabbar');
-        const floor = bar ? bar.getBoundingClientRect().top : window.innerHeight;
+        const shown = bar && bar.getBoundingClientRect().height > 0;
+        const floor = shown ? bar.getBoundingClientRect().top : window.innerHeight;
         return {
           newest: [Math.round(newest.top), Math.round(newest.bottom)],
           composerBottom: Math.round(form.bottom),

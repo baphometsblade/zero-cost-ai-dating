@@ -1528,9 +1528,50 @@
     height: clamp(500px, 64vh, 640px);
   }
 
+  /* Wide enough for the list and the chat side by side, the matches page is a
+     messaging view: it fills the window below the header, each column scrolls
+     on its own, and the chat takes the height that is left. The chat was
+     min(74vh, 720px) tall wherever the page heading happened to end, so on a
+     1280x800 or a 1024x768 window it ran 25px past the bottom edge, composer
+     and all, and the page had to be scrolled to write a message. */
+  /* The window less the header and the body's own bottom padding (.has-tabbar,
+     var(--space-5) from 721px up), so the page itself never scrolls. */
+  .page-fill {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - var(--nav-h) - 1px - var(--space-5));
+    height: calc(100dvh - var(--nav-h) - 1px - var(--space-5));
+  }
+
+  .page-fill > .stack-lg {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    gap: 0;
+    min-height: 0;
+  }
+
+  .page-fill .two-pane {
+    flex: 1 1 auto;
+    align-items: stretch;
+    min-height: 0;
+  }
+
+  .page-fill .two-pane > * {
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  /* Outside .page-fill the old height stands: a page cached from before the
+     class existed, under this stylesheet, would otherwise get a chat as tall
+     as its thread, with the composer a thousand pixels down. */
   .chat {
     min-height: 0;
     height: min(74vh, 720px);
+  }
+
+  .page-fill .chat {
+    height: 100%;
   }
 
   .match-burst-inner {
