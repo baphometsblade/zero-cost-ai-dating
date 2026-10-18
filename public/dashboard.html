@@ -31,11 +31,20 @@
     </noscript>
 
     <!-- Daily-limit notice. dashboard.js fills the sentence, runs the countdown
-         to local midnight and removes .hidden when you run out. -->
-    <div class="limit-banner hidden" id="limit-banner" role="status" aria-live="polite">
+         to local midnight and removes .hidden when you run out. Not a live
+         region: the countdown rewrites the sentence every second, and in the
+         last hour before midnight it is a different sentence every time. -->
+    <div class="limit-banner hidden" id="limit-banner">
       <span id="limit-text"></span>
       <a class="btn btn-primary btn-sm" href="subscription.html" id="limit-cta">See Premium</a>
     </div>
+
+    <!-- The banner's announcement, written once when the likes run out. Outside
+         the banner because the banner is display:none until then, and a live
+         region inside display:none is not exposed to a screen reader: the
+         region has to be exposed already for its sentence to arrive as a
+         change to read out. -->
+    <p class="sr-only" id="limit-status" role="status" aria-live="polite"></p>
 
     <section class="deck" aria-labelledby="deck-heading">
       <h2 class="sr-only" id="deck-heading">Your deck</h2>
