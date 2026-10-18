@@ -669,6 +669,9 @@ test('requireGuest refuses an off-site ?next= and will not loop back to this pag
     'javascript:alert(1)',         // a scheme, not a path
     '\\\\evil.example',            // backslashes some parsers read as slashes
     '/\\evil.example',             // mixed slash trick
+    '/\t/evil.example/x',          // a tab the URL parser deletes, leaving //evil.example
+    '/\n/evil.example/x',          // the same with a newline
+    '/\r/evil.example/x',          // and a carriage return
     ''                             // empty
   ];
   for (let i = 0; i < hostile.length; i += 1) {

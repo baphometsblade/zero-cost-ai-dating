@@ -704,12 +704,31 @@
     const path = String(value).trim();
     // A backslash can be read as a slash by some parsers, so refuse it outright.
     if (!path || path.indexOf('\\') !== -1) return null;
+    // So is nothing at all: the URL parser deletes every tab and newline before
+    // it reads a URL, and "/<tab>/evil.example" — which the slash check below
+    // saw as a path — reached location.replace() as the protocol-relative
+    // "//evil.example". No control character belongs in a page address.
+    if (/[\u0000-\u001F\u007F]/.test(path)) return null;
+    let candidate = null;
     // Absolute site paths are fine; protocol-relative "//host" is not.
-    if (path.charAt(0) === '/') return path.charAt(1) === '/' ? null : path;
-    // Bare page names, with or without the .html suffix (hosting uses cleanUrls).
-    // Anything carrying a scheme, such as javascript:, fails this test.
-    if (/^[a-z0-9][a-z0-9._-]*(\.html)?([?#].*)?$/i.test(path)) return path;
-    return null;
+    if (path.charAt(0) === '/') {
+      candidate = path.charAt(1) === '/' ? null : path;
+    } else if (/^[a-z0-9][a-z0-9._-]*(\.html)?([?#].*)?$/i.test(path)) {
+      // Bare page names, with or without the .html suffix (hosting uses
+      // cleanUrls). Anything carrying a scheme, such as javascript:, fails.
+      candidate = path;
+    }
+    if (!candidate) return null;
+    // And whatever passed is resolved the way the browser will resolve it,
+    // and has to stay on this origin: the checks above are a list of known
+    // tricks, and this is the property they exist to protect.
+    try {
+      const here = window.location && window.location.href;
+      if (here && new URL(candidate, here).origin !== new URL(here).origin) return null;
+    } catch (err) {
+      return null;
+    }
+    return candidate;
   }
 
   /**
