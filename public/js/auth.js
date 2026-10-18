@@ -316,11 +316,13 @@
 
   /**
    * Leave a guarded page whose account is no longer the signed-in one.
+   * @param {string|null} [nextUid] the account taking over, when it is known
+   *   before its profile has loaded; by default, the one already published
    * @returns {void}
    */
-  function followSessionChange() {
+  function followSessionChange(nextUid) {
     if (!guardedUid || endingHere) return;
-    const uid = api.current ? api.current.uid : null;
+    const uid = nextUid !== undefined ? nextUid : (api.current ? api.current.uid : null);
     if (uid === guardedUid) return;
     guardedUid = null;
     leaveTo(withNext('auth.html'));
@@ -949,6 +951,9 @@
       removeKey(SESSION_KEY);
       setSignedOut();
       settle();
+      // A sign-out that failed leaves this page where it is, so a later change
+      // made in another tab must still move it.
+      if (failure) endingHere = false;
       return failure ? { ok: false, error: humanError(failure) } : { ok: true };
     },
 
@@ -1047,11 +1052,13 @@
     /**
      * Say that this page is about to end its own session — deleting the
      * account ends the Firebase session before signOut runs — so the change
-     * is not mistaken for one made in another tab.
+     * is not mistaken for one made in another tab. Pass false when that
+     * attempt failed and the page is staying.
+     * @param {boolean} [ending] false to withdraw the notice
      * @returns {void}
      */
-    endingSession: function () {
-      endingHere = true;
+    endingSession: function (ending) {
+      endingHere = ending !== false;
     },
 
     /**
@@ -1105,6 +1112,9 @@
    * @returns {Promise<void>}
    */
   async function onFirebaseUser(user) {
+    // Leave on the new account's uid, before its profile loads: until then
+    // the page would still be acting as the account that left.
+    followSessionChange(user && user.uid ? user.uid : null);
     try {
       if (user && user.uid) {
         // Use the sign-up's own seed when one is in flight: this callback runs
@@ -1139,6 +1149,7 @@
             console.warn('[zc.auth] Firebase stopped reporting auth state.', err);
             setSignedOut();
             settle();
+            followSessionChange();
           }
         );
       } catch (err) {
@@ -1174,7 +1185,8 @@
       return;
     }
     if (api.current && api.current.uid === uid) return;
-    adoptDemoSession(uid).then(followSessionChange, function (err) {
+    followSessionChange(uid);
+    adoptDemoSession(uid).then(function () { followSessionChange(); }, function (err) {
       console.warn('[zc.auth] Could not follow the session change.', err);
     });
   });

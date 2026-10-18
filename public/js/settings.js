@@ -1050,6 +1050,8 @@
       window.location.replace(home);
     } catch (err) {
       console.error('[zc] Account deletion failed:', err);
+      // The page stays, so a session change made elsewhere must move it again.
+      if (ZC.auth && typeof ZC.auth.endingSession === 'function') ZC.auth.endingSession(false);
       busy(dom.deleteButton, false);
       if (dataGone) {
         // The data was removed but the sign-in survives; be precise about it.

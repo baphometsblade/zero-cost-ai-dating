@@ -492,12 +492,15 @@ function installEmulatorWiring(config) {
  *   demo mode: `{ config }` is installed as the stored Firebase config and the
  *   SDK is pointed at the emulators through the page's own origin. The CDN is
  *   then let through, because the real SDK has to load.
+ * @param {string} [opts.serviceWorkers] 'block' to keep the service worker
+ *   out, so page.route sees navigations the worker would otherwise fetch
  * @returns {Promise<{context:Object, page:Object, errors:string[]}>}
  */
 async function openSession(browser, viewport, opts) {
   const firebase = (opts && opts.firebase) || null;
   const context = await browser.newContext({
-    viewport: { width: viewport.width, height: viewport.height }
+    viewport: { width: viewport.width, height: viewport.height },
+    serviceWorkers: (opts && opts.serviceWorkers) || 'allow'
   });
 
   if (!firebase) {

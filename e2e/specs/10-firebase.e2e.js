@@ -678,6 +678,35 @@ module.exports = {
       // 400 included. The drains above take out only commits refused before it —
       // 403, 409 and 400 — and their own checks require there to be none: nothing
       // in this spec may lose a transaction to a write the same page made.
+
+      // A sign-out that fails leaves the page where it is, and must not leave
+      // it deaf to the next change: a page marks its own sign-out so that the
+      // session ending is not mistaken for another tab's doing, and that mark
+      // used to outlive a failure. A sign-out in another tab afterwards then
+      // changed nothing here, and the page stayed up as the account that had
+      // left. Run last, because it ends the session.
+      const failed = await page.evaluate(function () {
+        const fb = window.ZC.firebase.auth;
+        const real = fb.signOut;
+        fb.signOut = function () {
+          fb.signOut = real;
+          const err = new Error('Sign-out held by the e2e suite.');
+          err.code = 'auth/network-request-failed';
+          return Promise.reject(err);
+        };
+        return window.ZC.auth.signOut();
+      });
+      const elsewhere = await ctx.session.context.newPage();
+      await elsewhere.goto(base + '/index.html', { waitUntil: 'domcontentloaded' });
+      await elsewhere.waitForFunction(function () { return !!(window.ZC && window.ZC.auth && window.ZC.auth.current); });
+      await elsewhere.evaluate(function () { return window.ZC.auth.signOut(); });
+      await page.waitForURL(h.pageUrl('auth'), { timeout: 10000 }).catch(function () {});
+      const movedTo = page.url();
+      await elsewhere.close();
+      t.check('after a sign-out that failed, a sign-out in another tab still moves the page on',
+        failed && failed.ok === false && movedTo.indexOf(base + '/') === 0 &&
+          h.pageUrl('auth').test(movedTo) && /[?&]next=/.test(movedTo),
+        JSON.stringify(failed) + ' · ' + movedTo);
     } finally {
       await server.stop();
     }
