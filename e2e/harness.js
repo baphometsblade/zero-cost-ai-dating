@@ -196,6 +196,55 @@ function forward(req, res, target, live) {
 }
 
 /**
+ * The Cache-Control Firebase Hosting sends for a path, read from firebase.json.
+ *
+ * Its `source` globs are matched the way Hosting matches them — `**` any run of
+ * path segments, `*` within one, `@(a|b)` one of the alternatives — and when
+ * several rules match, the later one's header wins. Read when asked rather
+ * than copied in here, so a spec served with these headers is served what
+ * production would send under the firebase.json in this checkout.
+ * @param {string} pathname the request's path, e.g. '/js/app.js' or '/matches'
+ * @returns {string|null} the header value, or null when no rule sets one
+ */
+function hostingCacheControl(pathname) {
+  const config = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'firebase.json'), 'utf8'));
+  let value = null;
+  ((config.hosting && config.hosting.headers) || []).forEach(function (rule) {
+    if (!globToRegExp(rule.source).test(pathname)) return;
+    (rule.headers || []).forEach(function (header) {
+      if (String(header.key).toLowerCase() === 'cache-control') value = header.value;
+    });
+  });
+  return value;
+}
+
+/**
+ * A firebase.json `source` glob as a RegExp over the whole path.
+ * @param {string} glob e.g. '**' + '/*.@(js|css)'
+ * @returns {RegExp}
+ */
+function globToRegExp(glob) {
+  const literal = function (text) { return text.replace(/[.+?^${}()|[\]\\]/g, '\\$&'); };
+  let out = '';
+  for (let i = 0; i < glob.length; i += 1) {
+    const c = glob[i];
+    if (c === '*' && glob[i + 1] === '*') {
+      // `**/` is any number of whole segments, none included.
+      if (glob[i + 2] === '/') { out += '(?:.*/)?'; i += 2; } else { out += '.*'; i += 1; }
+    } else if (c === '*') {
+      out += '[^/]*';
+    } else if (c === '@' && glob[i + 1] === '(') {
+      const end = glob.indexOf(')', i);
+      out += '(?:' + glob.slice(i + 2, end).split('|').map(literal).join('|') + ')';
+      i = end;
+    } else {
+      out += literal(c);
+    }
+  }
+  return new RegExp('^' + out + '$');
+}
+
+/**
  * Serve `public/` on an ephemeral port. Ephemeral because several specs run in
  * the same process and one of them deliberately kills its server mid-test.
  * @param {string} [root=PUBLIC_DIR] directory to serve
@@ -208,6 +257,9 @@ function forward(req, res, target, live) {
  *   being looked up on disk. This is what lets a page talk to the Firestore
  *   and Auth emulators without leaving its own origin, and so without the
  *   shipped `connect-src 'self'` having to be relaxed for the tests.
+ * @param {boolean} [opts.cacheHeaders] answer with the Cache-Control
+ *   firebase.json gives each path instead of `no-store`, so the browser's own
+ *   HTTP cache behaves as it does in production
  * @returns {Promise<{origin:string, base:string, stop:function():Promise<void>}>}
  */
 async function startServer(root, opts) {
@@ -283,7 +335,8 @@ async function startServer(root, opts) {
         'content-type': MIME[path.extname(target).toLowerCase()] || 'application/octet-stream',
         // The service worker is network-first; letting the browser answer from
         // its own HTTP cache would hide whether the worker is doing its job.
-        'cache-control': 'no-store'
+        // Unless a spec asks for production's headers, to test exactly that.
+        'cache-control': (opts && opts.cacheHeaders && hostingCacheControl(pathname)) || 'no-store'
       });
       res.end(body);
     });
@@ -641,6 +694,7 @@ module.exports = {
   VIEWPORTS: VIEWPORTS,
   loadPlaywright: loadPlaywright,
   startServer: startServer,
+  hostingCacheControl: hostingCacheControl,
   openSession: openSession,
   pageUrl: pageUrl,
   signIn: signIn,

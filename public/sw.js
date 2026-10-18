@@ -111,8 +111,13 @@ self.addEventListener('install', function (event) {
   event.waitUntil(
     caches.open(CACHE)
       .then(function (cache) {
+        // `no-cache`: asked of the server, not of the browser's HTTP cache.
+        // A new worker installs because a deploy changed it, and a script or
+        // page the browser cached before that deploy is exactly what must not
+        // be stored as this deploy's offline copy. GitHub Pages caches every
+        // file for ten minutes and cannot be told otherwise.
         return Promise.all(CORE.map(function (path) {
-          return fetch(path).then(function (response) {
+          return fetch(path, { cache: 'no-cache' }).then(function (response) {
             if (!response.ok) throw new Error('precache: ' + path + ' answered ' + response.status);
             return unredirected(response).then(function (clean) { return cache.put(path, clean); });
           });

@@ -723,9 +723,10 @@ match id current without adding history entries.
   228px (a layout shift of 0.16 on a phone); the skeleton is its own card now, standing in
   for the cards after it, and they replace it in one frame. The stylesheet holds them back
   (`.list-skeleton:not(.hidden) ~ .list-after-load`), not a `hidden` class for `matches.js`
-  to lift: scripts are cached for an hour and pages are not, so for that hour after a deploy
-  the previous script runs against the new page, and a card it did not know to reveal stayed
-  hidden with every conversation in it. The plans page started today's usage empty
+  to lift: a page and its scripts can come from two deploys, and a card the previous script
+  did not know to reveal stayed hidden with every conversation in it. Hosting serves scripts
+  `no-cache` now, which closes that window there (DEPLOY.md, section 6); GitHub Pages caches
+  every file for ten minutes and cannot be told otherwise. The plans page started today's usage empty
   above the plan cards and their switch buttons (0.17); it arrives with placeholder rows in
   the shape `subscription.js` draws, which `tests/static.test.js` holds to `USAGE_ROWS`, and
   `.usage-row` keeps a row without a meter — Premium's unlimited ones — as tall as one with,

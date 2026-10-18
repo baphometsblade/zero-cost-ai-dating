@@ -193,6 +193,7 @@ function runWorker(opts) {
   const stores = new Map();
   (o.existing || []).forEach(function (name) { stores.set(name, new Map()); });
   const deleted = [];
+  const fetched = [];
   const origin = 'https://example.test';
   function keyOf(req) {
     return new URL(typeof req === 'string' ? req : req.url, origin + '/').href;
@@ -226,12 +227,17 @@ function runWorker(opts) {
   };
   const context = vm.createContext({
     self: self, caches: caches, Response: Response, URL: URL, Blob: Blob, Headers: Headers,
-    fetch: function (req) { return Promise.resolve(o.fetch(typeof req === 'string' ? req : req.url)); }
+    fetch: function (req, init) {
+      const url = typeof req === 'string' ? req : req.url;
+      fetched.push({ url: url, init: init || null });
+      return Promise.resolve(o.fetch(url));
+    }
   });
   vm.runInContext(fs.readFileSync(SW_PATH, 'utf8'), context, { filename: SW_PATH });
   return {
     stores: stores,
     deleted: deleted,
+    fetched: fetched,
     cacheName: vm.runInContext('CACHE', context),
     core: vm.runInContext('CORE', context),
     fire: function (type, extra) {
@@ -275,6 +281,21 @@ test('install stores every page WITHOUT its redirect, so a navigation may be ser
     assert.equal(stored.headers.get('content-length'), null, file + ' still claims the compressed length');
     assert.equal(stored.headers.get('content-type'), 'text/html; charset=utf-8', file + ' lost its content type');
   }
+});
+
+test('install asks the server for the shell, not the browser\'s HTTP cache', async function () {
+  // A new worker installs because a deploy changed it, so what it stores as the
+  // offline copy has to be that deploy. A plain fetch is answered from the HTTP
+  // cache when it can be, and GitHub Pages caches every file for ten minutes:
+  // a page or script the browser kept from before the deploy would be stored as
+  // this deploy's shell, beside files that are not.
+  const worker = runWorker({ fetch: function (url) { return fakeResponse('ok ' + url); } });
+  await worker.fire('install');
+  assert.equal(worker.fetched.length, worker.core.length, 'install fetched ' + worker.fetched.length +
+    ' times for ' + worker.core.length + ' shell assets');
+  const cached = worker.fetched.filter(function (call) { return !call.init || call.init.cache !== 'no-cache'; });
+  assert.deepEqual(cached.map(function (call) { return call.url; }), [],
+    'fetched without `cache: \'no-cache\'`, so the browser may answer from its HTTP cache');
 });
 
 test('install still fails as a whole when any shell asset is not a success', async function () {
