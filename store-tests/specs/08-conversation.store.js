@@ -1,10 +1,12 @@
 /* ==========================================================================
    A conversation keeps working, and outlives everything except an unmatch.
 
-   All three properties here are about the Firebase adapter alone. The demo
-   adapter holds every message in one array in one tab, so it has none of these
-   problems and none could be found by a demo-mode test — which is the shape of
-   divergence this repository has been bitten by before.
+   All four properties here are about the Firebase adapter alone. The demo
+   adapter holds every message in one array in one tab, so it has none of the
+   first three problems and none could be found by a demo-mode test — which is
+   the shape of divergence this repository has been bitten by before. Nor the
+   fourth, for a different reason: it looks for the swipe before deleting it,
+   and no rules stand between it and localStorage to refuse the delete.
 
    1. The live stream used to ask for the 500 *oldest* messages
       (`orderBy('createdAt','asc').limit(500)`). Below the window that is
@@ -32,6 +34,11 @@
       them: they are not merely orphaned, they are permanently undeletable —
       real message content left in the project with no way to reach or remove
       it. Nothing had ever run `unmatch` against a real Firestore.
+
+   4. Rewinding a swipe that is already gone is a no-op, as it is in demo
+      mode. The delete rule dereferenced `resource`, which is null for a
+      missing document, so the second of two rewinds was refused — and only the
+      real ruleset could show it, so that part runs against the real ruleset.
 
    The window in (1) is deliberately exceeded here rather than assumed. A test
    that seeds ten messages passes against both the broken and the fixed
@@ -171,5 +178,45 @@ module.exports = {
     t.check('no message survived the match it belonged to',
       leftBehind.length === 0,
       leftBehind.length + ' orphaned message(s), e.g. ' + k.show((leftBehind[0] || {}).data));
+
+    /* ---- 4. a second rewind of the same swipe is a no-op --------------- */
+
+    // Against the REAL ruleset, signed in as the swiper, because the open rules the
+    // rest of this suite runs on could not see this. undoSwipe deletes without
+    // reading the swipe first, and firestore.rules dereferenced `resource` on a
+    // swipe delete — null for a document that is already gone — so asking twice
+    // (a second tab on the same deck, or a retry) came back permission-denied in
+    // Firebase mode, where the demo adapter answers `{ ok: true }` and
+    // tests/data-store.test.js pins that as the contract. The shipped function is
+    // pointed at that project for these two calls only.
+    const from = 'conv-rewinder';
+    const to = 'conv-rewound';
+    const swipeId = from + '_' + to;
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      await k.fs.setDoc(k.fs.doc(c.firestore(), 'swipes', swipeId),
+        { id: swipeId, from: from, to: to, action: 'like', createdAt: '2026-01-01T00:00:00.000Z' });
+    });
+    const openDb = k.ctx.ZC.firebase.db;
+    const answer = function (err) { return { rejected: (err && err.code) || String(err) }; };
+    let first = null;
+    let second = null;
+    try {
+      k.ctx.ZC.firebase.db = k.rulesEnv.authenticatedContext(from).firestore();
+      first = await k.store.undoSwipe(from, to).catch(answer);
+      second = await k.store.undoSwipe(from, to).catch(answer);
+    } finally {
+      k.ctx.ZC.firebase.db = openDb;
+    }
+    k.ctx.drainWarnings();
+    let gone = false;
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      gone = !(await k.fs.getDoc(k.fs.doc(c.firestore(), 'swipes', swipeId))).exists();
+    });
+
+    t.check('under the real rules, a rewind removes the swipe',
+      !!first && first.ok === true && gone, k.show(first) + (gone ? '' : ', and the swipe is still there'));
+
+    t.check('and asking again once it is gone answers ok, as the demo adapter does, rather than being refused',
+      !!second && second.ok === true, k.show(second));
   }
 };

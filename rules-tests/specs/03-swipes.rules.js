@@ -142,5 +142,22 @@ module.exports = {
 
     t.check('you cannot delete a swipe between two other people',
       await ok(assertFails(as(ME).doc('swipes/' + OTHER + '_' + THIRD).delete())));
+
+    // The absent case again, on delete this time. undoSwipe deletes without reading
+    // the swipe first, so a second rewind of the same card — two tabs on one deck,
+    // or a retry — deletes a document that is already gone. `resource` is null
+    // then, the rule dereferenced it, and the whole rewind came back
+    // permission-denied in Firebase mode where demo mode answers `{ ok: true }`.
+    // The rewind-path check above has already deleted this one.
+    t.check('you can delete your own swipe again once it is gone (a second rewind)',
+      await ok(assertSucceeds(as(ME).doc('swipes/' + ME + '_' + THIRD).delete())));
+
+    // ...allowed by the id, exactly as the read of a miss is, so a stranger gets the
+    // same refusal whether or not the document is there and learns nothing from it.
+    t.check('but you cannot delete a missing swipe between two other people',
+      await ok(assertFails(as(ME).doc('swipes/' + OTHER + '_' + FOURTH).delete())));
+
+    t.check('and a signed-out visitor cannot delete a missing one either',
+      await ok(assertFails(anon().doc('swipes/' + ME + '_never-swiped').delete())));
   }
 };
