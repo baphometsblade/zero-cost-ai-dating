@@ -27,10 +27,14 @@ module.exports = {
 
     await page.fill('#input-bio', loaded.bio + MARKER);
     await page.click('#save-btn');
-    await page.waitForFunction(function () {
-      return /saved/i.test(document.getElementById('save-status').textContent);
-    });
-    t.check('saving the profile reports success', true, (await page.textContent('#save-status')).trim());
+    // Anchored, because the edited form reads "Unsaved changes." and /saved/i
+    // matched that too: the wait was over before the save had done anything,
+    // and the check after it was `true`. Bounded, so a save that never reports
+    // success is reported by this check rather than as a timeout.
+    const saved = await page.waitForFunction(function () {
+      return /^Saved/.test(document.getElementById('save-status').textContent.trim());
+    }, null, { timeout: 5000 }).then(function () { return true; }, function () { return false; });
+    t.check('saving the profile reports success', saved, (await page.textContent('#save-status')).trim());
 
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#profile-main:not(.hidden)');
@@ -188,19 +192,24 @@ module.exports = {
     /* ---- settings ---- */
     await page.goto(ctx.base + '/settings.html', { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#theme-group');
+    // Each wait is bounded and its answer is the check. With no bound of its
+    // own, a theme that never applied ran out the session's twenty-second
+    // default and threw, recorded as "spec ran to completion", and the check
+    // after it was `true`.
+    const themed = function (want) {
+      return page.waitForFunction(function (value) {
+        return document.documentElement.getAttribute('data-theme') === value;
+      }, want, { timeout: 5000 }).then(function () { return true; }, function () { return false; });
+    };
     // The radio itself is visually hidden inside its chip, so click the label
     // the way a person does.
     await page.click('label.chip[for="theme-dark"]');
-    await page.waitForFunction(function () {
-      return document.documentElement.getAttribute('data-theme') === 'dark';
-    });
-    t.check('choosing dark applies the theme immediately', true);
+    t.check('choosing dark applies the theme immediately', await themed('dark'),
+      'data-theme=' + (await page.getAttribute('html', 'data-theme')));
 
     await page.click('label.chip[for="theme-light"]');
-    await page.waitForFunction(function () {
-      return document.documentElement.getAttribute('data-theme') === 'light';
-    });
-    t.check('choosing light applies the theme immediately', true);
+    t.check('choosing light applies the theme immediately', await themed('light'),
+      'data-theme=' + (await page.getAttribute('html', 'data-theme')));
 
     /* ---- a notifications change that did not save is not announced as made ---- */
 

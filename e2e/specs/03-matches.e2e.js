@@ -102,10 +102,14 @@ module.exports = {
     const text = 'Sent by the e2e suite at ' + ctx.viewport.label;
     await page.fill('#chat-input', text);
     await page.click('#chat-send');
-    await page.waitForFunction(function (needle) {
+    // Bounded, and its answer is the check. Written as a wait with no bound of
+    // its own and then `check(name, true)`, a message that never appeared ran
+    // out the session's twenty-second default inside the wait, which threw and
+    // was recorded as "spec ran to completion", and this line never printed.
+    const appeared = await page.waitForFunction(function (needle) {
       return document.getElementById('chat-log').textContent.indexOf(needle) !== -1;
-    }, text);
-    t.check('a sent message appears in the log', true);
+    }, text, { timeout: 5000 }).then(function () { return true; }, function () { return false; });
+    t.check('a sent message appears in the log', appeared);
     t.check('the composer clears after sending', (await page.inputValue('#chat-input')) === '');
 
     // syncUrl put ?m= in the address bar, so a plain reload reopens the thread.

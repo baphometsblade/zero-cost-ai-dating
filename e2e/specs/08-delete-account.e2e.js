@@ -174,13 +174,22 @@ module.exports = {
     t.check('the exact phrase unlocks the button',
       await page.locator('#delete-account').isEnabled());
 
+    // Both waits are bounded and their answers are the checks. Each used to
+    // have no bound of its own and be followed by `check(name, true)`: a
+    // deletion that stayed put, or a deck that let the deleted account in, ran
+    // out the session's twenty-second default, threw, was recorded as "spec
+    // ran to completion", and the check that names it never printed.
+    const arrived = function (name) {
+      return page.waitForURL(h.pageUrl(name), { timeout: 10000 })
+        .then(function () { return true; }, function () { return false; });
+    };
     await page.click('#delete-account');
-    await page.waitForURL(h.pageUrl('index'));
-    t.check('deleting the account returns you to the landing page', true, page.url().split('/').pop());
+    t.check('deleting the account returns you to the landing page', await arrived('index'),
+      page.url().split('/').pop());
 
     // Nothing may survive: the guard on a signed-in page has to turn you away.
     await page.goto(ctx.base + '/dashboard.html', { waitUntil: 'domcontentloaded' });
-    await page.waitForURL(h.pageUrl('auth'));
-    t.check('the deleted account can no longer reach the deck', true, page.url().split('/').pop());
+    t.check('the deleted account can no longer reach the deck', await arrived('auth'),
+      page.url().split('/').pop());
   }
 };
