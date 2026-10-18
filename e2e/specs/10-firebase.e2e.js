@@ -531,21 +531,27 @@ module.exports = {
       //
       // updateUser's transaction is written to cope with a users document that
       // is not there — `snap.exists ? snap.data() : { uid: uid }` — and then
-      // normalizeUser fills the gaps, including `lastActiveAt: null`.
-      // firestore.rules L133 accepts that key only as a string, so the write
-      // is refused and the branch can never do what it was written to do.
-      // Flipping that one field to a string is the whole difference between
-      // 403 and 200, replayed by hand against the same ruleset.
+      // normalizeUser fills the gaps, including `lastActiveAt: null`. When this
+      // spec was written, firestore.rules accepted that key only as a string,
+      // so the write was refused and the branch could never do what it was
+      // written to do: flipping that one field to a string was the whole
+      // difference between 403 and 200, replayed by hand against the same
+      // ruleset. `userDocOk` accepts null there now, as it does for
+      // `planSince`, and rules-tests/specs/01-users.rules.js pins both sides of
+      // it — null stored, a number still refused. What this probe adds is the
+      // upsert branch itself, through the shipped store, in a browser.
       //
-      // This is not a hypothetical. It is what makes signing up log a 403
-      // roughly every other run: auth.js adopts a new account twice — once
-      // from onAuthStateChanged, once from the sign-up call — and the second
-      // adopt sees the first one's document in the SDK's local cache, so it
-      // takes loadOrCreateDoc's *update* branch. A transaction reads the
-      // server, where the create is still in flight, so it lands in exactly
-      // the branch below, is denied, and auth.js falls back to an in-memory
-      // copy — losing the display name until the next page load. Deleting the
-      // document first is the same state, on purpose, every time.
+      // It was not a hypothetical. It was what made signing up log a 403
+      // roughly every other run: auth.js adopted a new account twice at once —
+      // from onAuthStateChanged and from the sign-up call — and the second
+      // adopt saw the first one's document in the SDK's local cache, so it
+      // took loadOrCreateDoc's *update* branch. A transaction reads the
+      // server, where the create was still in flight, so it landed in exactly
+      // the branch below, was denied, and auth.js fell back to an in-memory
+      // copy — losing the display name until the next page load. Adoption is
+      // queued per uid now, so the second adopt sees the first one's write
+      // instead. Deleting the document first is the same state, on purpose,
+      // every time.
       // Whether the race bit this run is worth saying, and taking those lines
       // out first keeps the detail below about the probe alone.
       // Two writers fighting over users/{uid} show up as 403 (the rules
@@ -596,13 +602,18 @@ module.exports = {
         recreate.ok === true,
         recreate.message + ' · sign-up hit the same denial ' + raced.length + ' time(s) this run');
 
-      // The 403 the probe above provokes is reported by its own check; leaving
-      // it in would have the runner's closing check report the same finding a
-      // second time, and the sign-up race would make it do so at random.
-      // Everything else still reaches that check — including a 400, which is
-      // no longer drained anywhere: nothing in this spec may lose a
-      // transaction to a write the same page made.
-      drain(ctx.session.errors, 'documents:commit', 403);
+      // Nothing is drained after the probe. A drain of every 403 on
+      // documents:commit used to sit here, from when the rules refused this
+      // write, so that the probe's 403 would not be reported a second time by
+      // the runner's closing check. The rules accept the probe now, and that
+      // drain was measured removing nothing; the only 403 it could still have
+      // taken out was one from something else, which is what the closing check
+      // is for. If the probe is ever refused again, the check above and the
+      // closing check both say so — measured, with the rule put back to strings
+      // only. So everything logged after the probe reaches the closing check, a
+      // 400 included. The drains above take out only commits refused before it —
+      // 403, 409 and 400 — and their own checks require there to be none: nothing
+      // in this spec may lose a transaction to a write the same page made.
     } finally {
       await server.stop();
     }

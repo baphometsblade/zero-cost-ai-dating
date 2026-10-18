@@ -129,9 +129,9 @@ Open [`firestore.rules`](../firestore.rules). It is the only server-side securit
 has, so it is worth the five minutes.
 
 Everything below is also *executed* — `npm run test:rules` runs the real rules file against
-the Firestore emulator, **188 checks** including the attacks each rule exists to stop. If you
+the Firestore emulator, **213 checks** including the attacks each rule exists to stop. If you
 change the data model, run it. See [`rules-tests/README.md`](../rules-tests/README.md).
-`npm run test:emulator` adds the store suite to the same emulator boot: **228 more checks** that
+`npm run test:emulator` adds the store suite to the same emulator boot: **261 more checks** that
 drive the shipped `public/js/data-store.js` against a real Firestore, which is where the
 daily counter's transaction is proven — see [`store-tests/README.md`](../store-tests/README.md).
 
@@ -155,7 +155,23 @@ anywhere else was free to rot. It now reads every document.
   to Firestore's 1 MiB ceiling, and a swipe is the cheapest write in the project — it needs
   only a signed-in account and a uid, uids are enumerable from `discovery`, and the daily
   limit that would slow it down is enforced in the browser. A Spark project gets 1 GiB.
-  `matches`, `messages` and `users/{uid}` are closed for the same reason.
+  `matches`, `messages` and `users/{uid}` are closed for the same reason, and `users/{uid}`
+  below its top level as well: `profile`, `preferences`, `learning`, `usage`,
+  `profile.personality` and `profile.location` each close their own key list. For a while
+  only the top level and `profile.personality` did, so a field such as `profile.padding`
+  could carry whatever the 1 MiB ceiling would hold.
+
+  A swipe is readable by its two parties only: the one who made it and the one it is aimed
+  at. A read of a document that is *not there* is allowed only when the id names you,
+  which the client needs (every first swipe reads its own unwritten record, and every first
+  like or super like the usually-absent reciprocal one) and an onlooker must not have: an
+  unconditional allowance would answer "has Alice swiped on Bob?" for any pair, from the
+  difference between an empty snapshot and a denial. Delete your own, or one aimed at you
+  (account deletion purges inbound likes too), or one that is already gone, on the same id
+  terms as that read. A second rewind of the same card — from a second tab on the same
+  deck, or a retry — then deletes nothing and succeeds, as it does in demo mode, instead of
+  coming back `permission-denied`. No updates: a rewind deletes the swipe, and the next
+  swipe on that card creates it afresh.
 
   A closed key list bounds how *many* fields a document may have and not how big one may
   be, which is a separate hole and was open in every collection: `createdAt` and its
@@ -188,16 +204,16 @@ anywhere else was free to rot. It now reads every document.
   returning false: it is an error, so every account creation in the app began failing with
   a flat `permission-denied` naming no field and no line. Measured afterwards, the version
   before them had room for **eleven** more trivial clauses, and nothing had ever looked.
-  `rules-tests/specs/08-budget.rules.js` looks now, on every run, and prints what is left.
+  `rules-tests/specs/08-budget.rules.js` looks now, on every run, at both the create and
+  the update of the costliest document the store writes, and prints what is left. It used
+  to look only at creating a free account, the write with the most room, and so missed
+  that updating the same document as a premium account was already over: for an account
+  whose profile filled in every optional field, a location among them, the upgrade to
+  premium came back as that flat `permission-denied`, with nothing saying why.
   If you are adding a rule here, read its number first — and know that the costs are not
   where they look: a function call is worth about 2.2 plain clauses, `in` on a map is
   cheaper than reading a field, and factoring repeated bounds into helpers spends the
-  margin rather than saving it. Read your own (either direction). Delete your own, or one aimed at you —
-  account deletion purges inbound likes too. No updates. A read of a document that is *not
-  there* is allowed only when the id names you, which the client needs (every first swipe
-  reads its own unwritten record and the usually-absent reciprocal one) and an onlooker must
-  not have: an unconditional allowance would answer "has Alice swiped on Bob?" for any pair,
-  from the difference between an empty snapshot and a denial.
+  margin rather than saving it.
 - `matches/{matchId}` — read and update only if you are one of the two `users`; create only
   with `users.size() == 2`, yourself among them, an id equal to the sorted join, proof the
   other person actually liked you first, **and** that they have not blocked you. That last
@@ -242,7 +258,7 @@ firebase use --add          # pick your project, alias it "default"
 Then:
 
 ```bash
-npm test                    # 14 suites, 267 checks, no install required
+npm test                    # 14 suites, 282 checks, no install required
 npm run deploy              # firebase deploy --only hosting,firestore
 ```
 
@@ -386,9 +402,8 @@ devtools says:
 ```
 Refused to connect to 'http://127.0.0.1:9099/identitytoolkit.googleapis.com/v1/accounts:signUp?key=…'
 because it violates the following Content Security Policy directive: "connect-src 'self'
-https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com
-https://identitytoolkit.googleapis.com https://securetoken.googleapis.com
-https://firestore.googleapis.com".
+https://*.googleapis.com https://identitytoolkit.googleapis.com
+https://securetoken.googleapis.com https://firestore.googleapis.com".
 ```
 
 then the same for Firestore on `http://127.0.0.1:8080/`. Nothing is broken and nothing is
@@ -417,9 +432,14 @@ connect-src 'self' http://127.0.0.1:8080 http://127.0.0.1:9099 https://*.googlea
 Sign-up then completes and the console is clean. This is a local edit, never a commit: while
 the two copies disagree, `npm test` fails *every page carries exactly one CSP meta equal to
 the header minus frame-ancestors* (`tests/csp-sync.test.js`), which is the reminder to revert.
-Be clear about what that guard does **not** catch — relax the header in `firebase.json` to
-match and the suite goes quiet again, all 267 checks passing, and the weakened policy deploys
-to everyone. Change the meta copy only, and change it back.
+Relaxing the header in `firebase.json` to match brings the copies back into agreement, and
+the suite still fails: *connect-src allows only what the three Firebase SDKs the pages load
+can contact*, in the same file, holds every source in that directive to a list of the
+sources the shipped code actually connects to, each with its reason, and names both
+loopback origins as sources nothing in this app connects to. Be clear about what that does
+**not** catch — add them to that list as well and the suite goes quiet again, all 282
+checks passing, and the weakened policy deploys to everyone. Change the meta copy only, and
+change it back.
 
 **Or stop crossing the origin.** Serve the emulator's paths *from the page's own origin* and
 every request is `'self'`, with the shipped policy untouched. That is what the browser suite
@@ -437,7 +457,7 @@ two-line change to your own workflow. It is, though, the route that never touche
 | Symptom | Cause and fix |
 | --- | --- |
 | Console says `Demo mode` after deploying | The config never took. Check `BAKED_CONFIG` in `firebase-config.js` for leftover `your-…` values, or clear a stale `localStorage['zc.firebaseConfig']` with Settings → *Reset to demo mode*. |
-| `Refused to load … Content Security Policy` | Something added an inline `<script>`, a `style="…"` attribute, or a third-party script. Run `npm test`; `tests/static.test.js` names the file and line. |
+| `Refused to execute inline …` or `Refused to load …`, naming the Content Security Policy | Usually something added to a page. An inline `<script>` whose hash the policy does not list, or an inline `on…="…"` handler, gives *Refused to execute inline*; a script from a host `script-src` does not list gives *Refused to load the script*. Run `npm test`; `tests/static.test.js` names the page, and the line for anything inline. It reads markup only, so it misses a script a page adds at runtime, and it does not look at a stylesheet's host, although one from a host `style-src` does not list is refused the same way, as *Refused to load the stylesheet*. A `style="…"` attribute is not one of the causes: the shipped `style-src` carries `'unsafe-inline'`, which allows it, although the static check still refuses one. |
 | `Refused to connect … Content Security Policy` pointing at `127.0.0.1` | You are aiming a browser at a local emulator. A different port is a different origin, so `connect-src 'self'` does not cover it. Section 12 has both ways round it. |
 | `auth/unauthorized-domain` on Google sign-in | Add the domain under Authentication → Settings → Authorized domains. |
 | `auth/operation-not-allowed` | The provider is not enabled in the console (step 3). |

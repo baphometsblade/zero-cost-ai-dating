@@ -37,10 +37,53 @@ module.exports = {
       window.setTimeout(wrap, 50);
     });
 
+    // Every interval the page starts, and whether it has been cleared, so the
+    // stamp ticker's life can be read back — and its callback run on demand,
+    // because waiting a real minute for it is not a test anybody would keep.
+    await page.addInitScript(function () {
+      window.__zcIntervals = {};
+      const realSet = window.setInterval;
+      const realClear = window.clearInterval;
+      window.setInterval = function (fn, delay) {
+        const id = realSet.apply(window, arguments);
+        window.__zcIntervals[id] = { delay: Number(delay) || 0, fn: fn, live: true };
+        return id;
+      };
+      window.clearInterval = function (id) {
+        if (window.__zcIntervals[id]) window.__zcIntervals[id].live = false;
+        return realClear.apply(window, arguments);
+      };
+      window.__zcStampTickers = function () {
+        return Object.keys(window.__zcIntervals).map(function (id) { return window.__zcIntervals[id]; })
+          .filter(function (entry) { return entry.live && entry.delay === 60000; });
+      };
+    });
+
     await page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#match-list .match-row');
     const rows = await page.locator('#match-list .match-row').allTextContents();
     t.check('both seeded conversations are listed', rows.length === 2, 'rows=' + rows.length);
+
+    // The list's relative stamps are left out of its fingerprint on purpose, so
+    // a list where nothing else changes is never repainted, and its "2m" stays
+    // "2m" unless the ticker rewrites it. The ticker used to start only when a
+    // conversation opened, so a list loaded with no `?m=` sat on its first
+    // stamps for as long as nothing else moved.
+    // Run once by hand over a stamp made stale on purpose: the claim is that the
+    // ticker exists AND that it is what keeps the rows honest.
+    const listTicker = await page.evaluate(function () {
+      const tickers = window.__zcStampTickers();
+      const stamp = document.querySelector('#match-list .match-row .match-row-time');
+      if (!stamp) return { tickers: tickers.length, rewritten: false, text: 'no stamp' };
+      const honest = stamp.textContent;
+      stamp.textContent = 'stale';
+      tickers.forEach(function (entry) { entry.fn(); });
+      return { tickers: tickers.length, rewritten: stamp.textContent === honest, text: stamp.textContent };
+    });
+    t.check('a list opened with no conversation keeps its relative stamps ticking',
+      listTicker.tickers === 1 && listTicker.rewritten,
+      listTicker.tickers + ' live one-minute ticker(s); a stale stamp ' +
+      (listTicker.rewritten ? 'was rewritten by it' : 'still reads "' + listTicker.text + '"'));
 
     /* ---- the seeded thread with history ---- */
     await openConversation(page, 'Devin');
@@ -59,10 +102,14 @@ module.exports = {
     const text = 'Sent by the e2e suite at ' + ctx.viewport.label;
     await page.fill('#chat-input', text);
     await page.click('#chat-send');
-    await page.waitForFunction(function (needle) {
+    // Bounded, and its answer is the check. Written as a wait with no bound of
+    // its own and then `check(name, true)`, a message that never appeared ran
+    // out the session's twenty-second default inside the wait, which threw and
+    // was recorded as "spec ran to completion", and this line never printed.
+    const appeared = await page.waitForFunction(function (needle) {
       return document.getElementById('chat-log').textContent.indexOf(needle) !== -1;
-    }, text);
-    t.check('a sent message appears in the log', true);
+    }, text, { timeout: 5000 }).then(function () { return true; }, function () { return false; });
+    t.check('a sent message appears in the log', appeared);
     t.check('the composer clears after sending', (await page.inputValue('#chat-input')) === '');
 
     // syncUrl put ?m= in the address bar, so a plain reload reopens the thread.
@@ -80,6 +127,11 @@ module.exports = {
     if (ctx.viewport.key === 'mobile') {
       await page.click('#chat-back');
       await page.waitForSelector('#match-list .match-row');
+      // Back is `closeMatch`, which used to stop the ticker on its way out — so
+      // the list a phone returns to was the one list with nothing rewriting it.
+      const backTickers = await page.evaluate(function () { return window.__zcStampTickers().length; });
+      t.check('going back to the list from a conversation leaves its stamps ticking',
+        backTickers === 1, backTickers + ' live one-minute ticker(s) after Back');
     }
     await openConversation(page, 'Sam');
     await page.waitForSelector('#chat-log .empty');
@@ -145,6 +197,127 @@ module.exports = {
     t.check('a message from the other side reaches the list without waiting for a poll',
       landed,
       landed ? 'the preview updated within 2s' : 'nothing arrived in 2s — the list is not live');
+
+    /* ---- a conversation longer than the live window ---- */
+
+    // Firestore delivers a conversation's newest LIVE_MESSAGE_WINDOW messages,
+    // oldest first, so past that length every new message SLIDES the window: the
+    // delivery no longer starts with what is on screen. `renderMessages` read
+    // that as history changing, rebuilt the whole log — every bubble replaced,
+    // and anything the reader had selected gone with them, on every message —
+    // and announced every message from the other side in the window as new.
+    // (The reader's scroll position survived it, measured on both viewports: the
+    // log is emptied and refilled with no layout in between.) The demo adapter
+    // delivers everything and never slides, which is why no demo check could see
+    // it; `?zcwindow=` gives it the Firestore shape, at a length a seeded
+    // conversation can reach.
+    await page.addInitScript(function () {
+      const size = Number(new URLSearchParams(window.location.search).get('zcwindow')) || 0;
+      if (!size) return;
+      const wrap = function () {
+        if (!window.ZC || !window.ZC.store || window.ZC.store.__windowed) return;
+        window.ZC.store.__windowed = true;
+        const real = window.ZC.store.listenMessages;
+        window.ZC.store.listenMessages = function (matchId, cb) {
+          return real.call(window.ZC.store, matchId, function (list) {
+            cb(Array.isArray(list) ? list.slice(-size) : list);
+          });
+        };
+      };
+      document.addEventListener('DOMContentLoaded', wrap);
+      window.setTimeout(wrap, 0);
+      window.setTimeout(wrap, 50);
+    });
+    const WINDOW = 20;
+    const long = await page.evaluate(async function () {
+      const store = window.ZC.store;
+      const me = window.ZC.auth.current.uid;
+      const list = await store.getMatches(me);
+      const target = list.filter(function (m) { return !!m.lastMessageAt; })[0] || list[0];
+      // Both sides, so a rebuild has plenty from the other side to over-announce.
+      for (let i = 0; i < 24; i += 1) {
+        await store.sendMessage(target.matchId, i % 2 ? target.otherUid : me, 'earlier message ' + i);
+      }
+      return { matchId: target.matchId, otherUid: target.otherUid, name: String(target.other.displayName || '').trim() };
+    });
+    await page.goto(ctx.base + '/matches.html?m=' + encodeURIComponent(long.matchId) + '&zcwindow=' + WINDOW,
+      { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(function (size) {
+      return document.querySelectorAll('#chat-log .msg').length === size;
+    }, WINDOW);
+
+    // On a phone the open conversation used to be sized by its content: the
+    // log never scrolled, the page did, and a long thread opened at its oldest
+    // message with the newest and the composer far below the screen. It is now
+    // the screen between the header and the tab bar, and its log scrolls.
+    if (ctx.viewport.key === 'mobile') {
+      const opened = await page.evaluate(function () {
+        const msgs = document.querySelectorAll('#chat-log .msg');
+        const newest = msgs[msgs.length - 1].getBoundingClientRect();
+        const form = document.getElementById('chat-form').getBoundingClientRect();
+        const bar = document.querySelector('.tabbar');
+        const floor = bar ? bar.getBoundingClientRect().top : window.innerHeight;
+        return {
+          newest: [Math.round(newest.top), Math.round(newest.bottom)],
+          composerBottom: Math.round(form.bottom),
+          floor: Math.round(floor),
+          pageScroll: document.scrollingElement.scrollHeight - window.innerHeight
+        };
+      });
+      t.check('a long conversation opens at its newest message, with the composer on screen',
+        opened.newest[0] >= 0 && opened.newest[1] <= opened.floor && opened.composerBottom <= opened.floor &&
+          opened.pageScroll <= 1,
+        JSON.stringify(opened));
+    }
+
+    // Part way up, so a jump in either direction is distinguishable from staying.
+    // Whichever box actually scrolls: the log is its own scroller at both
+    // sizes now, but this measures whichever one moves rather than assuming.
+    const placed = await page.evaluate(function () {
+      const log = document.getElementById('chat-log');
+      const scroller = log.scrollHeight > log.clientHeight + 1 ? log : document.scrollingElement;
+      const first = log.querySelector('.msg');
+      first.dataset.zcFirst = '1';
+      // `instant`, because the page's own scroll is `scroll-behavior: smooth`
+      // and would still be travelling when it is read back.
+      scroller.scrollTo({ top: Math.floor((scroller.scrollHeight - scroller.clientHeight) / 3), behavior: 'instant' });
+      // A reader part way through copying something out of the conversation.
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.selectAllChildren(first.querySelector('.msg-text'));
+      return {
+        which: scroller === log ? 'the log' : 'the page',
+        scrollTop: scroller.scrollTop,
+        room: scroller.scrollHeight - scroller.clientHeight,
+        selected: selection.toString()
+      };
+    });
+    const pastWindow = 'one past the window ' + Date.now();
+    await page.evaluate(function (send) {
+      return window.ZC.store.sendMessage(send.matchId, send.otherUid, send.text);
+    }, { matchId: long.matchId, otherUid: long.otherUid, text: pastWindow });
+    await page.waitForFunction(function (needle) {
+      return document.getElementById('chat-log').textContent.indexOf(needle) !== -1;
+    }, pastWindow);
+    const slid = await page.evaluate(function (which) {
+      const log = document.getElementById('chat-log');
+      const scroller = which === 'the log' ? log : document.scrollingElement;
+      return {
+        status: document.getElementById('chat-status').textContent,
+        scrollTop: scroller.scrollTop,
+        kept: !!log.querySelector('.msg[data-zc-first="1"]'),
+        selected: window.getSelection().toString()
+      };
+    }, placed.which);
+    t.check('one message past the live window is announced as one message',
+      slid.status === 'New message from ' + long.name + ': ' + pastWindow,
+      JSON.stringify(slid.status));
+    t.check('and the log is extended, not rebuilt: what the reader had selected stays selected, and so do they',
+      slid.kept && placed.selected.length > 0 && slid.selected === placed.selected &&
+      placed.room > 0 && placed.scrollTop > 0 && Math.abs(slid.scrollTop - placed.scrollTop) <= 1,
+      placed.which + ' scrolled to ' + placed.scrollTop + ' of ' + placed.room + ', then ' + slid.scrollTop +
+      (slid.kept ? '' : '; the log was rebuilt — the first bubble is a new node') +
+      '; selected ' + JSON.stringify(placed.selected.slice(0, 20)) + ' -> ' + JSON.stringify(slid.selected.slice(0, 20)));
 
     /* ---- the two ways a list can fail, which are not the same thing ---- */
 
@@ -430,6 +603,100 @@ module.exports = {
       saidSoonEnough ? 'reported inside 3s' : 'nothing in 3s — a page that already knows ' +
         'it is offline sat on a skeleton waiting for a delivery that was never coming');
 
+    /* ---- a counter the store refuses to clear ---- */
+
+    // Both adapters report a refused `markRead` by resolving false, never by
+    // rejecting. The page ignored the answer: it had already zeroed its own copy,
+    // so the row read as read and `#unread-badge` dropped while the stored
+    // counter — and the nav badge drawn from it — stayed where they were. What
+    // asked again was not the reader but the next delivery of the list, which
+    // carries the stored count back in; coming back to the tab did not. In
+    // firebase mode the refusal makes that delivery itself — the SDK rolls the
+    // write back and the list re-delivers the old count — so the page asked
+    // again, and again: measured against the emulator, sixty refused writes in
+    // four seconds. A refusal is given here the way both adapters give it, and a
+    // delivery from another conversation stands in for the rollback.
+    await page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#match-list .match-row');
+    const refusing = await page.evaluate(async function () {
+      const store = window.ZC.store;
+      const me = window.ZC.auth.current.uid;
+      const list = await store.getMatches(me);
+      const devin = list.filter(function (m) { return /devin/.test(m.otherUid); })[0];
+      const sam = list.filter(function (m) { return /sam/.test(m.otherUid); })[0];
+      await store.sendMessage(devin.matchId, devin.otherUid, 'waiting to be read ' + Date.now());
+      const real = store.markRead;
+      window.__zcRefuseRead = true;
+      window.__zcReadCalls = 0;
+      store.markRead = function () {
+        window.__zcReadCalls += 1;
+        return window.__zcRefuseRead ? Promise.resolve(false) : real.apply(store, arguments);
+      };
+      return { devin: devin.matchId, sam: sam ? { matchId: sam.matchId, otherUid: sam.otherUid } : null };
+    });
+    const readState = function () {
+      return page.evaluate(function (matchId) {
+        const row = Array.prototype.filter.call(document.querySelectorAll('#match-list .match-row'), function (node) {
+          return node.dataset.matchId === matchId;
+        })[0];
+        const pageBadge = document.getElementById('unread-badge');
+        const nav = document.querySelector('[data-badge="matches"]');
+        return {
+          calls: window.__zcReadCalls,
+          row: row ? row.classList.contains('is-unread') : null,
+          page: pageBadge.classList.contains('hidden') ? 0 : parseInt(pageBadge.textContent, 10) || 0,
+          nav: nav ? parseInt(nav.textContent, 10) || 0 : null
+        };
+      }, refusing.devin);
+    };
+    await page.waitForFunction(function () {
+      return Array.prototype.some.call(document.querySelectorAll('#match-list .match-row'), function (node) {
+        return /devin/.test(node.dataset.matchId) && node.classList.contains('is-unread');
+      });
+    });
+    await openConversation(page, 'Devin');
+    await page.waitForTimeout(600);
+    const afterRefusal = await readState();
+    t.check('a counter the store refuses to clear is still shown as unread, as the nav badge shows it',
+      afterRefusal.calls >= 1 && afterRefusal.row === true && afterRefusal.page > 0 && afterRefusal.page === afterRefusal.nav,
+      JSON.stringify(afterRefusal));
+
+    // A delivery of the list is not a reason to ask again: in firebase mode the
+    // refusal itself produces one. A message in the OTHER conversation makes one.
+    if (refusing.sam) {
+      await page.evaluate(function (sam) {
+        return window.ZC.store.sendMessage(sam.matchId, sam.otherUid, 'meanwhile ' + Date.now());
+      }, refusing.sam);
+    }
+    await page.waitForTimeout(600);
+    const afterDelivery = await readState();
+    // Coming back to the tab is: a person looking at the conversation again.
+    await page.evaluate(function () { window.dispatchEvent(new Event('focus')); });
+    await page.waitForTimeout(300);
+    const afterFocus = await readState();
+    t.check('it is asked again when the reader comes back to the tab, and not by every delivery in between',
+      !!refusing.sam && afterDelivery.calls === afterRefusal.calls && afterFocus.calls > afterDelivery.calls,
+      'calls: ' + afterRefusal.calls + ' after opening, ' + afterDelivery.calls + ' after a delivery, ' +
+      afterFocus.calls + ' after a focus');
+
+    // ...and once the store takes it, the row clears and the two badges agree —
+    // on the one message still waiting in the other conversation.
+    await page.evaluate(function () { window.__zcRefuseRead = false; });
+    await page.evaluate(function () { window.dispatchEvent(new Event('focus')); });
+    const clearedAll = await page.waitForFunction(function (matchId) {
+      const row = Array.prototype.filter.call(document.querySelectorAll('#match-list .match-row'), function (node) {
+        return node.dataset.matchId === matchId;
+      })[0];
+      const badge = document.getElementById('unread-badge');
+      const pageCount = badge.classList.contains('hidden') ? 0 : parseInt(badge.textContent, 10) || 0;
+      const nav = document.querySelector('[data-badge="matches"]');
+      const navCount = nav ? parseInt(nav.textContent, 10) || 0 : 0;
+      return !!row && !row.classList.contains('is-unread') && pageCount === navCount;
+    }, refusing.devin, { timeout: 3000 }).then(function () { return true; }, function () { return false; });
+    const clearedState = await readState();
+    t.check('and once the store takes it, the row clears and the page badge and the nav badge agree',
+      clearedAll && clearedState.row === false, JSON.stringify(clearedState));
+
     await page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#match-list .match-row');
     await openConversation(page, 'Sam');
@@ -503,6 +770,12 @@ module.exports = {
       ended && after.typed === typed && after.sendDisabled === true,
       h.show ? h.show(after) : JSON.stringify(after));
 
+    // The list beside an ended conversation — on desktop, on screen — still has
+    // stamps to keep. Ending used to stop the ticker along with the listener.
+    const endedTickers = await page.evaluate(function () { return window.__zcStampTickers().length; });
+    t.check('and the list beside it keeps its stamps ticking',
+      endedTickers === 1, endedTickers + ' live one-minute ticker(s) after the conversation ended');
+
     /* ---- and the NEXT conversation is not left disabled ---- */
 
     // Ending a conversation disables its composer, and only `closeMatch` used to
@@ -537,5 +810,55 @@ module.exports = {
         !next.inputDisabled && delivered,
         next.inputDisabled ? 'the textarea is still disabled' : (delivered ? 'sent' : 'typed, but nothing was delivered'));
     }
+
+    /* ---- a press on a row outlasts a delivery that changes nothing ---- */
+
+    // `renderList` runs on every delivery of the live list, and some deliveries
+    // change nothing it draws: in firebase mode the other person reading what
+    // was sent rewrites their own counter on the shared match document, and
+    // that alone is a delivery (measured against the emulator). Rebuilding the
+    // rows under a held press detaches the row the press began on, and the
+    // click never arrives; the list's fingerprint is what lets such a delivery
+    // leave the rows alone. The demo stream only fires when this account's own
+    // row changes, so the delivery is made here by handing the page the list
+    // it already has.
+    await page.addInitScript(function () {
+      const wrap = function () {
+        if (!window.ZC || !window.ZC.store || window.ZC.store.__redelivering) return;
+        window.ZC.store.__redelivering = true;
+        const real = window.ZC.store.listenMatchViews;
+        window.ZC.store.listenMatchViews = function (uid, onViews, onError) {
+          return real.call(window.ZC.store, uid, function (views) {
+            window.__zcRedeliver = function () { onViews(JSON.parse(JSON.stringify(views))); };
+            return onViews(views);
+          }, onError);
+        };
+      };
+      document.addEventListener('DOMContentLoaded', wrap);
+      window.setTimeout(wrap, 0);
+      window.setTimeout(wrap, 50);
+    });
+    await page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#match-list .match-row');
+    await page.waitForFunction(function () { return typeof window.__zcRedeliver === 'function'; });
+    const pressed = page.locator('#match-list .match-row').first();
+    const pressedId = await pressed.getAttribute('data-match-id');
+    const pressBox = await pressed.boundingBox();
+    await page.mouse.move(pressBox.x + pressBox.width / 2, pressBox.y + pressBox.height / 2);
+    await page.mouse.down();
+    const rowSurvived = await page.evaluate(function () {
+      const before = document.querySelector('#match-list .match-row');
+      window.__zcRedeliver();
+      return document.querySelector('#match-list .match-row') === before;
+    });
+    await page.mouse.up();
+    const pressOpened = await page.waitForFunction(function (id) {
+      return new URLSearchParams(window.location.search).get('m') === id &&
+        !document.getElementById('chat').classList.contains('hidden');
+    }, pressedId, { timeout: 2000 }).then(function () { return true; }, function () { return false; });
+    t.check('a press on a conversation outlasts a delivery of the list that changes nothing on it',
+      rowSurvived && pressOpened,
+      (rowSurvived ? 'the row was left alone' : 'the row was rebuilt under the press') + ', and the click ' +
+      (pressOpened ? 'opened the conversation' : 'never arrived'));
   }
 };

@@ -182,3 +182,37 @@ test('the CSP meta precedes the first <link> and the first <script>', function (
 
   assert.equal(problems.length, 0, report('Resources loading before the CSP meta:', problems));
 });
+
+test('connect-src allows only what the three Firebase SDKs the pages load can contact', function () {
+  // The lockstep checks above make the nine copies agree; they have no opinion
+  // on what the policy allows. This one does. connect-src is the directive an
+  // injected script would exfiltrate through, so each source in it has to be
+  // one the shipped code actually connects to — and a new one is a deliberate
+  // line here, with its reason, rather than a quiet widening of the policy.
+  //
+  // What the SDKs contact was measured, not assumed. firebase-app, -auth and
+  // -firestore-compat 10.12.2, driven in a browser through sign-in, token
+  // refresh, password reset, a read, a listener and a write, fetched from
+  // identitytoolkit, securetoken and firestore on googleapis.com and from no
+  // other host. A Google popup needs a real project to get far, but its
+  // handler runs in the authDomain's own window and frame (frame-src, not
+  // this directive) and it ends in an identitytoolkit call. None of the three
+  // bundles names firebaseio.com: that is Realtime Database, whose SDK no page
+  // loads, so its https:// and wss:// wildcards are not allowed here.
+  const ALLOWED = {
+    "'self'": 'the page\'s own origin, which is also how e2e reaches the emulators',
+    'https://*.googleapis.com': 'Google API hosts, the three below among them',
+    'https://identitytoolkit.googleapis.com': 'Firebase Auth: sign-in, account lookup, password reset',
+    'https://securetoken.googleapis.com': 'Firebase Auth: ID-token refresh',
+    'https://firestore.googleapis.com': 'Firestore reads, writes and listeners'
+  };
+  const directive = HEADER.split(';')
+    .map(function (part) { return part.trim(); })
+    .filter(function (part) { return /^connect-src\s/i.test(part); });
+  assert.equal(directive.length, 1, 'expected exactly one connect-src directive in firebase.json, found ' + directive.length);
+
+  const sources = directive[0].split(/\s+/).slice(1);
+  const unexplained = sources.filter(function (source) { return !Object.prototype.hasOwnProperty.call(ALLOWED, source); });
+  assert.deepEqual(unexplained, [],
+    report('connect-src allows sources nothing in this app connects to:', unexplained));
+});

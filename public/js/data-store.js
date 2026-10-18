@@ -60,7 +60,8 @@
    * The closed list of report reasons with their UI labels — the single place
    * both the validation and the report dialog draw from. firestore.rules
    * repeats the slug list literally (rules cannot import), so a change here
-   * must land there in the same commit.
+   * must land there in the same commit; tests/limits.test.js compares the two
+   * and fails until it does.
    */
   const REPORT_REASONS = [
     { slug: 'fake-profile', label: 'Fake or impersonating profile' },
@@ -109,11 +110,15 @@
   const PROFILE_CACHE_TTL_MS = TOUCH_THROTTLE_MS;
 
   /**
-   * How many faces to keep. Conversations, not the deck — see `rememberFaces`.
-   * A projected profile is bounded by the rules (six photo links of 1024, a
-   * capped bio and interest list), so forty of them is a few hundred KB at the
-   * absolute worst and typically far less. The whole blob is rewritten on every
-   * fetch, which is the other reason not to make this large.
+   * How many faces to keep. Conversations first, and never the deck. The likes
+   * panel and the reports list read through this cache as well and file what
+   * they read, but only into the room the conversations leave — see
+   * `rememberFaces`. A projected profile is bounded by the rules (six photo
+   * links of 1024, a capped bio and interest list), so forty of them is a few
+   * hundred KB at the absolute worst and typically far less. The whole blob is
+   * rewritten on every fetch that reads anything, which is the other reason not
+   * to make this large, and the reason the conversation list asks for all its
+   * faces in one fetch rather than one fetch a face.
    *
    * Somebody with more conversations than this is not a broken case, just a
    * partly served one: the oldest go, the newest stay, and a page load pays for
@@ -611,6 +616,31 @@
   function readReports() { return readJson(KEYS.reports, {}); }
   function writeReports(map) { return writeJson(KEYS.reports, map); }
 
+  /**
+   * One stored map, for a reader whose empty answer somebody is shown as a fact:
+   * "You have not reported anyone.", or an export with no swipes in it. The
+   * helpers above turn an entry that cannot be read into `{}`, which such a
+   * reader would pass on as "none"; this rejects instead — what the Firestore
+   * adapter does when its query fails or the server cannot be reached.
+   * @param {string} key localStorage key
+   * @param {string} what what is stored there, for the error
+   * @returns {Object} the stored map
+   */
+  function readMapOrThrow(key, what) {
+    const read = readJsonResult(key, {});
+    if (!read.ok) throw read.err || new Error('The stored ' + what + ' could not be read.');
+    // Valid JSON that is not a map — `[]`, a string — is no more readable than
+    // JSON that does not parse, and turning it into `{}` here was the same
+    // "none" this function exists to refuse. Reset and reported, exactly as
+    // readJsonResult treats an entry that does not parse.
+    if (!isPlainObject(read.value)) {
+      console.warn('[zc.store] ' + key + ' holds something other than a map — resetting that entry.');
+      try { window.localStorage.removeItem(key); } catch (ignored) { /* nothing else to do */ }
+      throw new Error('The stored ' + what + ' could not be read.');
+    }
+    return read.value;
+  }
+
   /* ------------------------------------------------------------------------
      4. Demo message listeners (storage event + poll)
      ------------------------------------------------------------------------ */
@@ -1095,7 +1125,10 @@
     },
 
     async getSwipes(uid) {
-      const swipes = readSwipes();
+      // Strict, like getMatches and getMessages: the data export is the app's
+      // only caller of all three, and it writes what they return into a file as
+      // the whole record.
+      const swipes = readMapOrThrow(KEYS.swipes, 'swipes');
       return Object.keys(swipes)
         .map(function (key) { return swipes[key]; })
         .filter(function (swipe) { return isPlainObject(swipe) && swipe.from === uid; })
@@ -1224,12 +1257,18 @@
     },
 
     async getMatches(uid) {
+      // The accounts stay forgiving: they only lend each view a name and a face.
       const users = readUsers();
-      const matches = readMatches();
+      const matches = readMapOrThrow(KEYS.matches, 'matches');
+      // `publicFace`, not the stored document. This used to hand `toMatchView`
+      // the other person's whole private record — address, birthdate, block
+      // list — from the same facade method whose Firestore half can only ever
+      // read `discovery/{uid}`. The live list had been fixed for exactly that;
+      // this, beside it, had not.
       return Object.keys(matches)
         .map(function (key) { return matches[key]; })
         .filter(function (match) { return isPlainObject(match) && Array.isArray(match.users) && match.users.indexOf(uid) !== -1; })
-        .map(function (match) { return toMatchView(match, uid, users[otherOf(match, uid)]); })
+        .map(function (match) { return toMatchView(match, uid, publicFace(users[otherOf(match, uid)])); })
         .sort(byRecency);
     },
 
@@ -1239,7 +1278,8 @@
       if (!isPlainObject(match)) return null;
       const viewer = uid || currentUid() || (Array.isArray(match.users) ? match.users[0] : null);
       const users = readUsers();
-      return toMatchView(match, viewer, users[otherOf(match, viewer)]);
+      // The same projection `getMatches` applies, for the same reason.
+      return toMatchView(match, viewer, publicFace(users[otherOf(match, viewer)]));
     },
 
     async unmatch(matchId, uid) {
@@ -1262,7 +1302,7 @@
 
     async getMessages(matchId, options) {
       const limit = Math.max(1, Number((options || {}).limit) || DEFAULT_MESSAGE_LIMIT);
-      const all = readMessages();
+      const all = readMapOrThrow(KEYS.messages, 'messages');
       const list = Array.isArray(all[matchId]) ? all[matchId] : [];
       return cloneDeep(list.slice(Math.max(0, list.length - limit)));
     },
@@ -1392,7 +1432,11 @@
     },
 
     async getMyReports(uid) {
-      const reports = readReports();
+      // Not the forgiving readReports: read as `{}`, a store that could not be
+      // read came out as an empty list, which the settings page states as "You
+      // have not reported anyone." — on the one panel a report can be retracted
+      // from, while the report is still filed.
+      const reports = readMapOrThrow(KEYS.reports, 'reports');
       return Object.keys(reports)
         .map(function (key) { return reports[key]; })
         .filter(function (report) { return isPlainObject(report) && report.from === uid; })
@@ -1403,7 +1447,12 @@
     },
 
     async retractReport(fromUid, aboutUid) {
-      const reports = readReports();
+      // Strict for the reason getMyReports is: read through the forgiving
+      // helper, a store that could not be read was "no such report", so this
+      // answered {removed: false} and the settings page said the report "had
+      // already been removed" while it was still filed. The Firestore adapter
+      // lets the failure through, and store-tests/specs/14-reports pins that.
+      const reports = readMapOrThrow(KEYS.reports, 'reports');
       const id = swipeId(fromUid, aboutUid);
       if (!reports[id]) return { ok: true, removed: false };
       delete reports[id];
@@ -1414,6 +1463,20 @@
     async getPublicProfile(uid) {
       // Demo mode has no separate projection — the stored doc is the profile.
       return demoAdapter.getUser(uid);
+    },
+
+    async getPublicProfiles(uids) {
+      // The list form, for `resolveProfiles`, in one read of the store for the
+      // whole list. Like the method above it serves the stored document, and
+      // `resolveProfiles` applies the projection to what comes back. The
+      // Firestore adapter's version takes an option about its face cache, and
+      // there is no cache here to file in.
+      const users = readUsers();
+      const out = {};
+      (uids || []).forEach(function (uid) {
+        if (uid && users[uid]) out[uid] = normalizeUser(users[uid]);
+      });
+      return out;
     },
 
     async deleteAccountData(uid) {
@@ -1573,6 +1636,23 @@
   }
 
   /**
+   * What one account may see of another: the discovery projection, filled out
+   * to the UserDoc shape a MatchView carries.
+   *
+   * The Firestore adapter has nothing else to hand over — the only copy of
+   * another person it can read is `discovery/{uid}` — and the demo adapter,
+   * which stores whole documents, has to make it. Composed here once, for
+   * `resolveProfiles` in both modes and for the demo adapter's `getMatches`
+   * and `getMatch`, so the live list and the polled one cannot disagree about
+   * it a key at a time.
+   * @param {Object} doc a UserDoc or a discovery document, or nothing
+   * @returns {Object|null} the public face, or null for a missing account
+   */
+  function publicFace(doc) {
+    return doc ? normalizeUser(projectDiscovery(normalizeUser(doc))) : null;
+  }
+
+  /**
    * Shape a stored match into the MatchView pages render.
    * @param {Object} match MatchDoc
    * @param {string} uid the viewer
@@ -1648,6 +1728,27 @@
     const data = snap.data() || {};
     data.uid = data.uid || snap.id;
     return normalizeUser(data);
+  }
+
+  /**
+   * Refuse a query answer the server did not give. Offline, `get()` does not
+   * fail: it answers from the local cache, and with no persistence enabled that
+   * holds only what this page has read or written itself. Measured against the
+   * emulator with the network disabled: a filed report, five swipes and a match,
+   * none of them read by this client before, all came back as nothing at all.
+   * For a list whose emptiness somebody is shown as a fact, that answer has to
+   * be a failure.
+   * @param {Object} snap a QuerySnapshot
+   * @param {string} what what was being read, for the error
+   * @returns {Object} the same snapshot, when it came from the server
+   */
+  function fromServer(snap, what) {
+    if (snap && snap.metadata && snap.metadata.fromCache) {
+      const offline = new Error(what + ' could not be fetched: the server was not reached.');
+      offline.code = 'unavailable';
+      throw offline;
+    }
+    return snap;
   }
 
   /**
@@ -1838,7 +1939,10 @@
    * deck could seed this with for free. Those are people the viewer has mostly
    * not matched with and mostly never will, and at forty entries seeding them
    * would evict the conversations this exists for on the first deck load. The
-   * cache holds faces somebody is actually talking to.
+   * cache is for faces somebody is actually talking to. The likes panel and the
+   * reports list do file the faces they read, but below those: they use the
+   * room the conversations leave, and never evict a fresh face that a
+   * conversation lookup filed.
    *
    * There is no invalidation hook, and that is a fact about the rules rather
    * than an omission: `discovery/{uid}` is writable only by that account, so
@@ -1908,20 +2012,40 @@
   }
 
   /**
-   * File the faces just fetched, evicting the oldest beyond PROFILE_CACHE_MAX.
+   * File the faces just fetched, evicting beyond PROFILE_CACHE_MAX.
+   *
+   * Eviction went by age alone, and that was wrong once something other than
+   * the conversation list filed faces here. On premium, matches.html draws the
+   * likes panel after the list's first delivery, so the likers were filed last
+   * and the conversations just before them: with more than forty faces between
+   * the two, the panel evicted exactly the faces the list had just paid for,
+   * and the next page load paid for them again. Measured in
+   * `store-tests/specs/17-face-cache.store.js`: thirty-five conversations and
+   * fifteen people waiting lost ten conversation faces, and the next load read
+   * those ten again. So what goes is decided by `rankOf` first and age second:
+   * an entry that cannot be served now, then a face filed for anything but a
+   * conversation, then the oldest conversation faces.
    * @param {Object} fetched map of uid -> UserDoc-shaped public profile
    * @param {number} now epoch ms
+   * @param {boolean} conversation whether these are the faces of people this
+   *   account is talking to
    * @returns {void}
    */
-  function rememberFaces(fetched, now) {
+  function rememberFaces(fetched, now, conversation) {
     const uids = Object.keys(fetched);
     if (!uids.length) return;
     const faces = readFaceCache();
-    uids.forEach(function (uid) { faces[uid] = { at: now, doc: fetched[uid] }; });
+    uids.forEach(function (uid) {
+      const entry = { at: now, doc: fetched[uid] };
+      if (conversation) entry.conversation = true;
+      faces[uid] = entry;
+    });
 
     const all = Object.keys(faces);
     if (all.length > PROFILE_CACHE_MAX) {
-      all.sort(function (a, b) { return stampOf(faces[a]) - stampOf(faces[b]); })
+      all.sort(function (a, b) {
+        return (rankOf(faces[a], now) - rankOf(faces[b], now)) || (stampOf(faces[a]) - stampOf(faces[b]));
+      })
         .slice(0, all.length - PROFILE_CACHE_MAX)
         .forEach(function (uid) { delete faces[uid]; });
     }
@@ -1934,6 +2058,29 @@
   }
 
   /**
+   * How hard an entry holds its place, lowest evicted first.
+   *
+   * 0 is an entry that is expired, stamped in the future, or malformed, none of
+   * which `cachedFaces` will serve. Age-only eviction dropped the expired ones
+   * first for free, being the oldest; ranking has to say so, or an expired
+   * conversation face would outlast a fresh face from the likes panel. 1 is a
+   * fresh face filed by anything other than a conversation lookup, and 2 a
+   * fresh one filed by one. The flag goes with the read that filed the entry,
+   * so a liker who becomes a match keeps rank 1 for what is left of that
+   * entry's TTL, and is filed at 2 the next time the list reads them. An entry
+   * written before the flag existed ranks as one filed by anything else, which
+   * is why adding it did not need PROFILE_CACHE_VERSION bumped.
+   * @param {*} entry a stored cache entry
+   * @param {number} now epoch ms
+   * @returns {number} 0, 1 or 2
+   */
+  function rankOf(entry, now) {
+    const age = now - stampOf(entry);
+    if (!isPlainObject(entry) || !isPlainObject(entry.doc) || !(age >= 0 && age < PROFILE_CACHE_TTL_MS)) return 0;
+    return entry.conversation === true ? 2 : 1;
+  }
+
+  /**
    * Fetch several public discovery profiles at once, tolerating individual
    * failures. Other people are only ever read through this projection.
    *
@@ -1942,10 +2089,16 @@
    * account whose profile was briefly unreadable. The cost of that choice is
    * one read per page for a genuinely deleted account, which is the right way
    * round.
+   *
+   * Every call that reads anything ends in one rewrite of the whole cache, so
+   * a caller with several faces to find passes them all in one call.
    * @param {string[]} uids ids to fetch
+   * @param {{conversation:boolean}} [options] `conversation: true` when these
+   *   are the faces of people this account is talking to, which files them
+   *   above everybody else's — see `rememberFaces`
    * @returns {Promise<Object>} map of uid -> UserDoc-shaped public profile
    */
-  async function fetchProfiles(uids) {
+  async function fetchProfiles(uids, options) {
     const unique = [];
     (uids || []).forEach(function (uid) {
       if (uid && unique.indexOf(uid) === -1) unique.push(uid);
@@ -1965,7 +2118,7 @@
         fresh[uid] = results[index];
       }
     });
-    rememberFaces(fresh, Date.now());
+    rememberFaces(fresh, Date.now(), !!(options && options.conversation));
     return map;
   }
 
@@ -2044,19 +2197,24 @@
     }
 
     const results = await Promise.all(batches.map(async function (ids) {
-      if (path) {
-        try {
-          const snap = await db().collection('swipes').where(path, 'in', ids).get();
-          const found = [];
-          snap.forEach(function (doc) { found.push(doc.id); });
-          return found;
-        } catch (err) {
-          // A denial here is the expression budget above, or an SDK that does
-          // not take this query. Either way the deck must still load, so fall
-          // through to one read per person: dearer, still bounded by the people
-          // actually being considered, and never the whole history again.
-          console.warn('[zc.store] Batched swipe lookup unavailable, asking one at a time.', err);
-        }
+      try {
+        // Inside the `try`, so that an SDK with no way to name a document id
+        // takes the same loud fallback as a refused query. It used to be an
+        // `if (path)` around the query instead, which went straight to one read
+        // per person — ten for a batch of ten that a key query would have billed
+        // one — and said nothing at all.
+        if (!path) throw new Error('This SDK has no FieldPath.documentId.');
+        const snap = await db().collection('swipes').where(path, 'in', ids).get();
+        const found = [];
+        snap.forEach(function (doc) { found.push(doc.id); });
+        return found;
+      } catch (err) {
+        // A denial here is the expression budget above, or an SDK that does
+        // not take this query or cannot name its field. Either way the deck must
+        // still load, so fall through to one read per person: dearer, still
+        // bounded by the people actually being considered, and never the whole
+        // history again.
+        console.warn('[zc.store] Batched swipe lookup unavailable, asking one at a time.', err);
       }
       const snaps = await Promise.all(ids.map(function (id) {
         return db().collection('swipes').doc(id).get();
@@ -2153,6 +2311,68 @@
       watcher.answered[toUid] = answered;
       watcher.deliver();
     });
+  }
+
+  /**
+   * How long a list waits on a live count's first answer before it looks for
+   * itself. Joining saves reads only when the count is about to answer anyway;
+   * a count that has not answered in this long is one the list is better off
+   * not depending on, and asking for itself costs it the reads it would have
+   * spent with no count to join.
+   */
+  const LIKES_JOIN_MS = 3000;
+
+  /**
+   * Everyone still waiting on this account's answer: taken from a live count
+   * that has not yet delivered its first count, or read here when there is
+   * none. Shared by `getLikesReceived` and `countLikesReceived` for the
+   * reason `likeSenders` is.
+   *
+   * matches.html on premium asks for this (`renderLikes`, on the conversation
+   * list's first delivery) while `app.js`'s nav badge is counting the same
+   * people, and it asks at the worst moment: run in firebase mode in a
+   * browser, the list's call landed before the badge's first count on every
+   * load measured. Both then did the whole job.
+   * The sender query need not have been paid twice — a `get` of a query that
+   * a listener already holds can be answered from that listener's target —
+   * but the account
+   * read and the answered-lookups were: each of the list's went out after the
+   * badge's had finished, so the SDK had nothing to share them with, and the
+   * server saw three reads more at twelve people waiting.
+   *
+   * Only until the count's FIRST count is delivered, deliberately: until then,
+   * everything it knows it has learned since it subscribed. After that it
+   * remembers what it learned rather than asking again, and a remembered
+   * answer goes stale in a direction its own query cannot see: an answer this
+   * account gives from another tab never fires `swipes where to == me`, so the
+   * badge keeps counting that person until a reload. A list that took a
+   * remembered answer would inherit that — a correctness regression paid for a
+   * cost win. So it never joins a count that has delivered, even while that
+   * count still has a lookup out: a lookup after the first asks about
+   * newcomers alone, and the count it ends in is built on everybody else's
+   * remembered answers. A list that joins before the first count gets an
+   * answer no staler than the lookups it waited on.
+   * @param {string} uid the viewer
+   * @returns {Promise<string[]>} the uids still waiting for an answer
+   */
+  async function waitingLikers(uid) {
+    const watcher = likeWatchers.filter(function (w) { return w.uid === uid && w.looking; })[0];
+    // Handed the count's answer, or null: a lookup that failed, or a count that
+    // stopped or died first, sends this back to look for itself. So does a
+    // count that has not answered within LIKES_JOIN_MS. Its first snapshot is
+    // the SDK's to deliver, and offline that can be late or never; unbounded,
+    // the panel waited on a count that was not going to speak.
+    const joined = watcher
+      ? await new Promise(function (resolve) {
+        watcher.waiters.push(resolve);
+        setTimeout(function () {
+          const at = watcher.waiters.indexOf(resolve);
+          if (at !== -1) watcher.waiters.splice(at, 1);
+          resolve(null);
+        }, LIKES_JOIN_MS);
+      })
+      : null;
+    return joined || pendingOf(uid, await likeSenders(uid));
   }
 
   /**
@@ -2307,13 +2527,16 @@
       // behave exactly like the demo adapter (a merged set would resurrect
       // keys that learning pruning removed) — but the read and the set are one
       // atomic unit now. They have to be: a set writes back every field it
-      // read, so anything that landed in between is silently reverted, and
-      // dashboard.js makes that the ordinary case rather than an exotic one.
-      // Every swipe leaves this write in flight across the usage transaction,
-      // and a plain get-then-set put `usage` back the way it read it and threw
-      // the increment away. Firestore replays the callback when the document
-      // moved under it, so whichever write loses the race re-reads and both
-      // survive.
+      // read, so anything that landed in between is silently reverted.
+      // dashboard.js used to make that the ordinary case: every like and super
+      // like left this write in flight, carrying the learning map, across the
+      // usage transaction, and a plain get-then-set put `usage` back the way it
+      // read it and threw the increment away. The deck now saves learning
+      // through saveLearning, after the bump, but a profile or settings save
+      // can still land while a swipe bumps the counter — the overlap
+      // store-tests/specs/05-swipe-race.store.js pins. Firestore replays the
+      // callback when the document moved under it, so whichever write loses
+      // the race re-reads and both survive.
       // The projection goes in the same transaction, which is why this is not
       // writeDiscovery(): two concurrent saves commit their user documents in
       // one order, but two independent follow-up writes can land in the other,
@@ -2479,6 +2702,9 @@
         console.warn('[zc.store] Ordered swipe query unavailable, falling back.', err);
         snap = await db().collection('swipes').where('from', '==', uid).get();
       }
+      // The data export is the app's only caller, and it writes this into a file
+      // as the whole swipe history; see fromServer.
+      fromServer(snap, 'Your swipes');
       const out = [];
       snap.forEach(function (doc) {
         const data = doc.data() || {};
@@ -2593,6 +2819,11 @@
       const outcome = await db().runTransaction(async function (tx) {
         const snap = await tx.get(matchRef);
         if (snap.exists) return { ok: false, reason: 'matched' };
+        // Whether the swipe is still there is not asked: another tab may have rewound
+        // it first, or this may be a retry, and the delete goes ahead either way.
+        // firestore.rules allows deleting a missing swipe to either person its id
+        // names, as it allows reading one, so a second undo answers `{ ok: true }`
+        // exactly as the demo adapter's does, and no read is spent finding out.
         tx.delete(swipeRef);
         return { ok: true };
       });
@@ -2602,7 +2833,7 @@
     },
 
     async getLikesReceived(uid) {
-      const pending = await pendingOf(uid, await likeSenders(uid));
+      const pending = await waitingLikers(uid);
       if (!pending.length) return [];
       const users = await fetchProfiles(pending);
       // No "and they have not blocked me" filter, because there cannot be one here.
@@ -2623,7 +2854,7 @@
       // `getLikesReceived` without its last step, which is the whole point:
       // no `fetchProfiles`, so no profile is read, billed, or left behind in
       // the face cache.
-      return (await pendingOf(uid, await likeSenders(uid))).length;
+      return (await waitingLikers(uid)).length;
     },
 
     async getMatches(uid) {
@@ -2635,13 +2866,16 @@
         console.warn('[zc.store] Ordered match query unavailable, sorting client-side.', err);
         snap = await collection.where('users', 'array-contains', uid).get();
       }
+      // The data export is the app's only caller; see fromServer.
+      fromServer(snap, 'Your matches');
       const docs = [];
       snap.forEach(function (doc) {
         const data = doc.data() || {};
         data.id = data.id || doc.id;
         docs.push(data);
       });
-      const users = await fetchProfiles(docs.map(function (match) { return otherOf(match, uid); }));
+      const users = await fetchProfiles(docs.map(function (match) { return otherOf(match, uid); }),
+        { conversation: true });
       return docs
         .map(function (match) { return toMatchView(match, uid, users[otherOf(match, uid)]); })
         .sort(byRecency);
@@ -2654,7 +2888,7 @@
       data.id = data.id || snap.id;
       const viewer = uid || currentUid() || (Array.isArray(data.users) ? data.users[0] : null);
       const otherUid = otherOf(data, viewer);
-      const users = await fetchProfiles([otherUid]);
+      const users = await fetchProfiles([otherUid], { conversation: true });
       return toMatchView(data, viewer, users[otherUid]);
     },
 
@@ -2675,8 +2909,9 @@
 
     async getMessages(matchId, options) {
       const limit = Math.max(1, Number((options || {}).limit) || DEFAULT_MESSAGE_LIMIT);
-      const snap = await db().collection('matches').doc(matchId).collection('messages')
-        .orderBy('createdAt', 'desc').limit(limit).get();
+      // The data export is the app's only caller; see fromServer.
+      const snap = fromServer(await db().collection('matches').doc(matchId).collection('messages')
+        .orderBy('createdAt', 'desc').limit(limit).get(), 'This conversation');
       const out = [];
       snap.forEach(function (doc) {
         const data = doc.data() || {};
@@ -2756,11 +2991,42 @@
         answered: {},
         blocks: [],
         stopped: false,
+        // True from the subscription until the first count is delivered, and
+        // never again. Until then every answer the count holds was learned
+        // since it subscribed; after it, a lookup asks about newcomers alone
+        // and hands on what is remembered for the rest — answers that can have
+        // gone stale without this count hearing, which is what `waitingLikers`
+        // must not take. It joins a count only while this holds, and `waiters`
+        // is where it waits. A first lookup that fails, or a count that stops,
+        // clears it too, and sends anyone waiting to read for themselves.
+        looking: true,
+        waiters: [],
+        waiting: function () {
+          return watcher.senders.filter(function (from) {
+            return watcher.answered[from] === false && watcher.blocks.indexOf(from) === -1;
+          });
+        },
+        // Release everyone waiting, with the answer — or with null when there is
+        // none to give, because a lookup failed or the count has stopped, which
+        // sends them to look for themselves. Never on a partial answer: an
+        // earlier lookup can land while a later delivery's newcomers are out.
+        settle: function (failed) {
+          const complete = watcher.senders.every(function (from) {
+            return watcher.answered[from] !== undefined;
+          });
+          if (!complete && !failed) return;
+          watcher.looking = false;
+          const answer = complete && !failed && !watcher.stopped ? watcher.waiting() : null;
+          watcher.waiters.splice(0).forEach(function (resolve) { resolve(answer); });
+        },
         deliver: function () {
           if (watcher.stopped) return;
-          const count = watcher.senders.filter(function (from) {
-            return watcher.answered[from] === false && watcher.blocks.indexOf(from) === -1;
-          }).length;
+          // Here and not in `settle`, which waits for every sender to have an
+          // answer: somebody who likes this account while the first lookup is
+          // out sends a second one, the first lands and is counted without
+          // them, and from then on the count is remembering answers.
+          watcher.looking = false;
+          const count = watcher.waiting().length;
           try {
             cb(count);
           } catch (err) {
@@ -2783,6 +3049,7 @@
         watcher.stopped = true;
         const index = likeWatchers.indexOf(watcher);
         if (index !== -1) likeWatchers.splice(index, 1);
+        watcher.settle(true);
         if (typeof onError !== 'function') return;
         if (later) Promise.resolve().then(function () { onError(err); });
         else onError(err);
@@ -2804,6 +3071,7 @@
               return watcher.answered[from] === undefined;
             });
             if (!unknown.length) {
+              watcher.settle();
               watcher.deliver();
               return;
             }
@@ -2825,9 +3093,11 @@
               return alreadySwiped(uid, unknown);
             }).then(function (answered) {
               unknown.forEach(function (from) { watcher.answered[from] = answered[from] === true; });
+              watcher.settle();
               watcher.deliver();
             }, function (err) {
               console.warn('[zc.store] Live like count failed.', err);
+              watcher.settle(true);
             });
           }, function (err) {
             // No client-side fallback for the `in` query, unlike getLikesReceived:
@@ -2852,6 +3122,7 @@
         watcher.stopped = true;
         const index = likeWatchers.indexOf(watcher);
         if (index !== -1) likeWatchers.splice(index, 1);
+        watcher.settle(true);
         stop();
       };
     },
@@ -2956,16 +3227,15 @@
     },
 
     async getMyReports(uid) {
-      // The rules permit exactly this query (author-only read). Anything that
-      // still goes wrong degrades to an empty list so the settings page keeps
-      // rendering — a permissions hiccup must never take the page down.
-      let snap;
-      try {
-        snap = await db().collection('reports').where('from', '==', uid).get();
-      } catch (err) {
-        console.warn('[zc.store] Could not load the filed reports.', err);
-        return [];
-      }
+      // The rules permit exactly this query (author-only read). If it fails
+      // anyway, that rejects. It used to degrade to an empty list "so the settings
+      // page keeps rendering", but the page never needed that: it loads this list
+      // on its own and catches the failure itself, with "Could not load your
+      // reports". What the empty list did instead was put "You have not reported
+      // anyone." on the one panel a report can be retracted from, while the
+      // reports sat in the queue. Offline is the case that does not reject by
+      // itself; see fromServer.
+      const snap = fromServer(await db().collection('reports').where('from', '==', uid).get(), 'Your reports');
       const out = [];
       snap.forEach(function (doc) {
         const data = doc.data() || {};
@@ -3018,6 +3288,14 @@
       // fetch uses, so the shape and the failure handling stay identical.
       const map = await fetchProfiles([uid]);
       return map[uid] || null;
+    },
+
+    async getPublicProfiles(uids, options) {
+      // The list form, for `resolveProfiles`: every face the conversation list
+      // is missing in ONE `fetchProfiles`, so the face cache is read twice and
+      // rewritten once for the whole list. One call a face read it twice and
+      // rewrote it once for every face.
+      return fetchProfiles(uids, options);
     },
 
     async deleteAccountData(uid) {
@@ -3130,9 +3408,10 @@
    * This was a bare `{}`, and in a multi-page app that is not a throttle. Every
    * page here is its own HTML document, so every navigation is a fresh JS context
    * with an empty map — and `app.js` calls `touchActive` on every page that
-   * resolves a user. Six pages in a minute was six writes, while
-   * `docs/ARCHITECTURE.md` said "one write per five minutes". The bound held only
-   * within a single page, which is the one case it was not needed for.
+   * resolves a user. Six pages in a minute was six touches — twelve Firestore
+   * writes, since each touch writes `users/{uid}` and then `discovery/{uid}` —
+   * while `docs/ARCHITECTURE.md` said "one write per five minutes". The bound
+   * held only within a single page, which is the one case it was not needed for.
    *
    * Storage failures are not an error here: a throttle that cannot remember is a
    * throttle that lets the write through, which is the safe direction — the write
@@ -3573,10 +3852,15 @@
    * Public profiles already fetched this page, by uid.
    *
    * Per page load, not per call: every page here is its own document, so this
-   * empties on navigation, which is honest — a name cached across pages could
-   * outlive an edit. What it does buy is the thing that matters, which is that a
-   * conversation changing costs ONE read for the row rather than one plus a
-   * profile for everyone in the list.
+   * empties on navigation. What it is filled from does not. In firebase mode
+   * the faces come through `fetchProfiles`, which serves one from the
+   * `zc.profiles` cache for up to PROFILE_CACHE_TTL_MS, so a name can outlive
+   * an edit by up to five minutes on the next page too — a window that
+   * constant's comment argues for, and that
+   * `store-tests/specs/17-face-cache.store.js` executes for this list. Within a
+   * page nothing here is refreshed at all: a face is kept for as long as the
+   * page stays open. What it buys is that a conversation changing costs ONE
+   * read for the row rather than one plus a profile for everyone in the list.
    *
    * Failures are deliberately not memoised. A cached failure is a permanent
    * "Someone" for an account whose profile was momentarily unreadable.
@@ -3593,28 +3877,45 @@
 
   async function resolveProfiles(uids) {
     const wanted = [];
+    const waits = [];
     uids.forEach(function (uid) {
-      if (uid && !(uid in profileMemo) && wanted.indexOf(uid) === -1) wanted.push(uid);
+      if (!uid || uid in profileMemo) return;
+      const inFlight = profilePending[uid];
+      if (inFlight) {
+        if (waits.indexOf(inFlight) === -1) waits.push(inFlight);
+      } else if (wanted.indexOf(uid) === -1) {
+        wanted.push(uid);
+      }
     });
-    await Promise.all(wanted.map(function (uid) {
-      if (profilePending[uid]) return profilePending[uid];
-      const pending = Promise.resolve()
-        .then(function () { return adapter.getPublicProfile(uid); })
-        .then(function (doc) {
-          // Projected, so a live view carries the same public subset the
-          // Firestore path serves. Without this the demo adapter would hand the
-          // page the whole private document — the other person's email and block
-          // list — where firebase mode hands it `discovery/{uid}`. The two
-          // adapters agreeing is the point of composing here rather than in each.
-          if (doc) profileMemo[uid] = normalizeUser(projectDiscovery(normalizeUser(doc)));
+    if (wanted.length) {
+      // ONE ask for every face that is missing, never one each. Asking per uid
+      // made every face its own `fetchProfiles`, and each of those that read
+      // anything ended by rewriting the whole face cache: a cold list of N
+      // conversations was N synchronous rewrites of a growing blob, on the page
+      // the cache was built for, where `getMatches` had always made one.
+      const batch = Promise.resolve()
+        .then(function () { return adapter.getPublicProfiles(wanted, { conversation: true }); })
+        .then(function (docs) {
+          wanted.forEach(function (uid) {
+            // Projected, so a live view carries the same public subset the
+            // Firestore path serves. Without this the demo adapter would hand
+            // the page the whole private document — the other person's email
+            // and block list — where firebase mode hands it `discovery/{uid}`.
+            // The two adapters agreeing is the point of composing here rather
+            // than in each.
+            if (docs && docs[uid]) profileMemo[uid] = publicFace(docs[uid]);
+          });
         })
         .catch(function (err) {
           console.warn('[zc.store] Could not load a profile for the conversation list.', err);
         })
-        .then(function () { delete profilePending[uid]; });
-      profilePending[uid] = pending;
-      return pending;
-    }));
+        .then(function () {
+          wanted.forEach(function (uid) { delete profilePending[uid]; });
+        });
+      wanted.forEach(function (uid) { profilePending[uid] = batch; });
+      waits.push(batch);
+    }
+    await Promise.all(waits);
     return profileMemo;
   }
 
@@ -3685,7 +3986,10 @@
     },
 
     /**
-     * Record that the user is around. Throttled to one write per 5 minutes.
+     * Record that the user is around. Throttled to one touch per 5 minutes
+     * across page loads (the stamp lives in localStorage); a touch that gets
+     * through is setLastActive, which in firebase mode is two writes —
+     * `users/{uid}`, then `discovery/{uid}`.
      * @param {string} uid user id
      * @returns {Promise<boolean>} true when a write happened
      */
@@ -3748,7 +4052,9 @@
     },
 
     /**
-     * Every swipe this user has made, newest first.
+     * Every swipe this user has made, newest first. Rejects rather than answer
+     * with less than the whole history: an unreadable demo store, or a Firestore
+     * answer that came from the cache instead of the server.
      * @param {string} uid swiper id
      * @returns {Promise<Object[]>} SwipeDocs
      */
@@ -3885,6 +4191,7 @@
 
     /**
      * All of this user's matches as render-ready views, newest activity first.
+     * Rejects, like getSwipes, when the matches cannot be read in full.
      * @param {string} uid viewer id
      * @returns {Promise<Object[]>} MatchViews
      */
@@ -3924,7 +4231,8 @@
     },
 
     /**
-     * Conversation history, oldest first.
+     * Conversation history, oldest first. Rejects, like getSwipes, when the
+     * messages cannot be read in full.
      * @param {string} matchId match id
      * @param {{limit?:number}} [options] how many of the newest messages (default 200)
      * @returns {Promise<Object[]>} MessageDocs
@@ -4146,9 +4454,10 @@
     },
 
     /**
-     * Every report this user has filed, newest first. Read problems (offline,
-     * a rules mismatch) degrade to an empty list with a console warning — the
-     * settings page has to render either way.
+     * Every report this user has filed, newest first. Rejects when the reports
+     * cannot be read (offline, a rules mismatch, an unreadable demo store), in
+     * both adapters: an empty list here means none were filed, and the settings
+     * page says exactly that, so a failure must not arrive as one.
      * @param {string} uid the reporter
      * @returns {Promise<Object[]>} ReportDocs ({id, from, about, reason, details, createdAt})
      */
@@ -4183,6 +4492,28 @@
       await ready;
       if (!uid) return null;
       return adapter.getPublicProfile(uid);
+    },
+
+    /**
+     * getPublicProfile for a list, in one ask: the settings page resolves every
+     * account it has reported at once. Asked one at a time, each was its own
+     * `fetchProfiles`, which reads the face cache and then rewrites the whole
+     * of it, once per report. Projected as the live conversation list projects
+     * faces, so both modes answer the same public subset.
+     * @param {string[]} uids accounts to look up
+     * @returns {Promise<Object<string,Object>>} uid → public profile; an
+     *   account that is gone or unreadable is simply absent
+     */
+    async getPublicProfiles(uids) {
+      await ready;
+      const wanted = (uids || []).filter(function (uid, i, all) { return !!uid && all.indexOf(uid) === i; });
+      if (!wanted.length) return {};
+      const docs = (await adapter.getPublicProfiles(wanted)) || {};
+      const out = {};
+      wanted.forEach(function (uid) {
+        if (docs[uid]) out[uid] = publicFace(docs[uid]);
+      });
+      return out;
     },
 
     /**

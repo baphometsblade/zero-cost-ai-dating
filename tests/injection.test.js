@@ -36,22 +36,39 @@ const path = require('node:path');
 const ROOT = path.resolve(__dirname, '..');
 
 /**
- * Every script this project actually ships to a browser. Deliberately not a
- * recursive walk of `public/`: a walk that silently stopped matching would
- * check nothing and stay green, and the file list here is short enough that a
- * new script is a deliberate line in this array.
- * @returns {Array<{rel:string, source:string}>}
+ * Every script this project ships to a browser: each `.js` file anywhere under
+ * `public/` (the worker included), plus the body of each inline `<script>` in a
+ * page. The inline bodies are easy to forget — 404.html runs one, allowed by
+ * its CSP hash, and it is the block the project expects to be hand-edited and
+ * re-hashed. A walk that silently stopped matching would check nothing and
+ * stay green, so the tests below assert that it found the files, and count the
+ * inline scripts with a pattern of their own.
+ * @returns {Array<{rel:string, source:string}>} an inline body's `rel` is
+ *   `public/<page>.html <inline N>`, N counting from 1 in page order
  */
 function shippedScripts() {
   const files = [];
-  const jsDir = path.join(ROOT, 'public', 'js');
-  fs.readdirSync(jsDir)
-    .filter(function (name) { return name.endsWith('.js'); })
-    .forEach(function (name) {
-      files.push({ rel: 'public/js/' + name, source: fs.readFileSync(path.join(jsDir, name), 'utf8') });
+  const publicDir = path.join(ROOT, 'public');
+  (function walk(rel) {
+    fs.readdirSync(path.join(publicDir, rel), { withFileTypes: true }).forEach(function (entry) {
+      const child = rel ? rel + '/' + entry.name : entry.name;
+      if (entry.isDirectory()) walk(child);
+      else if (entry.name.endsWith('.js')) {
+        files.push({ rel: 'public/' + child, source: fs.readFileSync(path.join(publicDir, child), 'utf8') });
+      }
     });
-  const sw = path.join(ROOT, 'public', 'sw.js');
-  if (fs.existsSync(sw)) files.push({ rel: 'public/sw.js', source: fs.readFileSync(sw, 'utf8') });
+  })('');
+  fs.readdirSync(publicDir).filter(function (name) { return name.endsWith('.html'); }).forEach(function (name) {
+    const html = fs.readFileSync(path.join(publicDir, name), 'utf8').replace(/<!--[\s\S]*?-->/g, '');
+    const re = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi;
+    let m;
+    let n = 0;
+    while ((m = re.exec(html)) !== null) {
+      if (/\ssrc\s*=/i.test(' ' + m[1])) continue;
+      n += 1;
+      files.push({ rel: 'public/' + name + ' <inline ' + n + '>', source: m[2] });
+    }
+  });
   return files;
 }
 
@@ -116,6 +133,29 @@ const SINKS = [
   { name: 'javascript: URL', pattern: /['"`]\s*javascript:/i, why: 'runs a string as code when navigated to' }
 ];
 
+/**
+ * Every sink in one script, as `rel:line — sink (why)` strings.
+ * @param {{rel:string, source:string}} file a script and the name to report it by
+ * @returns {string[]} one entry per sink per line; empty when the script is clean
+ */
+function sinksIn(file) {
+  const found = [];
+  // The javascript:-URL pattern has to see string literals, so it gets the
+  // comment-stripped source; every other sink is matched against code only.
+  const stripped = code(file.source);
+  const literalsIntact = withoutComments(file.source);
+  SINKS.forEach(function (sink) {
+    const haystack = sink.name === 'javascript: URL' ? literalsIntact : stripped;
+    const lines = haystack.split('\n');
+    lines.forEach(function (line, index) {
+      if (sink.pattern.test(line)) {
+        found.push(file.rel + ':' + (index + 1) + ' — ' + sink.name + ' (' + sink.why + ')');
+      }
+    });
+  });
+  return found;
+}
+
 test('no shipped script can turn a string into markup or into code', function () {
   const files = shippedScripts();
   // A run that found no files would pass having checked nothing.
@@ -124,21 +164,7 @@ test('no shipped script can turn a string into markup or into code', function ()
     ' — public/js/ may have moved and this test would be checking nothing');
 
   const found = [];
-  files.forEach(function (file) {
-    // The javascript:-URL pattern has to see string literals, so it gets the
-    // comment-stripped source; every other sink is matched against code only.
-    const stripped = code(file.source);
-    const literalsIntact = withoutComments(file.source);
-    SINKS.forEach(function (sink) {
-      const haystack = sink.name === 'javascript: URL' ? literalsIntact : stripped;
-      const lines = haystack.split('\n');
-      lines.forEach(function (line, index) {
-        if (sink.pattern.test(line)) {
-          found.push(file.rel + ':' + (index + 1) + ' — ' + sink.name + ' (' + sink.why + ')');
-        }
-      });
-    });
-  });
+  files.forEach(function (file) { found.push.apply(found, sinksIn(file)); });
 
   assert.deepEqual(found, [],
     'a script this project ships can hand a browser a string to parse or run:\n  ' +
@@ -147,6 +173,44 @@ test('no shipped script can turn a string into markup or into code', function ()
     'Insert text with ZC.util.el({ text }) — which sets textContent — and build structure ' +
     'from elements, never from concatenated markup. If a case genuinely needs markup, it ' +
     'needs a conversation and a sanitiser, not a quick exception here.');
+});
+
+test('a literal broken by comment stripping cannot hide the sink on the next line', function () {
+  // The claim in code()'s docblock, held to: stripping `// limit'` out of
+  // 'rate // limit' leaves a quote with no partner, and the sink one line down
+  // must still be reported — even with another quote further down for a
+  // runaway literal to close on. A sink named only in a comment must not be.
+  const planted = [
+    "var label = 'rate // limit';",
+    'node.innerHTML = label;',
+    '// never write node.innerHTML = label here',
+    "log('done');"
+  ].join('\n');
+  assert.deepEqual(sinksIn({ rel: 'planted.js', source: planted }),
+    ['planted.js:2 — innerHTML (parses a string as HTML)']);
+});
+
+test('the scan reaches every script a page runs inline', function () {
+  // Counted with a pattern of its own rather than with the helper the scan
+  // uses, so a helper that stopped finding inline bodies fails here instead of
+  // agreeing with itself. 404.html carries one today, allowed by its CSP hash —
+  // and a re-hashed edit to it passes static.test.js (c), which checks only
+  // that the hash is listed, so this scan is the only thing reading its body.
+  const pageDir = path.join(ROOT, 'public');
+  const scanned = shippedScripts();
+  const missing = [];
+  let inline = 0;
+  fs.readdirSync(pageDir).filter(function (name) { return name.endsWith('.html'); }).forEach(function (name) {
+    const html = fs.readFileSync(path.join(pageDir, name), 'utf8').replace(/<!--[\s\S]*?-->/g, '');
+    const tags = html.match(/<script(?![^>]*\ssrc\s*=)[^>]*>/gi) || [];
+    inline += tags.length;
+    const covered = scanned.filter(function (file) { return file.rel.indexOf('public/' + name + ' ') === 0; }).length;
+    if (covered !== tags.length) {
+      missing.push('public/' + name + ': ' + tags.length + ' inline script(s), ' + covered + ' scanned');
+    }
+  });
+  assert.ok(inline >= 1, 'expected at least the 404 page\'s inline script to be found — the page scan found none');
+  assert.deepEqual(missing, [], 'inline scripts the injection scan never reads:\n  ' + missing.join('\n  '));
 });
 
 test('the DOM helper offers no markup escape hatch', function () {

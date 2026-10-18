@@ -20,18 +20,71 @@
    anything had happened. The guard has been replaced by one that asks whether
    a person actually activated a row — which also stops a `?m=` deep link from
    dropping the caret into a text field on a page somebody merely followed a
-   link to. The last two checks here are that fix, and they fail on both
-   viewports without it.
+   link to. The last two checks of the pane-swap section are that fix, and
+   they fail on both viewports without it.
+
+   A later audit found a second fault, in what a screen reader is told rather
+   than in where focus goes. The daily-limit banner was itself a polite live
+   region, and its countdown rewrites it every second, so every tick was a
+   change inside a live region — in the last hour before midnight, a
+   different sentence each time. The banner section at the end moves the
+   clock into that hour, and its three checks fail on both viewports without
+   the fix.
 
    What this spec deliberately does not do is score the pages against a rules
    engine. Every check below is a specific promise made in the documentation or
-   a specific way a keyboard user gets stranded — a number out of a hundred
-   would be less honest and much harder to act on. */
+   a specific way a keyboard or screen-reader user gets stranded — a number
+   out of a hundred would be less honest and much harder to act on. */
 'use strict';
 
 /** Pages that must each stand on their own for a screen reader. */
 const PAGES = ['index.html', 'auth.html', 'dashboard.html', 'profile.html',
   'matches.html', 'settings.html', 'subscription.html'];
+
+/**
+ * The live regions: elements whose changes a screen reader reads out without
+ * being asked. By the aria-live attribute, by the roles that are live without
+ * one, and <output>, whose implicit role is status.
+ */
+const LIVE_REGIONS = '[aria-live="polite"], [aria-live="assertive"], [role="status"], [role="alert"], [role="log"], output';
+
+/**
+ * The roles the browser's own accessibility tree gives an element and its
+ * children, rather than the ones the markup suggests. Read over CDP, which is
+ * Chromium's, and Chromium is the only browser e2e/run.js launches.
+ * @param {Object} page Playwright page
+ * @param {string} selector the element to read
+ * @returns {Promise<{role:string, children:string[]}|null>} null when nothing
+ *   matches the selector, or when the browser's answer holds no node for the
+ *   match. Otherwise the match's role in the browser's accessibility tree, and
+ *   the roles of that node's children in the same tree, in its order, with '?'
+ *   for a child the answer holds no node for. The tree is not the DOM, and this
+ *   says nothing about the DOM: the tree can leave a DOM child out or list it
+ *   as 'none', and a match hidden from a screen reader can come back as 'none'
+ *   and still list children. Callers that rely on more than this say why.
+ */
+async function axChildRoles(page, selector) {
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    const doc = await cdp.send('DOM.getDocument', { depth: 0 });
+    const found = await cdp.send('DOM.querySelector', { nodeId: doc.root.nodeId, selector: selector });
+    if (!found.nodeId) return null;
+    const described = await cdp.send('DOM.describeNode', { nodeId: found.nodeId });
+    const tree = await cdp.send('Accessibility.getPartialAXTree', { nodeId: found.nodeId, fetchRelatives: true });
+    const byId = function (id) { return tree.nodes.filter(function (node) { return node.nodeId === id; })[0]; };
+    const self = tree.nodes.filter(function (node) { return node.backendDOMNodeId === described.node.backendNodeId; })[0];
+    if (!self) return null;
+    return {
+      role: self.role ? self.role.value : '',
+      children: (self.childIds || []).map(function (id) {
+        const child = byId(id);
+        return child && child.role ? child.role.value : '?';
+      })
+    };
+  } finally {
+    await cdp.detach();
+  }
+}
 
 /**
  * Describe whatever currently has focus, in terms a failure message can use.
@@ -285,6 +338,47 @@ module.exports = {
     if (!row) {
       t.check('a conversation row is present to open', false, 'no .match-row rendered');
     } else {
+      // The list as the browser exposes it. Links put straight into the <ul>
+      // still make a list, but its children are then links, not list items,
+      // which leaves a screen reader no items to count or to move between.
+      // That is not the case today; this keeps it so.
+      const listTree = await axChildRoles(page, '#match-list');
+      const rowCount = await page.locator('#match-list .match-row').count();
+      t.check('the conversation list reaches a screen reader as a list with one item per conversation',
+        !!listTree && listTree.role === 'list' && rowCount > 0 &&
+          listTree.children.length === rowCount &&
+          listTree.children.every(function (role) { return role === 'listitem'; }),
+        JSON.stringify({ tree: listTree, rows: rowCount }));
+
+      // Each row's name, as the accessibility tree has it, must carry what the
+      // row shows. An aria-label of name, unread count and stamp replaced the
+      // row's content, so a screen reader heard "Devin A., 1 unread message,
+      // last activity 1d" and never the message the row displays.
+      // Matched by role and accessible name, which is what a screen reader
+      // goes by: the preview and the stamp each row shows, in that order.
+      const escape = function (text) { return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); };
+      const shownRows = await page.locator('#match-list .match-row').evaluateAll(function (nodes) {
+        return nodes.map(function (node) {
+          const visible = function (selector) {
+            const part = node.querySelector(selector).cloneNode(true);
+            Array.prototype.forEach.call(part.querySelectorAll('.sr-only'), function (hidden) { hidden.remove(); });
+            return part.textContent.replace(/\s+/g, ' ').trim();
+          };
+          return { id: node.dataset.matchId, preview: visible('.match-row-preview'), stamp: visible('.match-row-time') };
+        });
+      });
+      const unnamed = [];
+      for (const shown of shownRows) {
+        const named = page.locator('#match-list').getByRole('link', {
+          name: new RegExp(escape(shown.preview) + '.*' + escape(shown.stamp))
+        });
+        const ids = await named.evaluateAll(function (nodes) { return nodes.map(function (node) { return node.dataset.matchId; }); });
+        if (!shown.preview || ids.indexOf(shown.id) === -1) unnamed.push(shown.id + ' shows "' + shown.preview + '"');
+      }
+      t.check('every conversation row is named by what it shows, the message included',
+        shownRows.length > 0 && unnamed.length === 0,
+        unnamed.length ? 'not in the name: ' + unnamed.join('; ') : shownRows.length + ' rows');
+
       await row.focus();
       const fromRow = await activeElement(page);
       t.check('a conversation row takes focus before it is opened',
@@ -303,5 +397,174 @@ module.exports = {
       t.check('and specifically on the composer, which is what you came to do',
         inThread.id === 'chat-input', JSON.stringify(inThread.id));
     }
+
+    /* ---- the daily-limit banner: said once, not once a second ---- */
+
+    // Last, because it moves the clock, and the clock stays moved for the
+    // rest of this browser context. Half past eleven is inside the final hour,
+    // where the countdown reads minutes and seconds and the banner's sentence
+    // is a different sentence every second: the worst case, in which a live
+    // region wrapped round the countdown has something new to say once a
+    // second.
+    const now = new Date();
+    await page.clock.install({ time: new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 30, 0) });
+
+    // The live regions that are rendered, and what they hold, while there are
+    // still likes left and the banner is display:none. Taken once the hint
+    // under the deck shows the budget, because the banner is painted in the
+    // same call and only after the first card: any earlier, it is hidden
+    // whatever the budget says.
+    await page.goto(ctx.base + '/dashboard.html', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#deck-stack .swipe-card');
+    await page.waitForFunction(function () {
+      return /likes left today/.test((document.getElementById('usage-hint') || {}).textContent || '');
+    }, null, { timeout: 5000 }).catch(function () {});
+    const quiet = await page.evaluate(function (selector) {
+      const regions = {};
+      document.querySelectorAll(selector).forEach(function (node) {
+        if (node.id && node.getClientRects().length) regions[node.id] = (node.textContent || '').trim();
+      });
+      const banner = document.getElementById('limit-banner');
+      return {
+        regions: regions,
+        hint: ((document.getElementById('usage-hint') || {}).textContent || '').trim(),
+        bannerShown: !!(banner && banner.getClientRects().length)
+      };
+    }, LIVE_REGIONS);
+    // The snapshot is only worth comparing against if it really was taken with
+    // likes left. Taken with them already spent, it would hold what the page
+    // says while the banner is up, and a banner that is its own live region
+    // would then pass below for an announcement once its countdown moved on.
+    const hadLikesLeft = /^[1-9]\d* of \d+ likes left today/.test(quiet.hint) && !quiet.bannerShown;
+    // Rendered is not the same as exposed: aria-hidden or visibility:hidden on
+    // a region like these, which never takes focus, leaves it on the page but
+    // keeps it from a screen reader, and the browser's tree then gives it the
+    // role 'none'. (Focus is why that qualifier is there: Chromium's tree
+    // keeps a focused button's own role through aria-hidden.) So each region's
+    // role is read now, while it is still quiet.
+    const quietRoles = {};
+    for (const id of Object.keys(quiet.regions)) {
+      const node = await axChildRoles(page, '#' + id);
+      quietRoles[id] = node ? node.role : 'none';
+    }
+    const unexposed = Object.keys(quietRoles).filter(function (id) { return quietRoles[id] === 'none'; });
+
+    // Spend what is left of today's likes through the store, as that many
+    // right swipes would, and come back to the deck so it paints the banner
+    // from them.
+    await page.evaluate(function () {
+      const uid = window.ZC.auth.current.uid;
+      return window.ZC.store.canSpend(uid, 'likes').then(function (budget) {
+        return window.ZC.store.bumpUsage(uid, 'likes', budget.remaining);
+      });
+    });
+    await page.goto(ctx.base + '/dashboard.html', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#deck-stack .swipe-card');
+    await page.waitForSelector('#limit-banner:not(.hidden)');
+    // Allowed to time out: a page that never announces the limit is the
+    // failure the next check exists to report, by name, rather than the spec
+    // stopping here.
+    await page.waitForFunction(function (selector) {
+      return Array.prototype.some.call(document.querySelectorAll(selector), function (node) {
+        return /midnight/i.test(node.textContent || '');
+      });
+    }, LIVE_REGIONS, { timeout: 5000 }).catch(function () {});
+
+    // A region that is display:none until the moment it has something to say
+    // is not exposed to a screen reader before that moment, so its sentence
+    // arrives with it rather than as a change to it. The one that speaks has
+    // to have been on the page already, exposed and not yet saying it.
+    const speaking = await page.evaluate(function (selector) {
+      return Array.prototype.filter.call(document.querySelectorAll(selector), function (node) {
+        const text = node.textContent || '';
+        return /\blikes\b/i.test(text) && /midnight/i.test(text);
+      }).map(function (node) {
+        return { id: node.id || node.className || node.tagName, text: (node.textContent || '').trim() };
+      });
+    }, LIVE_REGIONS);
+    const announcer = speaking.filter(function (region) {
+      return Object.prototype.hasOwnProperty.call(quiet.regions, region.id) &&
+        unexposed.indexOf(region.id) === -1 && quiet.regions[region.id] !== region.text;
+    })[0];
+    t.check('running out of likes is announced, by a live region that was on the page before there was anything to say',
+      hadLikesLeft && !!announcer,
+      (hadLikesLeft ? '' : 'no likes left before: ' + JSON.stringify(quiet.hint) +
+        ', banner ' + (quiet.bannerShown ? 'up' : 'down') + '; ') +
+        (unexposed.length ? 'rendered but not exposed before: ' + unexposed.join(', ') + '; ' : '') +
+        JSON.stringify(speaking) + ' rendered before: ' + Object.keys(quiet.regions).join(', '));
+
+    // And then it is left alone. The countdown is watched as well as every
+    // live region, so a countdown that had stopped could not pass this by
+    // silence.
+    const ticking = await page.evaluate(function (selector) {
+      return new Promise(function (resolve) {
+        const changed = {};
+        const observers = Array.prototype.map.call(document.querySelectorAll(selector), function (node) {
+          const observer = new MutationObserver(function (records) {
+            const key = node.id || node.className || node.tagName;
+            changed[key] = (changed[key] || 0) + records.length;
+          });
+          observer.observe(node, { subtree: true, childList: true, characterData: true });
+          return observer;
+        });
+        const countdown = document.getElementById('limit-text');
+        const shown = [countdown ? countdown.textContent : ''];
+        const ticks = new MutationObserver(function () { shown.push(countdown.textContent); });
+        if (countdown) ticks.observe(countdown, { subtree: true, childList: true, characterData: true });
+        window.setTimeout(function () {
+          observers.forEach(function (observer) { observer.disconnect(); });
+          ticks.disconnect();
+          resolve({
+            liveChanges: changed,
+            ticks: shown.length - 1,
+            distinct: shown.filter(function (text, i) { return shown.indexOf(text) === i; }).length,
+            last: shown[shown.length - 1]
+          });
+        }, 3500);
+      });
+    }, LIVE_REGIONS);
+    t.check('and the countdown under it keeps ticking without any live region repeating it',
+      ticking.ticks >= 2 && ticking.distinct >= 2 && Object.keys(ticking.liveChanges).length === 0,
+      JSON.stringify(ticking));
+
+    // Once means once for as long as the banner is up, and the countdown is
+    // not the only thing that comes back to it. A like refused under the
+    // banner repaints it on the way to saying why, in the deck's own region;
+    // the region that made the announcement must not be written to again.
+    // Where no region made it, whichever regions are saying the banner's
+    // sentence are held to the same, so a banner that is its own live region
+    // is too. The deck's region has to change, or the refusal never ran and
+    // the quiet would prove nothing.
+    const said = announcer ? [announcer.id] : speaking.map(function (region) { return region.id; });
+    await page.evaluate(function (selector) {
+      const changed = {};
+      const observers = Array.prototype.map.call(document.querySelectorAll(selector), function (node) {
+        const observer = new MutationObserver(function (records) {
+          const key = node.id || node.className || node.tagName;
+          changed[key] = (changed[key] || 0) + records.length;
+        });
+        observer.observe(node, { subtree: true, childList: true, characterData: true });
+        return observer;
+      });
+      window.__zcLiveWrites = { changed: changed, observers: observers };
+    }, LIVE_REGIONS);
+    await page.focus('#deck-stack .swipe-card');
+    await page.keyboard.press('ArrowRight');
+    await page.waitForFunction(function () {
+      return /unavailable/i.test((document.getElementById('deck-status') || {}).textContent || '');
+    }, null, { timeout: 5000 }).catch(function () {});
+    const refused = await page.evaluate(function () {
+      const watch = window.__zcLiveWrites;
+      delete window.__zcLiveWrites;
+      watch.observers.forEach(function (observer) { observer.disconnect(); });
+      return {
+        liveChanges: watch.changed,
+        deck: ((document.getElementById('deck-status') || {}).textContent || '').trim()
+      };
+    });
+    t.check('and a like refused under it is said by the deck, without the region that announced it being written to again',
+      (refused.liveChanges['deck-status'] || 0) > 0 &&
+        said.every(function (id) { return !refused.liveChanges[id]; }),
+      JSON.stringify({ watched: said, liveChanges: refused.liveChanges, deck: refused.deck }));
   }
 };

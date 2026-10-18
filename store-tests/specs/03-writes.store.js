@@ -158,16 +158,27 @@ module.exports = {
 
     /* ---- the presence write, and the throttle docs/ARCHITECTURE.md claims -- */
 
-    // > `touchActive` is throttled to one write per five minutes, because
-    // > `lastActiveAt` feeds the activity score but is not worth a write per
-    // > navigation.   — docs/ARCHITECTURE.md
+    // > `touchActive` is throttled to one *touch* per five minutes **across page
+    // > loads** — and a touch is TWO writes, not one: `setLastActive` stamps
+    // > `users/{uid}` and then `discovery/{uid}` …   — docs/ARCHITECTURE.md
     //
     // A sentence, and nothing executing it. `touchActive` is called on every
     // auth resolution and on every page that resolves a user, so without the
-    // throttle a browsing session is a Firestore write per navigation, against a
-    // free tier's daily write allowance. It is also the only interesting logic
-    // that lives in the *facade* rather than in either adapter, which is why
-    // neither this suite nor the demo unit tests had ever touched it.
+    // throttle every navigation would write both documents, and more than once,
+    // against a free tier's daily write allowance. It is also the only
+    // interesting logic that lives in the *facade* rather than in either
+    // adapter, which is why neither this suite nor the demo unit tests had ever
+    // touched it.
+    //
+    // What the checks below execute is the timing — whether a touch writes —
+    // and where the throttle keeps its memory. Four of them read the answer back
+    // from `users/{uid}.lastActiveAt`; the rest go by what `touchActive`
+    // returns, by the stamp it leaves in storage, or by whether anything was
+    // toasted or warned. None reads `discovery/{uid}` back or counts writes, so
+    // the "two" is not pinned here — `21-navigation-cost` tallies every write a
+    // touch makes. This quote used to read "one write per five minutes", a
+    // sentence ARCHITECTURE.md had stopped saying, and under it these checks
+    // looked like coverage of a write count they never measure.
     const touchUid = 'writes-touch';
     await k.admin.set('users', touchUid, k.h.userDoc(touchUid, { lastActiveAt: null }));
 
@@ -205,9 +216,9 @@ module.exports = {
     // is its own HTML document, so every navigation is a fresh JS context. While
     // the last-write times lived in a module-level `{}`, that map was empty again
     // on each page and `app.js` calls `touchActive` on every page that resolves a
-    // user: six pages in a minute was six writes, against a documented bound of one
-    // per five minutes. The bound held only within a single page — the one case it
-    // was not needed for.
+    // user: six pages in a minute was six touches, each writing both documents,
+    // against a documented bound of one per five minutes. The bound held only within
+    // a single page — the one case it was not needed for.
     //
     // They live in `localStorage` now, so the proof is that changing what is STORED
     // changes the answer. A fresh page has fresh memory and the same storage, which
@@ -302,7 +313,7 @@ module.exports = {
     t.check('and when storage is full rather than disabled the throttle still holds',
       k.same(wroteWhileFull, [true, false, false]),
       'three touches on an origin that can read but not write: ' + k.show(wroteWhileFull) +
-      ' — one write is the bound, three is no throttle at all');
+      ' — one touch is the bound, three is no throttle at all');
 
     // The merge is not a latch: as soon as a write lands, the memory-only flag clears
     // and storage is authoritative again. Asserted on a uid storage has never seen, so

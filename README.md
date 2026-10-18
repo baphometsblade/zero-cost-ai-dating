@@ -28,7 +28,7 @@ has the one setting.)*
 Most dating apps show you a person and a silence. This one shows you a person and its
 reasoning:
 
-> **78.4%** · Strong match
+> **78** match
 > ✨ You both love Hiking, Live music and Cooking
 > 🧭 Very similar outlook — you match closely on warmth and openness
 > 📍 Just 12 km away
@@ -78,9 +78,17 @@ all work. Nothing is sent anywhere.
 | **Plans** (`subscription.html`) | An honest, non-deceptive plan comparison. Premium is a **local simulation** — see [Limitations](#limitations). |
 
 Everything is mobile-first, works in light and dark, respects `prefers-reduced-motion`, and
-is fully operable from the keyboard. The app is also an installable PWA: a manifest plus a
-network-first service worker make it launchable from the home screen, and demo mode keeps
-working with no connection at all — fitting, for an app whose matching never leaves the device.
+is fully operable from the keyboard. Two things the eye gets from styling alone are put into
+words for a screen reader. Every glyph the stylesheets draw carries alternative text:
+*Included:* and *Not included:* in front of each plan row, where the tick or the cross is the
+only thing that tells them apart, and nothing at all for decoration. And each conversation row
+is named by what it shows, its last message included, with only the unread count and what the
+stamp means added. On a phone, an open conversation takes the screen between the header and
+the tab bar and opens at its newest message, with the composer in view.
+
+The app is also an installable PWA: a manifest plus a network-first service worker make it
+launchable from the home screen, and demo mode keeps working with no connection at all —
+fitting, for an app whose matching never leaves the device.
 
 ---
 
@@ -142,18 +150,27 @@ activity          0.903       0.0538      0.0486     last seen 18 hours ago
                                           0.6364  ->  63.6
 ```
 
-Which the engine renders as:
+On Bo's card, the deck turns that into a score ring and three reasons:
 
 ```
-63.6% · Good match
+64 match
 🧭 Very similar outlook — you match closely on warmth and openness
 📍 Just 12 km away
 ✨ You both love Hiking, Live music and Cooking
-🎂 Only 3 years apart
 ```
 
-Note what did *not* appear: the bio component scored 0.134, below the 0.15 threshold, so no
-"your bios both mention…" line was claimed. Reasons are emitted from evidence or not at all.
+The ring rounds the score; the exact 63.6 and its band, *Good match*, are in the details
+sheet that `i` opens. So is a fourth reason, 🎂 *Only 3 years apart*: the engine returns up
+to four, strongest first (`MAX_REASONS`), and the card prints three (`CARD_REASONS` in
+`public/js/dashboard.js`). A fifth qualified as well — ⚡ *Active today*, for somebody seen
+18 hours ago — and is the one the engine's cap drops, its 0.0486 being the smallest
+contribution of the five. (The *📍 12 km away* and *⚡ Active 18h ago* pills in the row
+under Bo's name, either side of *Vancouver, WA*, are not reasons: `buildCard` prints them
+whatever the score.)
+
+Note what did *not* appear anywhere: the bio component scored 0.134, below the 0.15
+threshold, so no "your bios both mention…" line was claimed. Reasons are emitted from
+evidence or not at all.
 
 ### 5. It learns, gently
 
@@ -213,9 +230,11 @@ rather than only for producing this table.
 | No build step at runtime | Plain classic `<script>` tags. No bundler, no npm runtime deps. Node is dev-only, for tests and the seed export. |
 | Must be demoable with zero setup | **Demo mode**: if Firebase is not configured or not reachable, the entire app runs off `localStorage`, seeded from bundled profiles. |
 
-The practical upshot: the free Spark tier's 10 GB/month of hosting bandwidth and 50k/20k daily
-Firestore reads/writes are far more than a project of this size will use, and there is no
-resource in the stack that can bill you by surprise, because none of them are enabled.
+The practical upshot: the free Spark tier's hosting allowance — 10 GB stored, 360 MB a day
+transferred — and its 50k/20k daily Firestore reads/writes are far more than a small
+deployment will use, and there is no resource in the stack that can bill you by surprise,
+because none of them are enabled. The quota table is in
+[docs/DEPLOY.md](docs/DEPLOY.md#11-staying-at-0).
 
 ---
 
@@ -248,22 +267,22 @@ npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.
 
 ### Unit suites
 
-Fourteen suites on Node's built-in runner — **267 checks**, no install, no browser, seconds:
+Fourteen suites on Node's built-in runner — **282 checks**, no install, no browser, seconds:
 
 | Suite | What it pins down |
 | --- | --- |
 | `tests/auth.test.js` | The real `public/js/auth.js` on the demo backend, nothing mocked but the browser globals it reaches for: the salted credential vault (including the documented weak fallback when `crypto.subtle` is absent), sign-up and sign-in, the session record, `onChange`, and the three route guards. |
-| `tests/csp-sync.test.js` | The `<meta http-equiv>` copy of the Content-Security-Policy on every page equals the `firebase.json` header minus `frame-ancestors`, and sits before the first `<link>` and `<script>` — two copies of a policy drift apart unless something forces them together. |
-| `tests/contrast.test.js` | Reads the three palette blocks out of `style.css` and holds the flat fill/ink pairs — and body text on each neutral surface — to WCAG AA in light and in both darks. Deliberately narrow: gradients, glass over photos and `color-mix` have no second flat colour to measure against, so they are left out and said so rather than measured badly. It found white text on dark's `--danger` at 2.85:1, on the button that deletes your account. |
-| `tests/data-store.test.js` | The demo storage adapter, loaded for real in Node against a `localStorage` shim: seeding (32 profiles, inbound likes, both conversations, idempotency, force re-seed), user create/update deep-merge semantics with wholesale `interestAffinity` replacement, swipe/match/undo idempotency, messaging with unread counters and the 1000-char cap, daily usage limits per plan, the reports lifecycle (file, list, retract, purge on account deletion), and export/import/reset round-trips. |
+| `tests/csp-sync.test.js` | The `<meta http-equiv>` copy of the Content-Security-Policy on every page equals the `firebase.json` header minus `frame-ancestors`, and sits before the first `<link>` and `<script>` — two copies of a policy drift apart unless something forces them together. And `connect-src`, the directive an injected script would send your data out through, may hold only the page's own origin and hosts under `googleapis.com`, where the three Firebase SDKs the pages load were measured to connect and nowhere else, each source listed in the test with its reason, so widening it is a deliberate edit rather than a quiet one. |
+| `tests/contrast.test.js` | Reads the three palette blocks out of `style.css` and holds the flat fill/ink pairs — and body text on each neutral surface — to WCAG AA in light and in both darks, and the deck's four action glyphs to the threshold their size calls for, at rest and on hover. A label on a two-stop gradient — the primary and send buttons, your own chat bubbles, the "how it works" numerals, the plan ribbon, the premium badge — has no single background but does have a worst one, so every rule in either stylesheet that declares such a fill as its background and a text colour beside it is found and held to AA at the lowest point along the whole line, not just at its two stops, because the darkest point of a gradient need not be a stop. Those six must keep being found, so a sweep that stopped finding rules fails rather than passing, and the heart in the wordmark is exempt by name, as WCAG exempts a logo; the lowest label today is 5.07:1. Glass over photos, `color-mix` and text clipped to its own gradient have no second flat colour to measure against, so they are left out and said so rather than measured badly. It found white text on dark's `--danger` at 2.85:1, on the button that deletes your account. |
+| `tests/data-store.test.js` | The demo storage adapter, loaded for real in Node against a `localStorage` shim: seeding (32 profiles, inbound likes, both conversations, idempotency, force re-seed), user create/update deep-merge semantics with wholesale `interestAffinity` replacement, swipe/match/undo idempotency, messaging with unread counters and the 1000-char cap, daily usage limits per plan, the reports lifecycle (file, list, retract, purge on account deletion), and export/import/reset round-trips. A store that cannot be read is a failure rather than an empty answer wherever a page would show the empty answer as a fact: your filed reports, retracting one (which would otherwise say it had already been removed), and the swipes, matches and messages the data export writes out as your whole record. And `getMatches` and `getMatch` hand over the same public projection of the other person that the live list does, as the Firestore adapter's do — never their address, birthdate or block list. |
 | `tests/docs.test.js` | The claims this README makes about itself: that every `**N checks**` total is one `scripts/claims.js` stands behind, that every path and `npm run` incantation in the docs resolves, and that no spec exists without a line describing it. Documentation is the one part of this project that fails silently; this is the cheapest check there is, so it runs on every push. |
-| `tests/injection.test.js` | No shipped script can hand a browser a string to parse as markup or run as code — `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, `srcdoc`, `eval`, `new Function`, string-bodied timers, `javascript:` URLs — with comments and string literals blanked first, so a sink named in prose is not mistaken for one in use. In a dating app almost every string on screen was typed by somebody else. |
-| `tests/limits.test.js` | Every bound in this app is written down twice — once in `public/js/profile.js`, which enforces it while you type and names it in the message, and once in `firestore.rules`, because a client-side limit is a courtesy. This reads both files and refuses to let them drift: no limit the form accepts may be one the rules refuse, the private document and the public projection must state each bound identically, and the rules' photo-link allowance must be exactly six of what the editor permits per link. Plus the two rules that made those caps necessary: every key a `hasOnly` allowlist admits must be one something in the same validator looks at, and a list whose *length* is bounded must have its *contents* bounded too, counted per occurrence, because one element can be a megabyte. The first of those found `discovery/{uid}.personality` accepting anything at all, three lines from the `location` field that had the same defect and was caught by eye rounds earlier; it reads code with the comments stripped, because deleting a rule and leaving `// TODO: validate 'personality' here.` behind is the likeliest shape a real edit takes and the first version of the check passed against exactly that. |
+| `tests/injection.test.js` | No shipped script can hand a browser a string to parse as markup or run as code — `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, `srcdoc`, `eval`, `new Function`, string-bodied timers, `javascript:` URLs — with comments and string literals blanked first, so a sink named in prose is not mistaken for one in use. Shipped means every `.js` file under `public/`, the service worker included, and the body of every inline `<script>` in a page — today only `404.html`'s, which the CSP lets run by its hash, and a hash pins the bytes, not what they do. In a dating app almost every string on screen was typed by somebody else. |
+| `tests/limits.test.js` | Every bound in this app is written down twice — once in `public/js/profile.js`, which enforces it while you type and names it in the message, and once in `firestore.rules`, because a client-side limit is a courtesy. This reads both files and refuses to let them drift: no limit the form accepts may be one the rules refuse, the private document and the public projection must state each bound identically, and the rules' photo-link allowance must be exactly six of what the editor permits per link. Plus the two rules that made those caps necessary: every key a `hasOnly` allowlist admits must be one something in the same validator looks at, and a list whose *length* is bounded must have its *contents* bounded too, counted per occurrence, because one element can be a megabyte. And every closed vocabulary the rules pin — report reasons, genders, themes, plans — must be exactly the list the client offers, because the client validates against its own copy and cannot see the rules refuse a slug it added: a report reason added to the dialog alone would be an abuse report that cannot be filed, refused with nothing named. The first of the two rules above found `discovery/{uid}.personality` accepting anything at all, three lines from the `location` field that had the same defect and was caught by eye rounds earlier; it reads code with the comments stripped, because deleting a rule and leaving `// TODO: validate 'personality' here.` behind is the likeliest shape a real edit takes and the first version of the check passed against exactly that. |
 | `tests/matching-engine.test.js` | Every hard filter including the mutual gender/age cases, the neutral missing-location path, score bounds, determinism, tokeniser and cosine behaviour, learning clamp/prune/cap, ranking tie-breaks, weight renormalisation, and a golden end-to-end score. |
-| `tests/projection.test.js` | What is public about an account, agreed in one place. The key set `projectDiscovery()` emits must equal the closed `hasOnly` lists in `firestore.rules` — drift either way is named — and, separately, a fully populated private account is projected and searched for sentinels, so `email`, `birthdate`, `blocked`, `learning` or `usage` cannot reach the world-readable half even if somebody widens the rules to let them. |
+| `tests/projection.test.js` | What is public about an account, agreed in one place. The key set `projectDiscovery()` emits must equal the closed `hasOnly` lists in `firestore.rules`, and drift either way is named. So must the keys a private user document is written with, against `userDocOk`'s list and each nested validator's: the document the shipped store creates for a new account, at the top level and in each of its maps but `learning.interestAffinity`, whose keys are interest tags and so an open set, and the location the profile editor writes, which a new account does not have — a key the client writes and the rules do not allow is a refused sign-up or profile save in Firebase mode only, where no demo-mode test would see it. And, separately, a fully populated private account is projected and searched for sentinels, so `email`, `birthdate`, `blocked`, `learning` or `usage` cannot reach the world-readable half even if somebody widens the rules to let them. |
 | `tests/pwa.test.js` | The manifest and the service worker carry no root-anchored assumptions, so the same `public/` installs and serves offline under a GitHub Pages project subpath as well as at a site root. |
 | `tests/seed.test.js` | The shape of all 32 seeded profiles against the data model, unique uids and emails, valid interest slugs, ages consistent with birthdates, and `seed-data.js` being in sync with `seed/profiles.json`. |
-| `tests/static.test.js` | Parses every HTML page: no dead local `src`/`href`, correct script load order, no inline scripts / `style=` / `on*=` handlers (the CSP would block them), no class token that the CSS does not define, and `lang` + `title` + viewport + description on every page. |
+| `tests/static.test.js` | Parses every HTML page: no dead local `src`/`href`, correct script load order, no inline script whose hash the CSP does not list and no `style=` attribute or `on*=` handler (the CSP would block them), no class token that the CSS does not define, and `lang` + `title` + viewport + description on every page. Then two things the pages depend on without naming them. The service worker's precache list names every file Hosting deploys, in any folder — the worker itself aside — and nothing that does not exist, so a file added in a folder of its own cannot ship uncached and missing offline. And every glyph the stylesheets generate carries alternative text, because generated content is read aloud: a decorative one is given `''`, and the plan rows' ✓ and ✕, the only thing separating an included feature from a missing one, are announced as *Included:* and *Not included:*. |
 | `tests/usage.test.js` | The daily counter's decision, `nextUsage(current, field, amount, today)`, as a pure function: same-day increment, a stale day resetting to zeros *before* the amount lands, an unknown field, a missing or corrupt record, the clamp at zero. Then the same decision through the demo adapter, so it is proven to persist and `canSpend` is proven to agree with it. |
 | `tests/utils.test.js` | The pure half of `ZC.util` — numbers, timing on a hand-rolled fake clock, dates, geo, hashing, avatars, URL parsing. The DOM half needs a live document and belongs to the browser suite. |
 
@@ -274,7 +293,7 @@ store and its daily counter, the auth backend, the pure half of the utilities, t
 schema, the static HTML. It cannot reach the flows that only exist in a DOM — signing in,
 the deck and its keyboard, the match burst, chat that persists, reporting someone, deleting
 your account, and the service worker serving the app with the network gone. Those live in
-`e2e/`: **275 checks** across the twelve specs that need nothing installed but a browser, each
+`e2e/`: **345 checks** across the twelve specs that need nothing installed but a browser, each
 run at 390x844 and most of them at 1280x800 as well — plus a thirteenth, `10-firebase.e2e.js`,
 which needs the Firebase emulators and skips, by name and reason, when they are not running.
 
@@ -297,7 +316,7 @@ Firebase rather than `localStorage`: the real SDK, real Auth, real Firestore, an
 read back out of the emulator instead of off the page. It drives the pages **with their real
 CSP meta tag** — the emulators are reached through the page's own origin rather than by
 relaxing the policy, which is the whole reason it can exist; the Limitations section explains
-the constraint it is working around. With both emulators up the run is **294 checks**, all
+the constraint it is working around. With both emulators up the run is **364 checks**, all
 passing.
 
 It did not start that way. On its first run one check was red, and it had found a real bug:
@@ -309,7 +328,7 @@ fixture in `rules-tests/` ever used a null there. The rule now accepts null, and
 checks pin the shape.
 
 Without an emulator the runner prints `SKIP` and records nothing, so `npm run test:e2e` on a
-bare machine is still 275/275 — and CI runs it both ways, so the skip path and the emulator
+bare machine is still 345/345 — and CI runs it both ways, so the skip path and the emulator
 path are each exercised on every push.
 
 ### Security rules tests
@@ -319,7 +338,7 @@ readable by other accounts, that nobody can mint a match with a stranger and the
 them, that the abuse queue cannot be enumerated — is a claim about one file,
 `firestore.rules`, because there is no server to enforce anything else. Reading it
 carefully is not evidence. `rules-tests/` executes it against the Firestore emulator:
-**188 checks**, including the attacks each rule exists to stop.
+**213 checks**, including the attacks each rule exists to stop.
 
 ```sh
 npm install --prefix /tmp/zc-rules @firebase/rules-unit-testing firebase-tools
@@ -337,17 +356,17 @@ The daily usage counter is the one piece of client logic where reading the code 
 as weak an argument as it was for the rules: whether two concurrent bumps collapse into one
 is a property of a real database, not of anything visible in the file. `store-tests/` loads
 the **shipped** `public/js/data-store.js` into Node — `window` aliased to `globalThis`,
-`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **228
+`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **261
 checks**, including 20 concurrent `bumpUsage` calls on one document storing exactly 20, the
 midnight roll-over happening inside the same transaction, a bump writing `usage` and nothing
-else, 30 swipes replaying the deck's real learning-save-then-bump ordering and storing exactly
-30, an account deletion that has to leave nothing of itself in any collection, a 520-message
+else, 30 bumps each with a whole-document save in flight across it storing exactly 30, an
+account deletion that has to leave nothing of itself in any collection, a 520-message
 conversation that has to stay live at its newest end, survive a rewind, and leave nothing
 underneath it when it is finally unmatched, a page load whose bill is counted
 document by document and has to come out the same against a swipe history twice as long — and
 a match document the rules refuse, which has to come back as "no match" rather than as a
-swipe the deck believes it lost, and the messaging and abuse-report paths — fifteen of the
-thirty-five facade methods had never run against a real Firestore at all, so the documents
+swipe the deck believes it lost, and the messaging and abuse-report paths — of what are now
+thirty-six facade methods, fifteen had never run against a real Firestore at all, so the documents
 the adapter writes had never met the rules that judge them. And, in both directions, the two documents an account is
 split across: the counter the transaction stores and the projection the profile save
 publishes are each replayed against the real `firestore.rules` on a separate project, because
@@ -391,8 +410,12 @@ account from both directions:
   `npm test` on every push.
 - each runner compares its own summary against the same file at the end of a **complete**
   run, and fails if they disagree. A filtered run counts less by design and is not checked.
+  The browser suite has two complete shapes, with and without the Firebase spec, and a total
+  for each; a complete run in which any other spec skipped fails rather than passing
+  uncompared, because nothing claims a number for it.
 - `npm run check:claims` covers the one total no test inside the run can see: `npm test`'s
-  own. It runs the suite in a child process and reads the count out of the TAP summary.
+  own. It runs the suite in a child process and reads the count out of the TAP summary, and
+  CI's `verify` job runs it straight after `npm test`.
 
 So a suite that grows fails its own run until `scripts/claims.js` is updated, and updating
 that file fails `npm test` until this README agrees. There is no order in which the two can
@@ -401,21 +424,23 @@ while keeping its number — and `scripts/claims.js` says so rather than implyin
 
 ### CI
 
-`.github/workflows/ci.yml` has three jobs. `verify` runs exactly `npm run check:seed` and
-`npm test` on every push and pull request, across a Node 20 and Node 22 matrix (`fail-fast: false`, so one
-version failing still reports the other) — no install, no browser, seconds. Two majors are
-deliberate: pinning a single one once hid a real breakage, because the test runner stopped
-matching a positional `tests/` directory argument after Node 20 and `npm test` silently ran
-nothing on newer runtimes. `e2e` is separate and runs the browser suite, installing
-Playwright and Chromium into the runner's temp directory — never into the repo — in a step
-of its own, so a failed download reads as infrastructure rather than as a red test.
-`emulator` does the same for the Firestore emulator, and runs both suites that need one —
-`firestore.rules`, then the shipped store — inside a single boot, because booting costs more
-than either suite does. The `e2e` job runs the browser suite twice: once bare, which is what
-a contributor with nothing installed gets and which proves the Firebase spec skips rather
-than silently passing, and once inside `emulators:exec`, which is the only run in which every
-spec executes and therefore the only one that can hold the 294-check total to account. There are no secrets and no deploy step — deploying stays a
-deliberate local `npm run deploy`.
+`.github/workflows/ci.yml` has three jobs. `verify` runs `npm run check:seed`, `npm test`
+and `npm run check:claims` — the last runs the unit suite a second time, to hold its total
+to `scripts/claims.js` as described above — on every push and pull request, across a Node 20
+and Node 22 matrix (`fail-fast: false`, so one version failing still reports the other) — no
+install, no browser, seconds. Two majors are deliberate: pinning a single one once hid a
+real breakage, because the test runner stopped matching a positional `tests/` directory
+argument after Node 20 and `npm test` silently ran nothing on newer runtimes. `e2e` is
+separate and runs the browser suite, installing Playwright and Chromium into the runner's
+temp directory — never into the repo — in a step of its own, so a failed download reads as
+infrastructure rather than as a red test. `emulator` does the same for the Firestore
+emulator, and runs both suites that need one — `firestore.rules`, then the shipped store —
+inside a single boot, because booting costs more than either suite does. The `e2e` job runs
+the browser suite twice: once bare, which is what a contributor with nothing installed gets
+and which proves the Firebase spec skips rather than silently passing, and once inside
+`emulators:exec`, which is the only run in which every spec executes and therefore the only
+one that can hold the 364-check total to account. There are no secrets and no deploy step —
+deploying stays a deliberate local `npm run deploy`.
 
 ---
 
@@ -480,17 +505,24 @@ deliberate local `npm run deploy`.
   projection's key list is closed with `hasOnly` so a tampered client cannot widen it.
 - **Strict CSP.** `firebase.json` ships
   `script-src 'self' 'sha256-hLOYNm57…' https://www.gstatic.com https://apis.google.com`,
-  `object-src 'none'`, `frame-ancestors 'none'` and friends. There is exactly **one** inline
-  `<script>` in the codebase and no `style="…"` attribute at all — styles that must be
-  dynamic are set through the CSSOM. The one script is in `404.html`, which resolves its
-  links against the service worker's scope so a nested missing path still points somewhere
-  real; it cannot be an external file, because the 404 page has to answer for paths whose
-  own relative script URLs would 404 in turn. It is allowed by the `sha256-` above and by
-  nothing else, so editing that block breaks it until the hash is recomputed —
+  `object-src 'none'`, `frame-ancestors 'none'` and friends. Its `connect-src`, the way out
+  for anything an injected script could read, names only the page's own origin and hosts
+  under `googleapis.com`, because the three Firebase SDKs the pages load were measured to
+  contact nothing else; `tests/csp-sync.test.js` fails on any source it does not list with a
+  reason. There is exactly **one** inline `<script>` in the codebase and no `style="…"`
+  attribute at all — styles that must be dynamic are set through the CSSOM. The one script
+  is in `404.html`, which resolves its links against the service worker's scope so a nested
+  missing path still points somewhere real; it cannot be an external file, because the 404
+  page has to answer for paths whose own relative script URLs would 404 in turn. It is
+  allowed by the `sha256-` above and by nothing else, so editing that block breaks it until
+  the hash is recomputed —
   `tests/static.test.js` fails the build for a second inline body, for a `style=` attribute,
-  for an `on*=` handler, and for a hash that no longer matches the script it allows. Every page also carries
-  the policy as a `<meta>` tag, because GitHub Pages cannot set headers; that copy is what
-  makes it strict on a laptop too, and it has a cost — see Limitations.
+  for an `on*=` handler, and for a hash that no longer matches the script it allows. A hash
+  pins the bytes and not what they do, so an edit that is re-hashed passes that check:
+  `tests/injection.test.js` reads the body itself, for the same sinks it looks for in every
+  other shipped script. Every page also carries the policy as a `<meta>` tag, because GitHub
+  Pages cannot set headers; that copy is what makes it strict on a laptop too, and it has a
+  cost — see Limitations.
 - **No way to turn a string into markup at all.** Every bio, name, message and location label
   is inserted with `textContent` (via `ZC.util.el({ text })`), and there is no longer any
   escape hatch to forget: `el`'s old `html` prop — the project's one `innerHTML` assignment,
@@ -613,8 +645,11 @@ These are real, and worth knowing before you show this to anyone:
   the Firebase team: *"Assuming those are on the same device, yes they share the same
   listener and the query will only happen once. This is only the case because the queries
   are exactly the same."* The suite's counter tallies per delivered callback, which is the
-  right model for the first-snapshot-then-changes rule and the wrong one here — the one
-  place the instrument and the bill come apart, and the place it was believed anyway.
+  right model for the first-snapshot-then-changes rule and the wrong one here — a place the
+  instrument and the bill come apart, and the place it was believed anyway. It is not the
+  only one: a `get()` of a query a live listener already holds is counted document by
+  document too, though the SDK can answer it from the listener's target, and
+  `store-tests/harness.js` says to treat such a count as an upper bound.
   What sharing actually earns is that the property holds **by construction** rather than by
   an undocumented optimisation that survives only while the two queries stay byte-identical;
   plus one error channel, one cached first delivery for a late subscriber, and one
@@ -648,7 +683,16 @@ These are real, and worth knowing before you show this to anyone:
   person waiting — their like, and then a `get` to learn whether it had been answered — and
   the second was a read of a document that, for a like still waiting, by definition does not
   exist. It now asks through the same batched lookup the deck uses, ten people at a time:
-  nine people waiting went from nineteen reads on every page to eleven.
+  nine people waiting went from nineteen reads on every page to eleven. And on a load like the
+  ones measured, `matches.html` no longer pays for that lookup twice. On premium its
+  who-liked-you list asks for the same people the badge is counting, and in a browser in
+  firebase mode it asked before the badge's first count had arrived on every load measured,
+  so both read the account and ran the lookups. A
+  list that asks before that first count now waits for the badge's answer instead: three
+  billed reads fewer at twelve people waiting, the account and two lookups. It never takes
+  the word of a count that has already delivered, because such a count cannot hear you
+  answering somebody from another tab. (The sender query was never paid twice: a `get` of a
+  query a listener already holds is answered from that listener's target.)
 
   One part of it was being paid over and over, and is not any more. Every page here is its
   own HTML document, so the per-page memo behind the faces starts empty on every navigation:
@@ -667,7 +711,11 @@ These are real, and worth knowing before you show this to anyone:
   ways a cache is worse than no cache — an entry past its window, a clock corrected
   backwards, a face filed under the wrong uid, an older stored shape, a cache that is not
   JSON, storage that is full, and a profile that is missing and must not be remembered as
-  missing.
+  missing. On premium the who-liked-you panel files its faces in the same cache, after the
+  list, and eviction used to go by age alone: with more than forty faces between the two, the
+  likers outlived the conversations the cache is for, and the next page load paid for those
+  again. A fresh conversation face now goes last, and the spec holds the panel to evicting
+  none of them.
 - **Client-side gating is only as strong as the Firestore rules.** Daily like limits, premium
   features and rewinds are enforced in the browser because the free plan has no server to
   enforce them on. A determined user with devtools can bypass any of it. The rules stop data
@@ -687,18 +735,24 @@ These are real, and worth knowing before you show this to anyone:
   bump is now a single `runTransaction`: the user document is read *inside* the transaction, a
   pure function decides the new `usage` map, and `tx.update` writes that one field. Fixing the
   bump alone turned out not to be enough, and the tests that caught it are the point of this
-  section: `updateUser` was a whole-document read-modify-write, so the deck's un-awaited
-  learning save — fired on every swipe, just before the bump — reliably overwrote the
-  increment the transaction had just committed. Making the bump atomic actually made that
-  *worse*, because a one-round-trip transaction commits early enough to lose the race. So
-  `updateUser` is now transactional too, which is the real fix: any two concurrent writes to
-  the user document used to lose data this way, not just the counter.
+  section: `updateUser` was a whole-document read-modify-write, and the deck then saved the
+  learning map through it on every swipe, un-awaited across the counter bump that followed
+  on a like or a super like — so whenever that save read the document before the bump
+  committed and wrote it back after, it overwrote the increment the transaction had just
+  committed. Making the bump atomic actually made that *worse*, because a one-round-trip
+  transaction commits early enough to lose the race. So `updateUser` is now transactional
+  too, which is the real fix: any two concurrent writes to the user document used to lose
+  data this way, not just the counter.
   None of that is asserted from reading the code. `store-tests/` loads the **shipped**
   `public/js/data-store.js` and drives it against the Firestore emulator, reading back the
   stored document: 20 concurrent bumps store exactly 20 (the old shape stored **1**), 20
-  racing across midnight likewise, and 30 swipes replaying the deck's exact
-  learning-then-bump ordering store exactly 30 — that last check stored **19 of 30** and
-  **17 of 30** against this round's own first attempt, which is how the regression was found.
+  racing across midnight likewise, and 30 bumps each with a whole-document save in flight
+  across it store exactly 30 — that last check, the deck's own ordering when it was written,
+  stored **19 of 30** and **17 of 30** against this round's own first attempt, which is how
+  the regression was found. The deck no longer makes that call: it finishes the bump first,
+  when the swipe has one, and then saves the learning map through `saveLearning`, a
+  single-field write with nothing to read, so the check now stands for the overlap nothing
+  sequences — a profile or settings save landing while a swipe bumps the counter.
   What is *not* fixed, and is worth knowing:
   - **Offline, nothing is stored.** A transaction needs a server round-trip, so it fails with
     no connection; the store warns, persists nothing, and returns the figure it computed —

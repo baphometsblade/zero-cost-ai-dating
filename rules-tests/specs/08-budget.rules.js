@@ -9,17 +9,35 @@
 
    `users/{uid}` is the document that gets close. It carries fourteen top-level
    keys, four nested maps and about forty-five validated fields, and `userDocOk`
-   checks all of them on every create. When this spec was written the file had
+   checks all of them on every write. When this spec was written the file had
    room for **eleven** more trivial clauses before every account creation in the
    app would have started failing. Nothing measured that, nothing mentioned it,
    and the way it was found was by adding six clauses and watching every valid
    write in the suite turn red at once.
 
    So it is measured here, the same way: pad `userDocOk` with a known number of
-   always-true clauses and find where a plain, valid user document stops being
+   always-true clauses and find where a valid user document stops being
    accepted. The number that comes out is how many clauses the next person has
    to spend before this file stops working — and if it is small, they need to
    know that before they write the clause, not after.
+
+   It is measured on the writes that cost the most, and for a while it was not.
+   Every probe used to CREATE a FREE account. The app's routine writes to this
+   document are updates — `setLastActive` as pages load, `setLearning` on every
+   swipe, `bumpUsage` on every like — and an update runs `identityUnchanged()`
+   on top of `userDocOk`; a premium account costs more again, because its
+   `planSince` is a stamp and `stampOk` runs on it. Measured against the rules
+   of the day, on the document this spec writes (`h.userDoc`, whose profile
+   sets a location): five clauses to spare creating it as a free account, one
+   updating it, three creating it as a premium one, and none updating it as
+   premium — that write was already over the limit. The location is what tipped
+   it: with `location: null` the same premium update had nine to spare. So the
+   shipped upgrade, `updateUser` with `plan` and `planSince`, run through those
+   rules as the account's owner, was refused as a flat `permission-denied` for
+   an account with this profile and accepted for the same account without the
+   location, while this spec reported five clauses of headroom. Both paths are
+   measured now, on the costliest document the store writes, and the floor
+   applies to the lower.
 
    The margin is thin on purpose rather than by neglect: the alternative to
    spending it was leaving `profile.photos`, `profile.interests`, `blocked` and
@@ -43,10 +61,15 @@
 /* What this number is, and is not.
    ---------------------------------
    It is a measurement of the rules engine's own accounting, not of anything in
-   this repository, so it can move when the emulator does. It has been the same
-   on two independent machines — this sandbox and CI, both on firebase-tools
-   15.26.0 with emulator jar v1.22.0, which CI pins — but a version bump could
-   shift it either way without a line of this project changing.
+   this repository, so it can move when the emulator does. The single figure
+   this spec used to print, 5 for creating a free account, was the same on two
+   independent machines, a sandbox and CI, both on firebase-tools 15.26.0 with
+   emulator jar v1.22.0, which CI pins; that old spec, run on the old rules
+   with firebase-tools 15.32.1, which fetches the same jar, still prints 5. The
+   two figures this spec prints now, for creating and for updating a premium
+   account, have been measured on one machine only, on 15.32.1, and until CI
+   prints the same nothing says they reproduce. A version bump could shift any
+   of them without a line of this project changing.
 
    If that happens the check is still telling the truth: there is now less room
    than there was. What it cannot tell you is whether the cause was your edit or
@@ -67,6 +90,21 @@ const PAD = ' && d.uid is string';
 
 /** Where in userDocOk the padding goes — a clause the validator always reaches. */
 const ANCHOR = "d.plan in ['free', 'premium']";
+
+/**
+ * What every probe writes on top of `h.userDoc`, which is a free account with
+ * every other optional field filled. A free account's `planSince` is null, so
+ * the `stampOk` call behind it never runs; a premium account's is a stamp, and
+ * the store writes both shapes. This is the costlier one. With it, every
+ * `!('k' in x) ||` and every `== null ||` in userDocOk and the validators it
+ * calls takes its longer arm — every key is present, and `birthdate`, `age`,
+ * `location`, `planSince` and `lastActiveAt` are all set — so no part of the
+ * validator is skipped for it.
+ */
+const COSTLIEST = { plan: 'premium', planSince: '2026-01-01T00:00:00.000Z' };
+
+/** Both ways the app writes users/{uid}, and the floor holds on each. */
+const WRITES = ['create', 'update'];
 
 /**
  * The batch size `public/js/data-store.js` uses for its swipe lookups.
@@ -102,21 +140,29 @@ module.exports = {
     let projects = 0;
 
     /**
-     * Does a plain, valid user document write succeed under these rules?
+     * Does the costliest valid user document write succeed under these rules?
      * Its own project each time, because a ruleset is per-project.
      * @param {string} rules the ruleset to install
+     * @param {string} write 'create', or 'update' to seed the document first so
+     *   that the same call is evaluated by `allow update`
      * @returns {Promise<boolean>} true when the write was allowed
      */
-    async function accepts(rules) {
+    async function accepts(rules, write) {
       projects += 1;
       const env = await testing.initializeTestEnvironment({
         projectId: 'demo-zc-budget-' + projects,
         firestore: { rules: rules, host: address.host, port: address.port }
       });
+      const doc = h.userDoc('budget-user', COSTLIEST);
+      if (write === 'update') {
+        await env.withSecurityRulesDisabled(function (c) {
+          return c.firestore().doc('users/budget-user').set(doc);
+        });
+      }
       let allowed = true;
       try {
         await env.authenticatedContext('budget-user').firestore()
-          .doc('users/budget-user').set(h.userDoc('budget-user'));
+          .doc('users/budget-user').set(doc);
       } catch (err) {
         allowed = false;
       }
@@ -129,33 +175,45 @@ module.exports = {
       return source.replace(ANCHOR, ANCHOR + new Array(n).fill(PAD).join(''));
     }
 
-    // Nothing below means anything if the unpadded file is already over.
-    const base = await accepts(source);
-    t.check('a plain, valid user document is accepted by the shipped rules',
-      base, base ? 'allowed' : 'DENIED — userDocOk is already over the 1000-expression limit');
-    if (!base) return;
+    const headroom = {};
+    for (const write of WRITES) {
+      // A search on a path the unpadded file is already over on would mean
+      // nothing, so that path skips it. It does not end the spec: the swipes
+      // measurement below is independent, and is worth having on the run that
+      // most needs reading.
+      const base = await accepts(source, write);
+      t.check('the costliest valid user document is accepted by the shipped rules on ' + write,
+        base, base ? 'allowed' : 'DENIED — userDocOk is already over the 1000-expression limit on ' + write);
+      if (!base) continue;
 
-    let lo = 0;
-    let hi = SEARCH_CEILING;
-    while (lo < hi) {
-      const mid = Math.ceil((lo + hi) / 2);
-      if (await accepts(padded(mid))) lo = mid; else hi = mid - 1;
+      let lo = 0;
+      let hi = SEARCH_CEILING;
+      while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2);
+        if (await accepts(padded(mid), write)) lo = mid; else hi = mid - 1;
+      }
+      headroom[write] = lo;
     }
-    const headroom = lo;
 
-    // Without this the measurement could be vacuous: a harness that allowed
-    // every write would report SEARCH_CEILING and sail past the floor below.
-    t.check('the ceiling is real — enough padding does break the rules',
-      headroom < SEARCH_CEILING,
-      headroom + ' clauses fit, searched up to ' + SEARCH_CEILING);
+    if (WRITES.every(function (write) { return write in headroom; })) {
+      const least = Math.min(headroom.create, headroom.update);
+      const most = Math.max(headroom.create, headroom.update);
+      const both = 'create ' + headroom.create + ', update ' + headroom.update;
 
-    t.check('and userDocOk keeps at least ' + FLOOR + ' clauses of headroom under it',
-      headroom >= FLOOR,
-      headroom + ' more `' + PAD.trim() + '` clauses fit before every user write fails. ' +
-      (headroom >= FLOOR
-        ? 'Spend it knowing a clause that is a function call costs about 2.2 of these.'
-        : 'Buy some back before adding anything: inline a helper, or drop a check ' +
-          'that a write path already enforces.'));
+      // Without this the measurement could be vacuous: a harness that allowed
+      // every write would report SEARCH_CEILING and sail past the floor below.
+      t.check('the ceiling is real — enough padding does break the rules',
+        most < SEARCH_CEILING,
+        both + ' clauses fit, searched up to ' + SEARCH_CEILING);
+
+      t.check('and userDocOk keeps at least ' + FLOOR + ' clauses of headroom on every write path',
+        least >= FLOOR,
+        least + ' more `' + PAD.trim() + '` clauses fit before a user write fails (' + both + '). ' +
+        (least >= FLOOR
+          ? 'Spend it knowing a clause that is a function call costs about 2.2 of these.'
+          : 'Buy some back before adding anything: inline a helper, or drop a check ' +
+            'that a write path already enforces.'));
+    }
 
     /* ---- the same budget, seen from the swipes read rule --------------- */
 

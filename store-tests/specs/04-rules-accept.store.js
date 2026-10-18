@@ -7,11 +7,14 @@
    createdAt stay frozen. That was reasoning, not evidence: nothing had ever
    run a real bump past the real rules.
 
-   The client SDK cannot mint an auth token without the Auth emulator, so the
-   rest of this suite runs on a project with open rules and could not tell.
-   This spec closes the loop the only honest way left: let the shipped
-   transaction store a value, then replay *that exact value* against the real
-   ruleset as the document's owner.
+   The store this suite drives is connected to the emulator without an auth
+   token, so most of the suite runs on a project with open rules and could not
+   tell. This spec closes the loop by replay: let the shipped transaction
+   store a value, then write *that exact value* against the real ruleset as
+   the document's owner. (The other way through is to point `ZC.firebase.db`
+   at a rules-unit-testing authenticated context, so the shipped call itself
+   runs under the real rules; 08-conversation does that to rewind one swipe
+   twice.)
    ========================================================================== */
 'use strict';
 
@@ -66,13 +69,18 @@ module.exports = {
 
     /* ---- and the same loop for the public projection --------------------- */
 
-    // The other document the store writes, and the one with a history. It is
-    // published best-effort — a failed projection write must never fail the
-    // profile save that caused it — so if the rules refuse it, nothing throws,
-    // nothing is logged where anybody looks, and the account simply stops
-    // appearing in other people's decks. That has happened once already, when
-    // the projection emitted `lastActiveAt: null` and the rules accepted that
-    // key only as a string.
+    // The other document the store writes. It used to be published
+    // best-effort, after the profile save and outside it, so a refusal would
+    // have thrown nothing, logged nothing where anybody looks, and quietly
+    // taken the account out of other people's decks. The rules and the data
+    // model have disagreed about a value before — on the private document:
+    // userDocOk accepted `lastActiveAt` only as a string while normalizeUser
+    // writes null for an account never seen, and users/{uid} writes were
+    // refused (58e16d4). updateUser now writes the projection in the same
+    // transaction as the account, so a refusal fails the whole save instead;
+    // createUser's first projection is still best-effort and only warns.
+    // Either way only the real rules can refuse it, and most of this suite
+    // runs on open ones.
     //
     // `tests/projection.test.js` compares the projection's KEY SET against the
     // rules' allowlists, with no emulator. It cannot compare values, and both

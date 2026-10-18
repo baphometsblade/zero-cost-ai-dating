@@ -2,9 +2,11 @@
 
 The flows in here are DOM-driven, so no unit test can reach them: demo sign-in, the deck
 and its keyboard, the match burst, chat persistence, profile and settings, reporting a
-user (filing it, retracting it, and the block-and-unmatch branch), account deletion, the
-phone layout, offline navigation once the service worker has precached, and — against the
-emulators, when they are running — the Firebase path itself.
+user (filing it, retracting it, and the block-and-unmatch branch), the data export and
+account deletion, the deck fitting the viewport and every signed-in page held to its
+width, offline navigation once the service worker has precached, hosting under a subpath,
+the premium simulation, what a keyboard or screen-reader user is given, rewind, and —
+against the emulators, when they are running — the Firebase path itself.
 Every check runs at 390x844 and at 1280x800 unless the spec says otherwise.
 
 ## Running it
@@ -31,9 +33,9 @@ npm run test:e2e -- --viewport=mobile  # only 390x844
 ## The Firebase spec, and the emulators
 
 `specs/10-firebase.e2e.js` is the only spec that runs the app against Firebase rather than
-against localStorage. It needs the Firestore **and** Auth emulators; with neither reachable
-it prints `SKIP` and contributes no checks, so `npm run test:e2e` on a machine with no
-emulator is exactly the run it always was.
+against localStorage. It needs the Firestore **and** Auth emulators; with either one
+unreachable it prints `SKIP` and contributes no checks, so `npm run test:e2e` on a machine
+with no emulator is exactly the run it always was.
 
 firebase.json ships an `emulators` block — `firestore` on 8080, `auth` on 9099, the UI off
 — so the emulators start from the repository itself:
@@ -90,7 +92,7 @@ from.
 
 | Path | What it is |
 | --- | --- |
-| `run.js` | the runner: loads specs, opens a context per spec and viewport, prints results, exits non-zero on any failure |
+| `run.js` | the runner: loads specs, opens a context per spec and viewport, prints results, exits non-zero on any failure, and on a complete run (no spec filter, no `--viewport`) holds the count to the total `scripts/claims.js` claims for it |
 | `harness.js` | finding Playwright, serving `public/` the way Firebase Hosting does — both halves of `cleanUrls`, the extensionless page AND the 301 for a path that names the `.html`, which it used to skip — optionally forwarding the emulators' paths through that same origin, opening a browser session, and the page steps every spec shares |
 
 One flow per spec, run in file-name order. `tests/docs.test.js` fails if a spec exists
@@ -100,24 +102,42 @@ without a row here, so this list cannot quietly fall behind `specs/`.
 | --- | --- |
 | `specs/01-deck.e2e.js` | signing in, the deck rendering with scores and the reasons behind them, and the full keyboard path through it |
 | `specs/02-match-burst.e2e.js` | right-swiping somebody who already liked you: the burst, and the icebreakers it offers |
-| `specs/03-matches.e2e.js` | the matches list, opening a conversation, sending a message, and finding it still there after a reload |
-| `specs/04-profile-settings.e2e.js` | editing your profile and changing your settings, including the fields the deck then filters on |
+| `specs/03-matches.e2e.js` | the matches list, opening a conversation, sending a message, and finding it still there after a reload, and much of what surrounds that. The list's relative stamps keep ticking with no conversation open, after Back on a phone, and beside a conversation that has ended. On a phone, a long conversation opens at its newest message with the composer on screen. A conversation longer than Firestore's live window (simulated, because the demo store delivers every message) is extended rather than rebuilt when a new message slides the window, so that one message is announced and the reader's selection and scroll position survive it. A counter the store refuses to clear is still shown as unread, and is asked again when the reader comes back to the tab rather than by every delivery in between. A press on a row outlasts a list delivery that changes nothing on it. And the spec drives what the page says and does when its live streams fail or the browser says it is offline, and a conversation restored from the back-forward cache, or ended by the other side |
+| `specs/04-profile-settings.e2e.js` | editing your profile and changing your settings, including the fields the deck then filters on, a location label emptied and saved, and what Settings says when a preference fails to save or your reports cannot be read |
 | `specs/05-reports.e2e.js` | reporting somebody, retracting the report, and the block that outlives it |
-| `specs/06-layout.e2e.js` | the deck fitting the viewport — measured, not eyeballed, at every size the suite runs |
+| `specs/06-layout.e2e.js` | the deck fitting the viewport — measured, not eyeballed, at every size the suite runs: on a phone, the action row on screen and the page not scrolling; on a desktop, every swipe button somewhere a pointer can land on it without a sideways scroll. Then every signed-in page, held to the viewport's width, and loaded with the layout shift that moves `<main>` added up, which has to come to nothing: no page may jump when the shared header mounts |
 | `specs/07-offline.e2e.js` | the service worker precaching, then serving the app with the network gone |
-| `specs/08-delete-account.e2e.js` | deleting your account, and what is left behind afterwards (nothing that names you) |
-| `specs/09-subpath.e2e.js` | the one spec that skips the shared server: it mounts `public/` at `/zero-cost-ai-dating`, the way GitHub Pages serves a project site, and proves navigation, the service worker and the 404 page all survive the subpath |
+| `specs/08-delete-account.e2e.js` | exporting your data first — whole, marked where it is not, or refused when your swipe history cannot be read — then the exact phrase that has to be typed before your account can be deleted, the deletion, and the deck turning the deleted account away afterwards |
+| `specs/09-subpath.e2e.js` | hosting under a subpath: where the shared server serves `public/` at the root, this spec starts its own with `public/` mounted at `/zero-cost-ai-dating`, the way GitHub Pages serves a project site, and proves navigation, the service worker and the 404 page all survive the subpath, and that with the server stopped the worker still answers the bare subpath with the landing page and the clean `matches` URL with the matches page |
 | `specs/10-firebase.e2e.js` | the one spec that runs in firebase mode, against the emulators, and reads every result back out of Firestore |
-| `specs/11-subscription.e2e.js` | the premium simulation: that the page says plainly it takes no money and asks for no card, that declining the confirmation changes nothing, and that accepting it actually moves the entitlement the deck reads |
-| `specs/12-accessibility.e2e.js` | the promises the docs make about keyboards and motion, executed: landmarks and accessible names on every page, `prefers-reduced-motion` actually stilling the deck, the modal's focus trap in both directions with Escape and focus restored, and the two pane swaps that strand a keyboard user if focus is not moved deliberately |
+| `specs/11-subscription.e2e.js` | the premium simulation: that the page says plainly it takes no money and asks for no card, that declining the confirmation changes nothing, and that accepting it actually moves the entitlement the deck reads. The entitlement is read at the gates, not off the plan field: the daily limit in the deck's hint and the `adaptive` option the ranking engine is handed, with the limits table changed underneath once to show that the deck, the plans page and a match's card on the matches page all follow the same table. Also that each of the free plan's rows tells a screen reader whether the feature is included, that a usage read that fails is said so rather than painted as a full allowance, that a switch reads the account twice — each one read of `users/{uid}` in firebase mode — and not a third time for counters the write already returned, and that counters it returns from a day that has ended are asked of the store again rather than shown |
+| `specs/12-accessibility.e2e.js` | the promises the docs make about keyboards and motion, executed: landmarks and accessible names on every page, `prefers-reduced-motion` actually stilling the deck, the modal's focus trap in both directions with Escape and focus restored, and the two pane swaps that strand a keyboard user if focus is not moved deliberately. It also checks what a screen reader is handed. The conversation list reaches the browser's accessibility tree as one list item per conversation, and each row is named by what it shows, the message included. The daily-limit banner is announced once, by a live region that was already on the page and exposed, and that region is not written to again: not by the countdown ticking in the last hour before midnight, and not when a like is refused under the banner, which the deck says in its own region |
 | `specs/13-rewind.e2e.js` | rewind puts back a swipe nobody answered, and refuses to take down a match that formed after it — the reciprocal like arriving while the card is still the last thing in the deck's history, which the deck's own `matched` flag was stamped too early to see; the refusal has to reach the toast and the live region, and neither the match nor the swipe may be deleted |
 
 A spec exports `{ title, viewports, run(t, page, ctx) }`. `t.check(name, ok, detail)`
-records one named expectation and keeps going; throwing aborts that spec and fails it.
+records one named expectation and keeps going; throwing aborts that spec and fails it,
+under the name `spec ran to completion` rather than the name of whatever was being waited
+for. So a wait for the thing a check names gets a bound of its own, and its answer is what
+the check records: a wait left to the session's 20-second default throws when it runs out,
+and a `t.check(name, true)` written after it can only pass. Nor can `page.waitForFunction`
+wait on the store: a predicate that returns a Promise counts as true on its first call, so
+the wait settles on that one read. Poll inside `page.evaluate` with a deadline instead, as
+`waitForSwipes` in `specs/13-rewind.e2e.js` does. `navigator.serviceWorker.ready` is the
+same trap from the other side — it settles only once a worker is active, and
+`page.evaluate` has no timeout of its own, so a broken install hung the run there — which is
+why `specs/07-offline.e2e.js` and `specs/09-subpath.e2e.js` race it against 15 seconds. And
+a navigation that failed is kept apart from the title of one that landed: the failure text
+carries the URL, so `/Matches/i` once passed on "…/matches" in an error message.
+
 Two optional exports: `session`, the options its browser context wants (see
 `harness.openSession`), and `available()`, which returns `{ ok, why }` — a spec whose
 requirements are missing is skipped by name and reason, and records nothing at all, so a
-run that could not test something never reports a check for it.
+run that could not test something never reports a check for it. On a complete run — every
+spec, at every viewport it declares — only the Firebase spec may skip: `scripts/claims.js`
+claims one total for a run in which nothing skipped and one for a run in which that spec
+alone did, and `run.js` fails a complete run in which any other spec skipped, because
+there is no number to hold it to. A second spec that grows an `available()` needs `run.js`
+taught its skip shape and a total of its own in `scripts/claims.js`.
 
 Waiting for a page by URL goes through `harness.pageUrl(name)`, never a `'**/dashboard.html'`
 glob. The app links with relative `.html` URLs, so on GitHub Pages the address bar ends in

@@ -12,6 +12,8 @@
      (c) no inline <script> bodies, no style="…", no on*="…" handlers (CSP)
      (d) every class token used in HTML is defined somewhere in the CSS
      (e) every page has <html lang>, <title>, viewport and description
+     (f) sw.js CORE lists exactly what Hosting deploys, worker aside
+     (g) every glyph the stylesheets generate has alternative text
 
    Failures print the offending page and line, because a static check nobody
    can act on is worse than no check at all.
@@ -486,17 +488,26 @@ test('(f) sw.js CORE precache list matches the shipped assets', function () {
   // And every shell asset must be listed — an app shell that silently skips a
   // page or script is not usable offline. The worker itself is excluded (the
   // browser manages its lifecycle; caching it would pin old versions).
+  //
+  // Everything Hosting deploys, not a list of directories and extensions: this
+  // walked '', 'css' and 'js' for five extensions, so an image or font added in
+  // its own folder shipped uncached with this check green. Measured: a
+  // public/img/hero.png the landing page linked passed. Skipped here is what
+  // firebase.json's "ignore" keeps off Hosting — dotfiles, node_modules and
+  // *.test.js — because what is never deployed cannot be precached.
   const expected = [];
-  ['', 'css', 'js'].forEach(function (dir) {
-    const abs = path.join(PUBLIC_DIR, dir);
-    fs.readdirSync(abs).forEach(function (name) {
+  (function walk(dir) {
+    fs.readdirSync(path.join(PUBLIC_DIR, dir)).forEach(function (name) {
       const rel = dir ? dir + '/' + name : name;
+      if (name.charAt(0) === '.' || name === 'node_modules' || /\.test\.js$/.test(name)) return;
+      if (fs.statSync(path.join(PUBLIC_DIR, rel)).isDirectory()) { walk(rel); return; }
       if (rel === 'sw.js') return;
-      if (!/\.(html|css|js|svg|webmanifest)$/.test(name)) return;
-      if (!fs.statSync(path.join(abs, name)).isFile()) return;
       expected.push(rel);
     });
-  });
+  })('');
+  // A walk that stopped finding things would pass by checking nothing.
+  assert.ok(expected.length >= listed.length,
+    'the walk of public/ found ' + expected.length + ' files, fewer than the ' + listed.length + ' CORE lists');
   expected.forEach(function (rel) {
     if (listed.indexOf(rel) === -1) {
       problems.push('public/' + rel + ' is not in sw.js CORE — it will not be available offline');
@@ -504,4 +515,35 @@ test('(f) sw.js CORE precache list matches the shipped assets', function () {
   });
 
   assert.equal(problems.length, 0, report('Service worker precache problems:', problems));
+});
+
+test('(g) every glyph the stylesheets generate has alternative text', function () {
+  // Generated content is read aloud, so a decorative glyph is noise and a
+  // meaningful one needs words: the brand link was "♥ Zero Cost Dating", and a
+  // missing plan feature was a bare "✕". Each glyph is declared twice — plain,
+  // then with alternative text after the slash, which a browser that does not
+  // know the form ignores (style.css explains, above .nav-brand::before). A
+  // glyph declared only plainly fails here; '' alternative text is the honest
+  // way to say "decoration".
+  const problems = [];
+  let glyphs = 0;
+  ['style.css', 'components.css'].forEach(function (name) {
+    const css = fs.readFileSync(path.join(PUBLIC_DIR, 'css', name), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    const rule = /([^{}]+)\{([^{}]*)\}/g;
+    let m;
+    while ((m = rule.exec(css)) !== null) {
+      const plain = /(?:^|[;\s])content\s*:\s*('(?:[^'\\\n]|\\.)+'|"(?:[^"\\\n]|\\.)+")\s*;/.exec(m[2]);
+      if (!plain) continue;
+      glyphs += 1;
+      const literal = plain[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const alt = new RegExp('content\\s*:\\s*' + literal + '\\s*/\\s*(?:\'[^\'\\n]*\'|"[^"\\n]*")\\s*;');
+      if (!alt.test(m[2])) {
+        problems.push(name + ' ' + m[1].trim().replace(/\s+/g, ' ') + ': content ' + plain[1] +
+          ' has no alternative text — add content: ' + plain[1] + " / '…'; after it");
+      }
+    }
+  });
+  // Fourteen today; a parser that stopped finding them would pass by checking nothing.
+  assert.ok(glyphs >= 14, 'found only ' + glyphs + ' generated glyphs in the stylesheets');
+  assert.equal(problems.length, 0, report('Generated glyphs a screen reader reads raw:', problems));
 });

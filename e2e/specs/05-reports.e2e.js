@@ -195,14 +195,12 @@ module.exports = {
       return Promise.all([
         window.ZC.store.getUser(uid),
         window.ZC.store.getMatches(uid),
-        window.ZC.store.listCandidates(uid, { limit: 60 }),
         window.ZC.store.getMyReports(uid)
       ]).then(function (out) {
         return {
           blocked: (out[0] && out[0].blocked) || [],
           matched: out[1].map(function (match) { return match.otherUid; }),
-          candidates: out[2].map(function (user) { return user.uid; }),
-          reports: out[3].length
+          reports: out[2].length
         };
       });
     });
@@ -214,8 +212,33 @@ module.exports = {
     t.check('the unmatch went through with it',
       after.matched.length === 1 && after.matched.indexOf(target.uid) === -1,
       'matches=' + after.matched.join(','));
-    t.check('the blocked person is out of the deck',
-      after.candidates.indexOf(target.uid) === -1, 'candidates=' + after.candidates.length);
+
+    // Asked as things stand, the deck cannot show the block doing anything.
+    // Every conversation carries this account's own like on the other person —
+    // a match needs one, and the seed writes it for each — the unmatch leaves
+    // it in place, and somebody already swiped is out of the deck whatever the
+    // block list says. Measured: with both block filters deleted from the
+    // shipped store, this check passed as it was first written. So the like is
+    // taken back first, through the undoSwipe a rewind uses, which the store
+    // allows now that there is no match to protect; after that the block is
+    // the only thing that can keep this person out.
+    const deck = await page.evaluate(function (them) {
+      const store = window.ZC.store;
+      const uid = window.ZC.auth.current.uid;
+      return store.undoSwipe(uid, them).then(function () {
+        return Promise.all([store.getSwipes(uid), store.listCandidates(uid, { limit: 60 })]);
+      }).then(function (out) {
+        return {
+          liked: out[0].some(function (swipe) { return swipe.to === them; }),
+          candidates: out[1].map(function (user) { return user.uid; })
+        };
+      });
+    }, target.uid);
+    t.check('the block alone keeps the blocked person out of the deck',
+      !deck.liked && deck.candidates.indexOf(target.uid) === -1,
+      (deck.liked ? 'the like on them is still stored, so this measured the swipe filter; ' : '') +
+      (deck.candidates.indexOf(target.uid) !== -1 ? target.name + ' is a candidate again; ' : '') +
+      'candidates=' + deck.candidates.length);
     t.check('blocking leaves the report on file', after.reports === 1, 'stored=' + after.reports);
   }
 };

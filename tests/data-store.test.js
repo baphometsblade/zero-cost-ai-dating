@@ -690,6 +690,98 @@ test('getMyReports sorts newest first and returns copies; retractReport removes 
   await assert.rejects(store.retractReport(YOU, ''), /both accounts/);
 });
 
+test('reports that cannot be read are reported as a failure, not listed as none filed', async function () {
+  // The settings page draws an empty list as "You have not reported anyone." —
+  // on the one panel that is also the only way to retract a report. Reading the
+  // store through the forgiving helper turned an unreadable entry into exactly
+  // that list. Both ways storage fails are tried: a read that throws, and an
+  // entry that is not JSON.
+  await resetWorld();
+  await store.reportUser(YOU, 'maya-okonkwo', 'harassment', 'filed');
+  assert.equal((await store.getMyReports(YOU)).length, 1, 'healthy, to begin with');
+
+  const realGetItem = localStorageShim.getItem;
+  localStorageShim.getItem = function (key) {
+    if (key === KEYS.reports) throw new Error('storage is unavailable');
+    return realGetItem.apply(this, arguments);
+  };
+  try {
+    await assert.rejects(store.getMyReports(YOU), /storage is unavailable/, 'a read that throws rejects');
+  } finally {
+    localStorageShim.getItem = realGetItem;
+  }
+  assert.equal((await store.getMyReports(YOU)).length, 1, 'and the report was there all along');
+
+  backing.set(KEYS.reports, '{not json at all');
+  await assert.rejects(store.getMyReports(YOU), 'a corrupt entry rejects');
+});
+
+test('retracting a report from a store that cannot be read fails, rather than calling it gone', async function () {
+  // settings.js shows {removed: false} as "That report had already been
+  // removed." Through the forgiving helper an unreadable store answered exactly
+  // that while the report was still filed — the claim 14-reports forbids the
+  // Firestore adapter to make.
+  await resetWorld();
+  await store.reportUser(YOU, 'maya-okonkwo', 'harassment', 'filed');
+  const realGetItem = localStorageShim.getItem;
+  localStorageShim.getItem = function (key) {
+    if (key === KEYS.reports) throw new Error('storage is unavailable');
+    return realGetItem.apply(this, arguments);
+  };
+  try {
+    await assert.rejects(store.retractReport(YOU, 'maya-okonkwo'), /storage is unavailable/);
+  } finally {
+    localStorageShim.getItem = realGetItem;
+  }
+  assert.equal((await store.getMyReports(YOU)).length, 1, 'the report is still filed');
+  assert.deepEqual(await store.retractReport(YOU, 'maya-okonkwo'), { ok: true, removed: true },
+    'and withdrawing it works once storage is back');
+});
+
+test('the export\'s three reads reject on a store they cannot read, rather than answer with nothing', async function () {
+  // settings.js writes what getSwipes, getMatches and getMessages return into a
+  // file as the whole record, and says whether it is complete. Through the
+  // forgiving helpers an unreadable entry came back as no swipes, no matches or
+  // an empty conversation: an export missing all of it, saying nothing.
+  await resetWorld();
+  await store.recordSwipe(YOU, 'theo-lindqvist', 'pass');
+  assert.ok((await store.getSwipes(YOU)).length > 0, 'swipes, to begin with');
+  assert.ok((await store.getMatches(YOU)).length > 0, 'matches, to begin with');
+  assert.ok((await store.getMessages(DEVIN_MATCH, {})).length > 0, 'messages, to begin with');
+
+  const reads = [
+    [KEYS.swipes, function () { return store.getSwipes(YOU); }],
+    [KEYS.matches, function () { return store.getMatches(YOU); }],
+    [KEYS.messages, function () { return store.getMessages(DEVIN_MATCH, {}); }]
+  ];
+  for (const [key, read] of reads) {
+    backing.set(key, '{not json at all');
+    await assert.rejects(read(), key + ' that cannot be read must reject');
+  }
+});
+
+test('a store holding JSON that is not a map is a failed read, not an empty one', async function () {
+  // `[]` or a string parses, so it passed the strict reads' only check and came
+  // back as `{}`: the reports panel then said nobody had been reported, and an
+  // export with no swipes, matches or messages called itself complete. It is
+  // reset on the way past, as unparseable JSON is, so the fault is not sticky.
+  const reads = [
+    [KEYS.reports, function () { return store.getMyReports(YOU); }],
+    [KEYS.reports, function () { return store.retractReport(YOU, 'maya-okonkwo'); }],
+    [KEYS.swipes, function () { return store.getSwipes(YOU); }],
+    [KEYS.matches, function () { return store.getMatches(YOU); }],
+    [KEYS.messages, function () { return store.getMessages(DEVIN_MATCH, {}); }]
+  ];
+  for (const stored of ['[]', '"x"', '7']) {
+    for (const [key, read] of reads) {
+      await resetWorld();
+      backing.set(key, stored);
+      await assert.rejects(read(), /could not be read/, key + ' holding ' + stored + ' must reject');
+      await read();
+    }
+  }
+});
+
 /* ------------------------------------------------------------------------
    9. Account deletion
    ------------------------------------------------------------------------ */
@@ -1298,17 +1390,79 @@ test('the live views carry the public projection, not the private user document'
   // Demo mode stores whole user documents, so composing a view from one hands
   // the page the other person's email and block list — where firebase mode hands
   // it `discovery/{uid}`, which has neither. Adapter divergence, in the direction
-  // that leaks. Both halves are asserted: the projection is applied here, AND
-  // `getMatches` in this mode still is not, which is what makes this a
-  // divergence check rather than a shape check.
+  // that leaks. The stored document is checked for an address first, so the
+  // empty one below is the projection at work rather than a fixture with nothing
+  // to leak. That used to be shown by asserting `getMatches` in this mode still
+  // handed the address over; it was the same leak, and the next check holds it
+  // closed.
   await resetWorld();
-  const polled = await store.getMatches(YOU);
   const pushed = await firstDelivery(function (cb) { return store.listenMatchViews(YOU, cb); });
 
-  assert.ok(polled[0].other.email, 'the polled path still hands over the private document');
+  assert.ok(raw(KEYS.users)[pushed[0].otherUid].email, 'the stored document has an address to leak');
   assert.equal(pushed[0].other.email, '', 'the live view does not');
   assert.deepEqual(pushed[0].other.blocked, [], 'nor the block list');
   assert.equal(pushed[0].other.profile.birthdate, null, 'nor the birthdate');
+});
+
+test('getMatches and getMatch hand over the same projection, as the Firestore adapter does', async function () {
+  // The Firestore adapter builds every MatchView from `discovery/{uid}`, which
+  // never held an address, a birthdate or a block list. This adapter built them
+  // from the whole stored document, so one facade method returned the other
+  // person's private fields in one mode and not in the other: the divergence the
+  // live list was fixed for, left standing on the polled path beside it.
+  await resetWorld();
+  // Two accounts nothing else here subscribes to. The live list's memo of faces
+  // lasts as long as the page — in this file, as long as the process — so a
+  // face it kept from an earlier test's world would differ from this one's by
+  // its `lastActiveAt` alone. And a block list to leak, because an empty one
+  // satisfies "no block list" whether or not anything was projected.
+  await store.createUser('projected-a', { email: 'a@example.com' });
+  await store.createUser('projected-b', {
+    email: 'b@example.com', blocked: ['somebody-else'], profile: { birthdate: '1990-04-01' }
+  });
+  await store.recordSwipe('projected-a', 'projected-b', 'like');
+  const matchId = (await store.recordSwipe('projected-b', 'projected-a', 'like')).matchId;
+  const stored = raw(KEYS.users)['projected-b'];
+
+  const polled = await store.getMatches('projected-a');
+  const single = await store.getMatch(matchId, 'projected-a');
+  const pushed = await firstDelivery(function (cb) { return store.listenMatchViews('projected-a', cb); });
+
+  assert.ok(stored.email && stored.profile.birthdate && stored.blocked.length,
+    'the stored document has an address, a birthdate and a block list to leak');
+  assert.equal(polled.length, 1, 'the one conversation');
+  [polled[0], single].forEach(function (view, i) {
+    const via = i ? 'getMatch' : 'getMatches';
+    assert.equal(view.other.email, '', via + ' hands over no address');
+    assert.equal(view.other.profile.birthdate, null, via + ' hands over no birthdate');
+    assert.deepEqual(view.other.blocked, [], via + ' hands over no block list');
+  });
+  // Not merely scrubbed of three fields: the very document the live list
+  // delivers, so the two paths cannot drift apart again one key at a time.
+  assert.deepStrictEqual(polled[0].other, pushed[0].other, 'getMatches and the live list agree');
+  assert.deepStrictEqual(single.other, polled[0].other, 'and so does getMatch');
+});
+
+test('getPublicProfiles answers a list with the public projection, in both modes\' shape', async function () {
+  // The settings page names the accounts it has reported through this. The demo
+  // adapter's list read hands back stored documents, so the facade projects
+  // them, as the live list does: an address, a birthdate or a block list must
+  // not reach the page in one mode when `discovery/{uid}` never holds them in
+  // the other.
+  await resetWorld();
+  await store.createUser('listed-a', { email: 'a@example.com', displayName: 'Listed A' });
+  await store.createUser('listed-b', {
+    email: 'b@example.com', blocked: ['somebody-else'], profile: { birthdate: '1990-04-01' }
+  });
+  const faces = await store.getPublicProfiles(['listed-a', 'listed-b', 'listed-a', 'nobody', '']);
+  assert.deepEqual(Object.keys(faces).sort(), ['listed-a', 'listed-b'], 'one entry per account found, duplicates and blanks dropped');
+  assert.equal(faces['listed-a'].displayName, 'Listed A');
+  ['listed-a', 'listed-b'].forEach(function (uid) {
+    assert.equal(faces[uid].email, '', uid + ': no address');
+    assert.equal(faces[uid].profile.birthdate, null, uid + ': no birthdate');
+    assert.deepEqual(faces[uid].blocked, [], uid + ': no block list');
+  });
+  assert.deepEqual(await store.getPublicProfiles([]), {}, 'nothing asked, nothing answered');
 });
 
 test('and the projection keeps everything the conversation list scores on', async function () {

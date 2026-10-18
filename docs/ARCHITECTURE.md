@@ -83,7 +83,7 @@ Rules that keep the graph acyclic:
 | `data-store.js` | `ZC.store` | The one data API. Both adapters live here. |
 | `matching-engine.js` | `ZC.matching` | Ranking, reasons, learning, icebreakers. |
 | `auth.js` | `ZC.auth` | Sign-up/in/out, page guards, humanised error text, demo credential store. |
-| `app.js` | `ZC.app` | Shared nav and tab bar, theme application, toast host, unread badge polling, `onReady`. |
+| `app.js` | `ZC.app` | Shared nav and tab bar, theme application, toast host, live unread badges, `onReady`. |
 
 ---
 
@@ -159,7 +159,12 @@ The decision happens once per page load and is published as `ZC.config.mode`. Ex
 `console.info` line reports it. Nothing else in the codebase re-derives it — everything reads
 `ZC.store.mode` or `ZC.config.mode`.
 
-Plan limits also live in `ZC.config` so both the store and the UI agree:
+Plan limits also live in `ZC.config`, and the gates read them there rather than asking the
+plan's name: the store's `canSpend` takes the daily budgets, `app.js` and `matches.js` take
+`seeLikedYou`, and the deck and the matches page's profile card take `adaptiveWeights`. The
+plans page prints the same table, so a value changed there moves the page and those gates
+together. A limit no gate reads is a promise the plans page makes and nothing keeps, which is
+what `adaptiveWeights` was while the deck and the card decided by the plan's name:
 
 | Limit | Free | Premium |
 | --- | ---: | ---: |
@@ -218,6 +223,18 @@ into the other and the matching engine cannot tell the difference.
 `ZC.store.DEFAULT_USER` is this shape with sane defaults; every writer merges into it, so a
 document written by the profile editor and one written by sign-up are structurally identical.
 
+The rules hold `users/{uid}` to this shape at every level. The top-level key list is closed
+with `hasOnly`, and so are those of `profile`, `profile.personality`, `profile.location`,
+`preferences`, `learning` and `usage`, so an account cannot pad its own document with fields
+no part of the app reads; `tests/projection.test.js` compares each list with the keys the
+client writes into that map. For a while only the top level and `personality` were closed.
+Closing the rest cost evaluation budget the validator did not have — a request may evaluate at
+most 1000 expressions — and it was bought back without loosening anything, by dropping type
+tests the operation after each already enforces and by asking `identityUnchanged` one question
+of the diff instead of three comparisons. `rules-tests/specs/08-budget.rules.js` measures the
+costliest document the store writes on both create and update, and fails below five clauses
+of headroom on either.
+
 ### `discovery/{uid}` — the public projection (Firebase mode)
 
 In Firebase mode `users/{uid}` is readable **only by its owner**. What other people see is
@@ -234,6 +251,18 @@ you" reads it only on the premium plan: the free plan's panel shows a number, an
 `getLikesReceived`, without the profiles. It used to call the list and draw `.length`, which
 read every waiting liker's projection and cached it for five minutes on the one plan whose
 page says it never receives them.
+
+On premium, matches.html asks for the list while the nav badge's `listenLikesReceived` is
+counting the same people, and run in Firebase mode in a browser, the list's call landed before
+the badge's first count on every load measured. Both used to do the whole job. The sender
+query need not have been paid twice — a `get` of a query a listener already holds can be
+answered from that listener's target — but the account read and the answered-lookups were:
+three reads more at twelve people waiting. The Firestore adapter's two likes reads now go
+through `waitingLikers`, which joins a live count that has not yet delivered its first count and takes
+its answer. Only until then, and deliberately: after its first count a live count works from
+answers it remembers, and a remembered answer cannot see one this account gives from another
+tab, so a list that took it would name somebody already answered.
+`store-tests/specs/12-live-likes.store.js` pins both halves.
 
 ### The rest
 
@@ -253,8 +282,15 @@ rules enforce the id convention so a client cannot invent one.
 `ZC.store` hands pages a denormalised `MatchView` rather than a raw `MatchDoc`:
 
 ```js
-{ matchId, otherUid, other /* UserDoc */, createdAt, lastMessage, lastMessageAt, unread }
+{ matchId, otherUid, other /* public face, UserDoc-shaped */, createdAt, lastMessage, lastMessageAt, unread }
 ```
+
+`other` is the other person's public face in both adapters: the `discovery/{uid}` projection,
+filled out to the `UserDoc` shape. The Firestore adapter can read nothing else. The demo
+adapter stores whole documents and builds the same face from them through the same
+projection, because its `getMatches` and `getMatch` used to hand a page the other person's
+private record — email, birthdate and block list included — from the facade methods whose
+Firestore half never could.
 
 ### Interests
 
@@ -309,9 +345,18 @@ Seven keys, all under one prefix, each holding a JSON map keyed by id:
 | `zc.demo.seeded` | seed version marker |
 
 Plus `zc.demo.credentials` (owned by `auth.js`) and `zc.firebaseConfig` (owned by the settings
-page). All access goes through a `readJson(key, fallback)` / `writeJson(key, value)` pair that
+page). Most access goes through a `readJson(key, fallback)` / `writeJson(key, value)` pair that
 swallows corrupt JSON, private-mode exceptions and quota errors, warns once, and keeps the UI
-alive. A demo user who fills their quota gets a toast, not a white screen.
+alive. A demo user who fills their quota gets a toast, not a white screen. The exceptions are
+the readers whose empty answer somebody would be shown as a fact: the match stream the badge
+and the conversation list share, everything that says who liked you, the filed reports and
+`retractReport`, and the data export's swipes, matches and messages. They read through
+`readJsonResult` and reject, or report to their listener, instead of answering `{}` — read
+the forgiving way, a store that could not be read told somebody they had reported no one, and
+called a report still in the queue already removed. The Firestore adapter's `getMyReports`,
+`getSwipes`, `getMatches` and `getMessages` likewise refuse an answer that came from the local
+cache rather than the server, because offline `get()` answers from the cache instead of
+failing.
 
 `writeJson` returns false when the write did not land, and whether a caller must check it
 follows from whether the write can FAIL rather than from taste. A write that GROWS the
@@ -384,11 +429,16 @@ A listener's removals are not counted, and that is a billing rule rather than a
 simplification: Firestore charges "for a read when a document is removed from the result
 set because the document has changed", and in contrast "when a document is deleted, you
 are not charged for a read". The client cannot tell the two apart — both arrive as a
-`removed` change carrying the document's last known data — but this app's rules can:
-`swipes` is `allow update: if false`, and a match document's id is built from `users`, so
-neither live query can lose a document except by deletion. Ending a conversation is
-therefore delivered and free. The counter said one read, and one spec stated that as the
-bill until it was measured against the pricing page.
+`removed` change carrying the document's last known data — but for two of the app's three
+live queries its rules can. `swipes` is `allow update: if false`, and a match update must keep
+`users` exactly as it was, so neither the likes listener nor the match stream can lose a
+document except by deletion. Ending a conversation is therefore delivered and free. The
+counter said one read, and one spec stated that as the bill until it was measured against the
+pricing page. The third, `listenMessages`, watches a window of a conversation's newest 200
+messages, and past 200 each new message pushes the oldest out as a `removed` change for a
+document that still exists. That is neither a change (messages cannot be edited) nor a
+deletion, so neither quoted sentence settles it, and the counter treats it as free. Nothing
+measures `listenMessages` through the counter, so no number in the suite rests on the guess.
 
 Writes are counted too — `harness.countingDb` tallies both halves of the bill now. It bills what Firestore would: a refused write is not a write, so the tally moves
 when the promise resolves rather than when the call is made, and a transaction's callback is
@@ -397,6 +447,20 @@ committed is added. Counting where `tx.set` is called reports twenty concurrent 
 forty, measured. `store-tests/specs/19-write-cost.store.js` pins a pass at 2, an ordinary
 like at 3, a mutual like at 4, a message at 2 and a profile save at 2 — with the documents
 named, because three writes to the wrong places is also three writes.
+
+The counter follows a reference along each of these routes — a snapshot's `ref`, `docs`,
+`forEach` or `docChanges()`, a listener's delivery however the listener was registered, a
+transaction's `get`, or what `add()` resolves to — and it once followed only the query `where`
+returned. Account deletion reaches each match as `matches.docs[i].ref`, so the
+per-match message scan and the match's own delete were billed and invisible: for an account
+with one match of two messages, a swipe each way and no filed reports, deletion is 7 writes
+and 6 reads. Nor does it bill what never reached Firestore — a write the SDK refuses before
+sending it, or a read the client's own cache answers. It can count too much as well as too
+little: a `get()` of a query a live listener on the same page already holds is counted
+document by document, while the SDK can answer it from the listener's target, so such a count
+is an upper bound. The ways out it is known to leave open, among them a reference stored as a
+field's value, a converter, the database's `app` and `namedQuery`, are listed in
+`store-tests/harness.js`, and the store takes none of them.
 
 A transaction's own `tx.get` is counted too, and was not until `specs/20-spend-cost` needed
 it. The helper's header had defended that omission on two grounds — that nothing measured
@@ -484,6 +548,10 @@ asserted and the other remembered.
   stamped when the swipe is written and is blind to a reciprocal like arriving afterwards,
   which is the ordinary case. The Firebase adapter reads and deletes in one transaction, so
   a like landing between the read and the delete is caught on the replay rather than missed.
+  Undoing a swipe that is already gone, for a pair with no match, answers `{ ok: true }` in
+  both adapters: `firestore.rules` allows deleting a missing swipe to either person its id
+  names, as it allows reading one, and `store-tests/specs/08-conversation.store.js` undoes the same swipe
+  twice against the real rules.
 - `getUsage` auto-resets when `usage.date` is not today, so daily limits need no scheduler.
 - `canSpend(uid, field)` returns `{ allowed, remaining, limit, plan }` by reading the plan
   limits out of `ZC.config`, and is called *before* every spend. `canSpendAll(uid)` returns
@@ -499,7 +567,7 @@ asserted and the other remembered.
   a sentence until it was moved somewhere that runs it. The throttle exists because
   `lastActiveAt` feeds the activity score but is not worth a write per navigation. It is
   called on every auth resolution and on every page that resolves a user, so without the
-  throttle a browsing session is one Firestore write per navigation.
+  throttle every navigation would write both documents, and more than once.
   "Across page loads" is the load-bearing part and was not true until it was measured:
   the last-write times lived in a module-level object, and every page here is its own
   HTML document, so each navigation started with an empty map and wrote again. The bound
@@ -641,13 +709,22 @@ match id current without adding history entries.
   remember, so the line is gone, `tests/injection.test.js` fails the build if it or any
   relative comes back, and `html` survives only in `DOM_PROP_KEYS` so that passing it is
   inert rather than becoming a stray attribute.
-- **No inline styles.** The CSP forbids `style="…"`, so anything dynamic (the compatibility
-  ring's `--pct`, a drag transform, a completeness bar's width) is set with
-  `el.style.setProperty(...)`, which CSP allows.
+- **No inline styles.** `tests/static.test.js` fails any `style="…"` in a page's markup, so
+  anything dynamic (the compatibility ring's `--pct`, a drag transform, a completeness bar's
+  width) is set with `el.style.setProperty(...)`. That is this project's rule, not the CSP's:
+  the shipped `style-src 'self' 'unsafe-inline'` would allow a style attribute, and a CSSOM
+  write is not governed by `style-src` at all.
 - **No inline scripts or `on*` handlers.** All behaviour is wired with `addEventListener` in
   the page controller.
 - **Skeletons, not spinners, for content.** Lists render `.skeleton` nodes while loading so
   layout does not jump.
+- **The shared header has its room before it exists.** `app.js` builds the nav on
+  `DOMContentLoaded`, so a page's first paint has nothing above `<main>`, and the nav's
+  arrival used to push the whole page down by its own height. Until it is there, `style.css`
+  gives `<main>` a top margin of exactly that height — `--nav-h` plus the nav's 1px border —
+  so the hand-over moves nothing; a browser without `:has()` drops the rule and keeps the old
+  jump. `e2e/specs/06-layout.e2e.js` adds up the layout shift on `<main>` across the five
+  signed-in pages, at both viewports.
 - **Every async call is wrapped.** A failure shows a toast and leaves a usable screen. There
   are no unhandled rejections and no blank states.
 
@@ -671,11 +748,13 @@ The design system is two files: `style.css` (tokens, layout, forms, buttons, nav
 | Trust boundary | `rules-tests/specs/*.rules.js` | `firestore.rules` executed against the emulator: who can read what, the closed discovery projection, the reciprocal-like proof, the append-only chat, the bounded report queue, and the catch-all deny. |
 
 The table names four of them; `tests/` holds fourteen, and all fourteen `tests/` suites run on
-`node --test` with no dependencies, which is what keeps the `verify` job down to a checkout,
-`npm run check:seed` and `npm test` — no install step, and it finishes in seconds. That short job is run twice, over a `node: ['20', '22']` matrix,
-because a single pinned version once hid a breakage: the runner stopped matching a
-positional `tests/` directory argument after Node 20, so `npm test` ran zero tests on newer
-runtimes while CI stayed green.
+`node --test` with no dependencies, which is what keeps the `verify` job down to a checkout, a
+Node set-up and three commands — `npm run check:seed`, `npm test`, and `npm run check:claims`,
+which runs the suite a second time to read its total back — no install step, and it finishes
+in seconds. That short job is run twice, over a `node: ['20', '22']` matrix, because a single
+pinned version once hid a breakage: the runner stopped matching a positional `tests/`
+directory argument after Node 20, so `npm test` ran zero tests on newer runtimes while CI
+stayed green.
 
 The two layers that need real infrastructure are deliberately kept out of that job. Their
 specs live in `e2e/` and `rules-tests/`, not `tests/`, so `node --test` never discovers

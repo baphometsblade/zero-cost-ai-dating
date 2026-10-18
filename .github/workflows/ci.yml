@@ -78,7 +78,7 @@ jobs:
 
       # The one number no test inside the run can see: `npm test`'s own total, which the
       # README quotes. This runs the suite again in a child process and reads the count
-      # back out of its TAP summary — under a second, and the only way the claim can be
+      # back out of its TAP summary — about a second, and the only way the claim can be
       # checked at all. See scripts/claims.js for why the totals are enforced from both
       # ends; the other three suites check their own.
       - name: Check the unit total matches what the README claims

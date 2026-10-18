@@ -73,6 +73,8 @@
   const usageEl = document.getElementById('usage-hint');
   const bannerEl = document.getElementById('limit-banner');
   const bannerTextEl = document.getElementById('limit-text');
+  /** Speaks for the banner, once per raise; see `updateLimitBanner`. */
+  const bannerStatusEl = document.getElementById('limit-status');
   /** The local day the limit banner was raised on; see `tickCountdown`. */
   let bannerDay = null;
   const detailsEl = document.getElementById('deck-details');
@@ -509,6 +511,12 @@
     return seconds + 's';
   }
 
+  /** The banner's first sentence: the half of it that does not tick. */
+  function likesUsedSentence(budget) {
+    const limit = budget.limit === Infinity ? 'your' : 'all ' + budget.limit;
+    return 'You have used ' + limit + ' likes for today.';
+  }
+
   /** One tick of the countdown inside the limit banner. */
   function tickCountdown() {
     const budget = state.budget.likes;
@@ -531,18 +539,31 @@
     if (!bannerDay) bannerDay = today;
 
     const remaining = msToMidnight();
-    const limit = budget.limit === Infinity ? 'your' : 'all ' + budget.limit;
-    bannerTextEl.textContent = 'You have used ' + limit + ' likes for today. They come back in ' +
+    bannerTextEl.textContent = likesUsedSentence(budget) + ' They come back in ' +
       formatCountdown(remaining) + ', at midnight.';
   }
 
-  /** Show or hide the daily-limit banner, and run its countdown while shown. */
+  /**
+   * Show or hide the daily-limit banner, run its countdown while shown, and
+   * announce it once, as it goes up.
+   * @returns {void}
+   */
   function updateLimitBanner() {
     if (!bannerEl) return;
     const out = exhausted('likes');
+    // Read before the toggle: hidden to shown is the one moment there is news.
+    const raised = out && bannerEl.classList.contains('hidden');
     bannerEl.classList.toggle('hidden', !out);
     if (out) {
       tickCountdown();
+      // Said by its own region, once, and never by the countdown. The banner
+      // used to be the live region itself, so every tick was a change inside
+      // it: one a second for as long as the banner was up, and in the last
+      // hour before midnight a different sentence each time. The countdown is
+      // still on screen and can still be read; it is no longer read out.
+      if (raised && bannerStatusEl) {
+        bannerStatusEl.textContent = likesUsedSentence(state.budget.likes) + ' They come back at midnight.';
+      }
       if (!state.countdown) state.countdown = window.setInterval(tickCountdown, 1000);
       return;
     }
@@ -553,6 +574,10 @@
     // Cleared with the banner, so the next one starts from the day it is raised
     // on rather than from a day that has already turned.
     bannerDay = null;
+    // Emptied with it as well. The region is always rendered, so a sentence
+    // left in it would go on telling a screen reader the likes are used up
+    // after they have come back.
+    if (bannerStatusEl) bannerStatusEl.textContent = '';
   }
 
   /**
@@ -1512,9 +1537,20 @@
      ------------------------------------------------------------------------ */
 
   /**
+   * Whether this account's plan ranks with the adaptive term. Read from the
+   * plan's `adaptiveWeights` in ZC.config.limits — the table the plans page
+   * prints — rather than from the plan's name, so the deck cannot rank one way
+   * while that page tells the person the other.
+   * @returns {boolean}
+   */
+  function adaptiveRanking() {
+    return !!(ZC.config && ZC.config.planAllows(state.me, 'adaptiveWeights'));
+  }
+
+  /**
    * Fetch the candidate pool, build the TF-IDF corpus from it and rank it.
-   * Adaptive weighting is a Premium feature, so free accounts are scored on
-   * the fixed weights only.
+   * Adaptive weighting is on only where the plan's limits say so — Premium,
+   * as shipped — so free accounts are scored on the fixed weights only.
    * @returns {Promise<void>}
    */
   async function load() {
@@ -1535,7 +1571,7 @@
       const ranked = ZC.matching.rankCandidates(state.me, list, {
         corpus: corpus,
         now: new Date().toISOString(),
-        adaptive: state.me.plan === 'premium'
+        adaptive: adaptiveRanking()
       });
       state.queue = Array.isArray(ranked) ? ranked : [];
       state.loading = false;

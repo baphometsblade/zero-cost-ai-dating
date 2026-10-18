@@ -222,10 +222,13 @@ test('every key a closed allowlist admits is one something validates', function 
   // being deleted, renamed, moved, or merely rewrapped — and the check would still
   // report itself healthy while every key that list admitted went unexamined. Two
   // `personalityOk` entries are correct: one per match block, because a rules function
-  // cannot cross one.
+  // cannot cross one — and two `locationOk`s for the same reason. `profileOk`,
+  // `prefsOk`, `learningOk` and `usageOk` joined when each closed its own list, as did
+  // the private `locationOk`; until then the private document was closed only at the
+  // top level and in `profile.personality`.
   const OWNERS = ['allow statement', 'discoveryOk', 'discoveryPrefsOk', 'discoveryProfileOk',
-    'locationOk', 'matchOk', 'personalityOk', 'personalityOk', 'reportOk', 'swipeOk',
-    'userDocOk'];
+    'learningOk', 'locationOk', 'locationOk', 'matchOk', 'personalityOk', 'personalityOk',
+    'prefsOk', 'profileOk', 'reportOk', 'swipeOk', 'usageOk', 'userDocOk'];
   assert.deepEqual(sites.map(function (list) {
     const owner = decls.filter(function (d) { return list.index > d.start && list.index < d.end; })[0];
     return owner ? owner.name : 'allow statement';
@@ -507,4 +510,114 @@ test('every list the rules accept is bounded in length AND in contents', functio
   assert.deepEqual(gone, [],
     'these lists are named in KNOWN but appear nowhere in firestore.rules: ' +
     JSON.stringify(gone) + '. If the field was removed, remove it here too.');
+});
+
+test('every closed vocabulary the rules pin is the one the client offers', function () {
+  // Numbers are not the only thing written down twice. A slug list is a bound too —
+  // on what a field may SAY rather than how long it may be — and it drifts the same
+  // way, except that the client's own validation cannot catch it by construction:
+  // the report dialog renders `ZC.store.REPORT_REASONS` and `shapeReport` validates
+  // against the same array, so a slug added there reaches the write unopposed and
+  // firestore.rules refuses the create. That is an abuse report that cannot be
+  // filed, with an error naming no field, on the one queue whose purpose is safety.
+  // data-store.js stated the rule — "a change here must land there in the same
+  // commit" — and nothing executed it.
+  const read = function (rel) { return fs.readFileSync(path.join(ROOT, rel), 'utf8'); };
+  const STORE = read('public/js/data-store.js');
+  const EDITOR_JS = read('public/js/profile.js');
+  const APP = read('public/js/app.js');
+  const SETTINGS_PAGE = read('public/settings.html');
+
+  /** The quoted words of a list literal, in order — or only those `pick` captures. */
+  function words(list, pick) {
+    return [...list.matchAll(pick || /'([^']+)'/g)].map(function (m) { return m[1]; });
+  }
+  /** Every list a pattern captures out of the rules' code, comments stripped, with its line. */
+  function ruleLists(what, pattern, expectCopies) {
+    const found = [...RULES_CODE.matchAll(pattern)].map(function (m) {
+      return { line: RULES_CODE.slice(0, m.index).split('\n').length, words: words(m[1]) };
+    });
+    assert.equal(found.length, expectCopies,
+      'expected ' + expectCopies + ' copies of the ' + what + ' list in firestore.rules, found ' +
+      found.length + ' — a rule was removed or rewritten past this pattern, and this test ' +
+      'would be checking less than it says.');
+    return found;
+  }
+  /** One client-side list, anchored to a line start so a commented-out copy is not it. */
+  function clientList(what, source, pattern, pick) {
+    const found = pattern.exec(source);
+    assert.ok(found, what + ' was not found — this test is comparing nothing. If it was renamed, rename it here too.');
+    const list = words(found[1], pick);
+    assert.ok(list.length > 0, what + ' parsed as empty');
+    return list;
+  }
+
+  const pairs = [];
+  // The slugs, not the labels beside them: the label is what the dialog shows and
+  // the slug is what gets written.
+  const reasons = clientList('REPORT_REASONS in public/js/data-store.js', STORE,
+    /^\s*const REPORT_REASONS = \[([\s\S]*?)\];/m, /slug: '([^']+)'/g);
+  ruleLists('report reason', /d\.reason in \[([^\]]*)\]/g, 1).forEach(function (rule) {
+    pairs.push({ what: 'report reasons (data-store.js REPORT_REASONS)', client: reasons, rule: rule.words, line: rule.line });
+  });
+
+  // One vocabulary, four copies in the rules: `profile.gender` in each half of the
+  // account and `preferences.interestedIn` in each. Three places decide what the
+  // client writes into them: the store's default, which every new account's
+  // interestedIn is; the settings page's checkboxes, whose `data-gender` values ARE
+  // the interestedIn a settings save writes; and the profile editor's GENDERS map,
+  // to which it coerces the gender it saves.
+  const genderRules = ruleLists('gender',
+    /(?:p\.gender in \[|interestedIn\.hasOnly\(\[)([^\]]*)\]/g, 4);
+  const checkboxes = [...SETTINGS_PAGE.matchAll(/data-gender="([^"]+)"/g)].map(function (m) { return m[1]; });
+  assert.ok(checkboxes.length > 0, 'no data-gender checkboxes found in public/settings.html — this test is comparing nothing');
+  [
+    ['data-store.js GENDERS', clientList('GENDERS in public/js/data-store.js', STORE, /^\s*const GENDERS = \[([^\]]*)\];/m)],
+    ['settings.html interested-in checkboxes', checkboxes],
+    ['profile.js GENDERS', clientList('GENDERS in public/js/profile.js', EDITOR_JS,
+      /^\s*const GENDERS = \{([^}]*)\};/m, /(\w+): '/g)]
+  ].forEach(function (copy) {
+    genderRules.forEach(function (rule) {
+      pairs.push({ what: 'genders (' + copy[0] + ')', client: copy[1], rule: rule.words, line: rule.line });
+    });
+  });
+
+  // A settings save writes what `applyTheme` hands back, and that coerces anything
+  // outside app.js's THEMES to 'system' — so THEMES is the list that reaches the write.
+  const themes = clientList('THEMES in public/js/app.js', APP, /^\s*const THEMES = \{([^}]*)\};/m, /(\w+):/g);
+  ruleLists('theme', /f\.theme in \[([^\]]*)\]/g, 1).forEach(function (rule) {
+    pairs.push({ what: 'themes (app.js THEMES)', client: themes, rule: rule.words, line: rule.line });
+  });
+
+  // The plans are the keys of the limits table: firebase-config.js's `limits` and
+  // subscription.js's fallback copy of it. Those tables are not quite what reaches the
+  // write — normalizeUser turns anything but 'premium' into 'free' first, so a plan
+  // added to them alone would quietly save as 'free' — but a plan added there and to
+  // that coercion and not to the rules would be refused with nothing named, and the
+  // tables are the list there is to compare.
+  const PLAN_KEY = /^\s*(\w+): \{/gm;
+  const planRules = ruleLists('plan', /d\.plan in \[([^\]]*)\]/g, 1);
+  [
+    ['firebase-config.js limits', clientList('limits in public/js/firebase-config.js',
+      read('public/js/firebase-config.js'), /^\s*limits: \{([\s\S]*?)^\s*\}/m, PLAN_KEY)],
+    ['subscription.js LIMITS', clientList('LIMITS in public/js/subscription.js',
+      read('public/js/subscription.js'), /^\s*const LIMITS = [^{]*\{([\s\S]*?)^\s*\};/m, PLAN_KEY)]
+  ].forEach(function (copy) {
+    planRules.forEach(function (rule) {
+      pairs.push({ what: 'plans (' + copy[0] + ')', client: copy[1], rule: rule.words, line: rule.line });
+    });
+  });
+
+  const wrong = pairs.filter(function (p) {
+    return JSON.stringify(p.client.slice().sort()) !== JSON.stringify(p.rule.slice().sort());
+  });
+  assert.deepEqual(wrong.map(function (p) { return p.what + ' vs firestore.rules:' + p.line; }), [],
+    wrong.map(function (p) {
+      const extra = p.client.filter(function (w) { return p.rule.indexOf(w) === -1; });
+      const unused = p.rule.filter(function (w) { return p.client.indexOf(w) === -1; });
+      return p.what + ': the client offers ' + JSON.stringify(p.client) + ', firestore.rules:' + p.line + ' accepts ' +
+        JSON.stringify(p.rule) + '.' +
+        (extra.length ? ' Offered and refused: ' + extra.join(', ') + ' — every write of one is a permission-denied naming nothing.' : '') +
+        (unused.length ? ' Accepted and never offered: ' + unused.join(', ') + '.' : '');
+    }).join('\n'));
 });

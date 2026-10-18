@@ -92,9 +92,10 @@ service cloud.firestore {
     // users/{uid} — the profile documents that power discovery
     // ---------------------------------------------------------------------------
     //
-    // Readable by any signed-in user because discovery has to scan candidates locally
-    // (the matching engine is on-device). Writable only by the owner, and only in the
-    // exact shape the app produces.
+    // Readable and writable only by the owner, and written only in the exact shape the
+    // app produces. Discovery scans candidates locally (the matching engine is
+    // on-device), but it reads `discovery/{uid}`, the public projection below, not
+    // these documents: see the read rule.
     match /users/{uid} {
 
       // profile.personality — five integer axes, 0..100, all optional.
@@ -109,32 +110,37 @@ service cloud.firestore {
       // and vanish from every deck with nothing said. That is the `lastActiveAt: null`
       // failure exactly, and `store-tests/specs/04-rules-accept.store.js` now replays
       // a real projection against this file so it cannot happen quietly again.
+      //
+      // No `is map` and no `is number`, where the projection's copy has both. userDocOk
+      // says why, and why this copy is not the weaker of the two.
       function personalityOk(pp) {
         return pp == null || (
-          pp is map
-          && pp.keys().hasOnly(['openness', 'conscientiousness', 'extraversion',
-                                'agreeableness', 'stability'])
-          && (!('openness' in pp) || (pp.openness is number && pp.openness >= 0 && pp.openness <= 100))
-          && (!('conscientiousness' in pp) || (pp.conscientiousness is number && pp.conscientiousness >= 0 && pp.conscientiousness <= 100))
-          && (!('extraversion' in pp) || (pp.extraversion is number && pp.extraversion >= 0 && pp.extraversion <= 100))
-          && (!('agreeableness' in pp) || (pp.agreeableness is number && pp.agreeableness >= 0 && pp.agreeableness <= 100))
-          && (!('stability' in pp) || (pp.stability is number && pp.stability >= 0 && pp.stability <= 100))
+          pp.keys().hasOnly(['openness', 'conscientiousness', 'extraversion',
+                             'agreeableness', 'stability'])
+          && (!('openness' in pp) || (pp.openness >= 0 && pp.openness <= 100))
+          && (!('conscientiousness' in pp) || (pp.conscientiousness >= 0 && pp.conscientiousness <= 100))
+          && (!('extraversion' in pp) || (pp.extraversion >= 0 && pp.extraversion <= 100))
+          && (!('agreeableness' in pp) || (pp.agreeableness >= 0 && pp.agreeableness <= 100))
+          && (!('stability' in pp) || (pp.stability >= 0 && pp.stability <= 100))
         );
       }
 
-      // profile.location — either null or a real coordinate pair with a short label.
+      // profile.location — either null or a real coordinate pair with a short label,
+      // and nothing else beside them: the same closed list as the projection's copy.
       function locationOk(loc) {
         return loc == null || (
-          loc is map
-          && loc.lat is number && loc.lat >= -90 && loc.lat <= 90
-          && loc.lng is number && loc.lng >= -180 && loc.lng <= 180
+          loc.keys().hasOnly(['label', 'lat', 'lng'])
+          && loc.lat >= -90 && loc.lat <= 90
+          && loc.lng >= -180 && loc.lng <= 180
           && (!('label' in loc) || (loc.label is string && loc.label.size() <= 120))
         );
       }
 
-      // profile.* — bounded bio, capped interest/photo lists, known gender values.
+      // profile.* — bounded bio, capped interest/photo lists, known gender values, and
+      // no field the profile editor does not write.
       function profileOk(p) {
-        return p is map
+        return p.keys().hasOnly(['birthdate', 'age', 'gender', 'pronouns', 'bio', 'photos',
+                                 'interests', 'personality', 'location', 'showAge', 'showDistance'])
           && (!('bio' in p) || (p.bio is string && p.bio.size() <= 500))
           // 12 slugs from a fixed vocabulary whose longest entry is 12 characters,
           // so 240 is nearly double what the editor can produce.
@@ -158,11 +164,12 @@ service cloud.firestore {
       // preferences.* — the mutual filters. Age window must stay inside 18..100 and
       // ordered, distance inside 1..500 km (500 means "anywhere").
       function prefsOk(f) {
-        return f is map
-          && (!('ageMin' in f) || (f.ageMin is number && f.ageMin >= 18 && f.ageMin <= 100))
-          && (!('ageMax' in f) || (f.ageMax is number && f.ageMax >= 18 && f.ageMax <= 100))
+        return f.keys().hasOnly(['interestedIn', 'ageMin', 'ageMax', 'maxDistanceKm', 'notifications',
+                                 'theme', 'discoverable'])
+          && (!('ageMin' in f) || (f.ageMin >= 18 && f.ageMin <= 100))
+          && (!('ageMax' in f) || (f.ageMax >= 18 && f.ageMax <= 100))
           && (!(('ageMin' in f) && ('ageMax' in f)) || f.ageMin <= f.ageMax)
-          && (!('maxDistanceKm' in f) || (f.maxDistanceKm is number && f.maxDistanceKm >= 1 && f.maxDistanceKm <= 500))
+          && (!('maxDistanceKm' in f) || (f.maxDistanceKm >= 1 && f.maxDistanceKm <= 500))
           // Four elements, and each one of the same four words `profile.gender` allows.
           //
           // BOTH bounds, and the reason is a regression this file shipped with for one
@@ -205,31 +212,31 @@ service cloud.firestore {
       // mapped to, and one value could be a megabyte-long string under the name
       // `hiking`.
       function affinityOk(m) {
-        return m is map
-          && m.keys().size() <= 60
+        return m.keys().size() <= 60
           && listCharsOk(m.keys(), 1200)
           && listCharsOk(m.values(), 1500);
       }
 
       function learningOk(l) {
-        return l is map
+        return l.keys().hasOnly(['interestAffinity', 'likeCount', 'passCount'])
           && (!('interestAffinity' in l) || affinityOk(l.interestAffinity))
-          && (!('likeCount' in l) || (l.likeCount is number && l.likeCount >= 0))
-          && (!('passCount' in l) || (l.passCount is number && l.passCount >= 0));
+          && (!('likeCount' in l) || l.likeCount >= 0)
+          && (!('passCount' in l) || l.passCount >= 0);
       }
 
       function usageOk(u) {
-        return u is map
+        return u.keys().hasOnly(['date', 'likes', 'superLikes', 'rewinds'])
           && (!('date' in u) || (u.date is string && u.date.size() == 10))
-          && (!('likes' in u) || (u.likes is number && u.likes >= 0))
-          && (!('superLikes' in u) || (u.superLikes is number && u.superLikes >= 0))
-          && (!('rewinds' in u) || (u.rewinds is number && u.rewinds >= 0));
+          && (!('likes' in u) || u.likes >= 0)
+          && (!('superLikes' in u) || u.superLikes >= 0)
+          && (!('rewinds' in u) || u.rewinds >= 0);
       }
 
       // The whole UserDoc: a closed top-level key list and every nested validator.
-      // `createdAt` has to be present so that the immutability check below can always
-      // compare it without tripping over a missing field, which the unconditional
-      // `stampOk(d.createdAt)` a few lines down is what guarantees.
+      // `createdAt` has to be present, which the unconditional `stampOk(d.createdAt)` a
+      // few lines down is what guarantees: the immutability check below requires it
+      // unchanged on both sides of every update, so a document without one could never
+      // be updated at all.
       //
       // Closed rather than merely complete: `hasAll` says the required keys are there and
       // nothing about the rest, so an account could pad its own document to the 1 MiB
@@ -238,6 +245,39 @@ service cloud.firestore {
       // the same lever, and there is no reason to leave it. The list is the fourteen keys
       // the store's own DEFAULT_USER carries, and tests/projection.test.js compares the
       // two so neither can drift without the other.
+      //
+      // Closed at every level, and for a while it was not. This list closed the top level,
+      // and of the maps under it only `profile.personality` closed its own: profileOk,
+      // prefsOk, learningOk, usageOk and the private locationOk each tested the keys they
+      // named and let any other key through, so `profile.padding` carried whatever the
+      // ceiling would hold while this comment said the lever was shut. Each closes its own
+      // list now, and tests/projection.test.js compares every one with what the client
+      // writes into that map: DEFAULT_USER's maps for the first four (and for
+      // personalityOk's list), and for the last, the location the profile editor's
+      // buildPatch builds, since DEFAULT_USER's is null.
+      //
+      // That cost evaluation budget this validator did not have. With every type test left
+      // where it was, closing them put every write of the document
+      // `rules-tests/specs/08-budget.rules.js` measures (every optional field set, a
+      // location among them) over the limit, down to creating it as a free account. The
+      // same document without the location still fitted, but updating it as a premium one,
+      // with identityUnchanged() as it then was, had a single clause to spare. And
+      // 08-budget, which measures creating and updating that document as a premium account
+      // (the costliest the store writes), had found the update ALREADY over before
+      // anything was closed. It was bought back without loosening anything. The validators
+      // of the maps under this one no longer open with `is map`, because `keys()` exists
+      // only on a map; and the counters and ranges of preferences, learning, usage,
+      // location and personality no longer say `is number`, because comparing anything
+      // that is not a number with a number denies. Each of those type tests repeated what
+      // the operation after it enforces anyway. (Measured against the emulator for a
+      // string, a numeric string, a boolean, null, a list, a map and a timestamp, not
+      // reasoned about; `01-users` writes a list where each map belongs and a string into
+      // each counter, and both are refused as before. `profile.age` keeps its `is number`
+      // because tests/limits.test.js reads that clause whole, in both copies, to compare
+      // the editor's oldest age with the rules'.) The projection's copies of personalityOk
+      // and locationOk keep their type tests, because nothing there is near the limit; the
+      // two copies accept exactly the same values. `identityUnchanged()` below is the
+      // other half of what was bought back.
       function userDocOk(d) {
         return d.keys().hasOnly(['uid', 'email', 'displayName', 'createdAt', 'updatedAt',
                                  'lastActiveAt', 'profileComplete', 'plan', 'planSince',
@@ -287,10 +327,19 @@ service cloud.firestore {
 
       // Identity fields are set once at sign-up and can never be rewritten afterwards —
       // this is what stops an account from impersonating another or back-dating itself.
+      //
+      // One question asked of the diff rather than three `==`s, and that is budget, not
+      // style. Every routine write to this document is an update — the last-active stamp
+      // as pages load (at most every five minutes), the learning map on every swipe, the
+      // usage counter on every like — so this runs on top of userDocOk on the writes that
+      // cost the most. Measured on that path with `08-budget`'s clause as the unit: the
+      // three comparisons, walking six request and resource paths, cost five; this costs
+      // two. `unchangedKeys()` holds a key only when both versions have it with equal
+      // values, so `hasAll` asks what the three `==`s did, a missing field included — and
+      // `01-users` still rewrites each of the three and is refused.
       function identityUnchanged() {
-        return request.resource.data.uid == resource.data.uid
-          && request.resource.data.email == resource.data.email
-          && request.resource.data.createdAt == resource.data.createdAt;
+        return request.resource.data.diff(resource.data).unchangedKeys()
+          .hasAll(['uid', 'email', 'createdAt']);
       }
 
       // Owner only. Other people are discovered through discovery/{uid}, a
@@ -354,11 +403,14 @@ service cloud.firestore {
       }
 
       // Restated rather than shared: a rules function does not cross a `match` block,
-      // and the private document's copy is two hundred lines and one collection away.
-      // Same five axes, same range, and the same closed key list — the private copy has
-      // one too (`pp.keys().hasOnly([...])` in `profileOk`), which this comment used to
-      // deny. Both close the list for the same reason: an extra axis is a field the
-      // engine would never read and the 1 MiB ceiling would happily carry.
+      // and the private document's copy is nearly three hundred lines and one collection
+      // away. Same five axes, same range, and the same closed key list — the private copy
+      // has one too (`pp.keys().hasOnly([...])`, in its own `personalityOk`), which this
+      // comment used to deny. Both close the list for the same reason: an extra axis is a
+      // field the engine would never read and the 1 MiB ceiling would happily carry. This
+      // copy and the location one below keep `is map` and `is number` where the private
+      // copies leave both to `keys()` and the comparisons; userDocOk says why, and the
+      // two accept exactly the same values.
       function personalityOk(pp) {
         return pp == null || (
           pp is map
@@ -505,8 +557,21 @@ service cloud.firestore {
       // Delete: your own swipe (the rewind path), or a swipe aimed at you — an
       // inbound like is data about you, and account deletion must be able to
       // purge it.
+      //
+      // And a swipe that is already gone, on the terms the read rule above allows a
+      // miss and for its reason: `resource` is null for a missing document, and this
+      // rule dereferenced it. undoSwipe deletes inside a transaction without reading
+      // the swipe first, so rewinding a card whose swipe was already removed — a
+      // second tab on the same deck, or a retry — came back permission-denied in
+      // Firebase mode, where the demo adapter answers `{ ok: true }` and
+      // tests/data-store.test.js pins that as the contract. Deleting nothing changes
+      // nothing, and it is allowed by the id rather than unconditionally, so a
+      // stranger is refused for a missing swipe exactly as for a present one.
       allow delete: if isSignedIn()
-        && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid);
+        && (resource == null
+              ? request.auth.uid in swipeId.split('_')
+              : (resource.data.from == request.auth.uid
+                 || resource.data.to == request.auth.uid));
     }
 
     // ---------------------------------------------------------------------------

@@ -466,6 +466,17 @@ h3 {
   flex: 1 1 auto;
 }
 
+/* app.js builds the shared header on DOMContentLoaded, so a page's first
+   paint has nothing above <main>, and the header arriving pushed the whole
+   page down by its own height — a layout shift of 0.10 to 0.68 across the
+   signed-in pages, the worst on the plans page. Until the header exists,
+   <main> holds its room. The header is exactly these two lengths (the
+   .nav-inner min-height and the .nav bottom border), so the hand-over moves
+   nothing. A browser without :has() drops the rule and keeps the old jump. */
+.app-shell:not(:has([data-zc-nav])) > main {
+  margin-top: calc(var(--nav-h) + 1px);
+}
+
 .container {
   width: 100%;
   max-width: var(--maxw);
@@ -578,8 +589,16 @@ h3 {
   text-decoration: none;
 }
 
+/* Generated content is read aloud: this heart made the brand link "♥ Zero
+   Cost Dating", announced as "black heart suit…". Every glyph either stylesheet
+   generates is therefore declared twice — plainly, then with alternative text
+   after the slash — so a browser that does not know the slash form keeps the
+   first line, and one that does reads the alternative instead: '' for
+   decoration, words where the glyph carries meaning. tests/static.test.js
+   check (g) holds every glyph to that. */
 .nav-brand::before {
   content: '♥';
+  content: '♥' / '';
   display: inline-grid;
   place-items: center;
   width: 30px;
@@ -881,6 +900,7 @@ h3 {
 
 .field-error::before {
   content: '⚠ ';
+  content: '⚠ ' / '';
 }
 
 .field.has-error .field-error {
@@ -1176,12 +1196,14 @@ button.switch[aria-pressed='true']::after {
 /* A tick marks selection so the state is not carried by colour alone. */
 .chip.is-selected::after {
   content: '✓';
+  content: '✓' / '';
   font-size: var(--fs-xs);
   font-weight: 800;
 }
 
 .chip:has(input:checked)::after {
   content: '✓';
+  content: '✓' / '';
   font-size: var(--fs-xs);
   font-weight: 800;
 }
@@ -1420,6 +1442,7 @@ legend {
 
 .toast-info::before {
   content: 'ℹ️';
+  content: 'ℹ️' / '';
 }
 
 .toast-success {
@@ -1428,6 +1451,7 @@ legend {
 
 .toast-success::before {
   content: '✅';
+  content: '✅' / '';
 }
 
 .toast-warn {
@@ -1436,6 +1460,7 @@ legend {
 
 .toast-warn::before {
   content: '⚠️';
+  content: '⚠️' / '';
 }
 
 .toast-error {
@@ -1444,6 +1469,7 @@ legend {
 
 .toast-error::before {
   content: '⛔';
+  content: '⛔' / '';
 }
 
 .toast.is-leaving {
@@ -1726,12 +1752,14 @@ legend {
 
 .faq-item > summary::after {
   content: '＋';
+  content: '＋' / '';
   float: right;
   color: var(--brand-600);
 }
 
 .faq-item[open] > summary::after {
   content: '−';
+  content: '−' / '';
 }
 
 .faq-item[open] > summary {

@@ -31,17 +31,29 @@
 
 /**
  * Wait until the signed-in account has exactly `count` outbound swipes stored.
+ *
+ * Polled inside the page, because `page.waitForFunction` cannot wait on the
+ * store: a predicate that returns a Promise counts as true the first time it
+ * is called, so the wait settled on one read and never waited at all. Measured:
+ * with the demo store's swipe write delayed by 150 ms, the rewind below never
+ * brought the passed card back, and the spec timed out waiting for it.
  * @param {Object} page a Playwright Page
  * @param {string} uid the signed-in account
  * @param {number} count how many swipes to wait for
- * @returns {Promise<void>}
+ * @returns {Promise<void>} rejects, saying how many there were, after 20 s
  */
-function waitForSwipes(page, uid, count) {
-  return page.waitForFunction(function (args) {
-    return window.ZC.store.getSwipes(args.uid).then(function (list) {
-      return list.length === args.count;
-    });
+async function waitForSwipes(page, uid, count) {
+  const stored = await page.evaluate(function (args) {
+    const deadline = Date.now() + 20000;
+    function poll() {
+      return window.ZC.store.getSwipes(args.uid).then(function (list) {
+        if (list.length === args.count || Date.now() > deadline) return list.length;
+        return new Promise(function (resolve) { window.setTimeout(resolve, 50); }).then(poll);
+      });
+    }
+    return poll();
   }, { uid: uid, count: count });
+  if (stored !== count) throw new Error(stored + ' swipe(s) stored after 20 s; waited for ' + count);
 }
 
 /** The uids this account has swiped on, in storage order. */
@@ -111,9 +123,25 @@ module.exports = {
       const before = await h.topCardName(page);
       const moved = await h.pressDeckKey(page, 'ArrowRight', before);
       await waitForSwipes(page, setup.uid, known.length + 1);
-      if (moved.burst) { await h.closeBurst(page); continue; }
       const now = await swipeTargets(page, setup.uid);
-      them = now.filter(function (uid) { return known.indexOf(uid) === -1; })[0] || null;
+      const target = now.filter(function (uid) { return known.indexOf(uid) === -1; })[0] || null;
+      // Whether the like matched is the store's answer, not the overlay's.
+      // pressDeckKey returns once the card moves, which under a slow swipe
+      // write is before the match exists, so `moved.burst` can read false for
+      // a like that matches a moment later — and the overlay then covers the
+      // rewind button. The demo store writes the match in the same call that
+      // stores the swipe, so once the swipe is visible the match is too.
+      const matched = moved.burst || await page.evaluate(function (args) {
+        return window.ZC.store.getMatches(args.me).then(function (list) {
+          return list.some(function (match) { return match.otherUid === args.them; });
+        });
+      }, { me: setup.uid, them: target });
+      if (matched) {
+        await page.waitForSelector('.match-burst');
+        await h.closeBurst(page);
+        continue;
+      }
+      them = target;
       liked = before;
     }
     t.check('a like landed on somebody who had not already liked back', !!them, String(them));

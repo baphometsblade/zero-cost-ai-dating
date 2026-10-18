@@ -46,6 +46,8 @@
         is what the filter reordering buys.
      6. When the batched query is refused, the deck still loads — and still
         excludes, which is a separate thing and needs its own swipes to prove.
+        An SDK with no `FieldPath.documentId` takes the same fallback and now
+        says so as well; it used to be the one way in that said nothing.
    ========================================================================== */
 'use strict';
 
@@ -270,6 +272,41 @@ module.exports = {
     t.check('and it says so, rather than failing quietly into a cheaper wrong answer',
       warned.some(function (w) { return /Batched swipe lookup unavailable/.test(w); }),
       k.show(warned.slice(0, 2)));
+
+    /* ---- 6b. and when the SDK cannot ask by key at all ----------------- */
+
+    // The other way into the same fallback, and the one that said nothing.
+    // The batched query names its field with `FieldPath.documentId()`, and an
+    // SDK without it went straight to one read per person with no warning, so
+    // the dearest degradation of the dearest read path was also the one nobody
+    // could see. The compat SDK the pages load does carry it — context.js
+    // installs the real namespace, and check 3's count is the batched one — so
+    // it is taken away here for one call rather than trusted to stay.
+    const FieldPath = globalThis.firebase.firestore.FieldPath;
+    const documentId = FieldPath.documentId;
+    const bare = { reads: 0, calls: 0 };
+    let unkeyed = [];
+    FieldPath.documentId = undefined;
+    k.ctx.ZC.firebase.db = k.h.countingDb(real, bare);
+    try {
+      unkeyed = await k.store.listCandidates(me, { limit: LIMIT });
+    } finally {
+      FieldPath.documentId = documentId;
+      k.ctx.ZC.firebase.db = real;
+    }
+    const bareWarned = k.ctx.drainWarnings();
+
+    t.check('an SDK with no FieldPath.documentId still produces the deck, one read per person',
+      unkeyed.length === LIMIT && bare.reads === 1 + PAGE + LIMIT,
+      unkeyed.length + ' candidate(s), ' + bare.reads + ' read(s) — the same bill as a refused ' +
+      'batch, against ' + expected + ' when the key query runs');
+
+    t.check('and that degradation says so too, naming what is missing',
+      bareWarned.some(function (w) {
+        return /Batched swipe lookup unavailable/.test(w) && /FieldPath\.documentId/.test(w);
+      }),
+      bareWarned.length ? k.show(bareWarned.slice(0, 2)) : 'no warning at all, for ' +
+        (bare.reads - expected) + ' extra read(s) on every deck load');
 
     /* ---- 7. and the exclusion still works through the fallback --------- */
 

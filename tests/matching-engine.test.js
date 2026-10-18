@@ -334,7 +334,11 @@
     const b = { openness: 35, conscientiousness: 75, extraversion: 30, agreeableness: 55, stability: 10 };
     assert.equal(I.personalityScore(a, b), I.personalityScore(b, a));
     assert.ok(I.personalityScore(a, b) >= 0 && I.personalityScore(a, b) <= 1);
-    assert.equal(I.personalityScore(a, a), I.personalityScore(a, a));
+    // Bounded above by a copy of itself: every axis rewards agreement, so a
+    // vector can match nobody better than its own twin, and a very different
+    // one does strictly worse.
+    assert.ok(I.personalityScore(a, a) > I.personalityScore(a, b),
+      I.personalityScore(a, a) + ' should beat ' + I.personalityScore(a, b));
     assert.equal(I.personalityScore(null, b), 0.5);
     assert.equal(I.personalityScore(a, undefined), 0.5);
 
@@ -419,7 +423,11 @@
     assert.ok(I.STOPWORDS.has('the'));
     assert.ok(I.STOPWORDS.has('because'));
     assert.ok(I.STOPWORDS.has("don't"));
-    assert.ok(I.STOPWORDS.size >= 120, 'ships a real stopword list, got ' + I.STOPWORDS.size);
+    // Exact, not a floor: the docblock above STOPWORDS states the size, and
+    // with only a floor here it said "~130" of a list that has held 183 words
+    // since its first commit. A word added or removed is a change to that
+    // sentence too.
+    assert.equal(I.STOPWORDS.size, 183, 'the STOPWORDS docblock says 183 words');
     assert.deepEqual(I.tokenize("The dog and the cat because they don't care"), ['dog', 'cat', 'care']);
   });
 
@@ -680,6 +688,21 @@
     assert.deepEqual(r.shared.tokens.slice().sort(), ['cook', 'vinyl']);
   });
 
+  // Activity has the smallest weight of the six reason kinds, so its line sits
+  // at or near the bottom of the list, where MAX_REASONS (4) cuts. RILEY's
+  // comes fifth, behind four stronger reasons, and is cut whether it was
+  // emitted or not, so no check made on RILEY can tell those two apart. These
+  // two have one other reason between them, a shared default personality,
+  // which leaves the list room to show the activity line or leave it out.
+  function activityReason(lastActiveAt) {
+    const me = mkUser('me', { profile: { age: 30 } });
+    const them = mkUser('them', { lastActiveAt: lastActiveAt, profile: { age: 45 } });
+    const reasons = M.scoreCandidate(me, them, OPTS).reasons;
+    assert.ok(reasons.length < 4,
+      'the cap must not decide: ' + reasons.map(function (x) { return x.kind; }).join(', '));
+    return reasons.filter(function (x) { return x.kind === 'activity'; })[0] || null;
+  }
+
   test('a stale profile gets no activity reason', function () {
     const stale = clone(RILEY);
     stale.lastActiveAt = '2026-01-01T00:00:00.000Z';
@@ -687,8 +710,24 @@
     assert.equal(r.reasons.filter(function (x) { return x.kind === 'activity'; }).length, 0);
     assert.ok(r.breakdown.activity < 0.2);
 
-    const fresh = M.scoreCandidate(ALEX, RILEY, OPTS);
-    assert.equal(fresh.reasons.filter(function (x) { return x.kind === 'activity'; }).length <= 1, true);
+    // Again where the cap cannot do the work: the stale candidate gets no
+    // line, and the control, the same candidate active six hours ago, does.
+    assert.equal(activityReason('2026-01-01T00:00:00.000Z'), null, 'two months quiet');
+    assert.ok(activityReason(HOURS_6), 'active six hours ago and no activity reason');
+  });
+
+  test('the activity reason says "today" for 24 hours and "this week" for three days', function () {
+    const TODAY = { icon: '⚡', text: 'Active today', kind: 'activity' };
+    const THIS_WEEK = { icon: '⚡', text: 'Active this week', kind: 'activity' };
+    assert.deepEqual(activityReason(HOURS_6), TODAY);
+    // "Today" is the last 24 hours, not a calendar day: the engine is handed
+    // `now` and never a timezone, so it has no calendar to consult.
+    assert.deepEqual(activityReason('2026-02-28T12:00:01.000Z'), TODAY, 'a second short of a day');
+    assert.deepEqual(activityReason('2026-02-28T12:00:00.000Z'), THIS_WEEK, 'exactly a day');
+    // The 0.7 gate on activityScore falls at exactly three days, because
+    // 1 / (1 + 3/7) is exactly 0.7, in floating point as well as on paper.
+    assert.deepEqual(activityReason('2026-02-26T12:00:00.000Z'), THIS_WEEK, 'exactly three days');
+    assert.equal(activityReason('2026-02-26T11:59:00.000Z'), null, 'three days and a minute');
   });
 
   /* ----------------------------------------------------------------------
@@ -876,6 +915,19 @@
       const band = M.compatibilityLabel(n);
       assert.ok(band.label.length > 0 && band.tone.length > 0);
     });
+  });
+
+  test('compatibilityLabel finds a band for every input, garbage included', function () {
+    // There is nothing after the band loop to catch an input that matched no
+    // band: anything that is not a finite number reads as 0, and the lowest
+    // band's min is -Infinity. Raise that floor above 0 and a score of 0
+    // comes back undefined instead of as a band, which this is here to see.
+    const FLOOR = { label: 'Long shot', tone: 'low' };
+    [0, 39.9, -1, -Infinity, Infinity, NaN, null, undefined, '85', {}].forEach(function (input) {
+      assert.deepEqual(M.compatibilityLabel(input), FLOOR, 'input ' + String(input));
+    });
+    assert.deepEqual(M.compatibilityLabel(40), { label: 'Worth a look', tone: 'fair' });
+    assert.deepEqual(M.compatibilityLabel(1000), { label: 'Exceptional match', tone: 'excellent' });
   });
 
   test('explain writes one readable sentence', function () {

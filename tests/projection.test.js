@@ -319,3 +319,57 @@ test('the rules accept exactly the keys the store puts in a private user documen
     'A key in the store but not the rules is a write Firebase mode will reject; a key in ' +
     'the rules but not the store is an allowance nothing needs. Move both together.');
 });
+
+test('the rules accept exactly the keys written into each map of a private user document', async function () {
+  // One level down from the test above, which compares the top level only. Below
+  // that level firestore.rules used to close nothing but `profile.personality`, and
+  // that test did not compare it: userDocOk's list stopped a field being added
+  // BESIDE `profile` and nothing stopped one being added inside it. profileOk,
+  // prefsOk, learningOk, usageOk and the private locationOk each close their own
+  // list now — and a field added to one of DEFAULT_USER's maps without its rule
+  // would then make every sign-up and every profile save a refused write in
+  // Firebase mode, since both write the whole default shape, while every demo-mode
+  // test stayed green: the failure the comparison above exists to turn into an
+  // `npm test` one. `personality` is here because the store writes all five axes
+  // on every account.
+  const stored = await window.ZC.store.createUser('rules-nested-shape-uid', {});
+
+  // `location` is the one map DEFAULT_USER cannot speak for: it is null there, and
+  // the only code that writes one is the profile editor's buildPatch. That is a page
+  // script with a form behind it, so its literal is read rather than run, and the
+  // literal is the whole shape. Without this the location list was compared with
+  // nothing: a key the editor added would be refused on every save that carries a
+  // location, and no Firebase-mode run saves one from the editor — the rules specs
+  // write a location fixture of their own.
+  const editor = fs.readFileSync(path.join(ROOT, 'public/js/profile.js'), 'utf8');
+  const literal = /function buildPatch\(\)[\s\S]*?const location = state\.coords\s*\?\s*\{([^}]*)\}/.exec(editor);
+  assert.ok(literal, 'no `const location = state.coords ? { ... }` found in buildPatch() in public/js/profile.js — ' +
+    'this test is comparing nothing for location. If it moved, follow it here.');
+  const location = [...literal[1].matchAll(/(?:^|,)\s*(\w+)\s*:/g)].map(function (m) { return m[1]; });
+
+  const pairs = [
+    { what: 'profile', got: Object.keys(stored.profile || {}), fn: 'profileOk' },
+    { what: 'profile.personality', got: Object.keys(stored.profile.personality || {}), fn: 'personalityOk' },
+    { what: 'profile.location, as profile.js buildPatch() writes it', got: location, fn: 'locationOk' },
+    { what: 'preferences', got: Object.keys(stored.preferences || {}), fn: 'prefsOk' },
+    { what: 'learning', got: Object.keys(stored.learning || {}), fn: 'learningOk' },
+    { what: 'usage', got: Object.keys(stored.usage || {}), fn: 'usageOk' }
+  ];
+
+  const problems = [];
+  pairs.forEach(function (pair) {
+    // The first function of each name, which is the private document's copy: the
+    // users/{uid} block comes before discovery/{uid}.
+    const allowed = hasOnlyList(pair.fn).sort();
+    const got = pair.got.slice().sort();
+    const extra = got.filter(function (k) { return allowed.indexOf(k) === -1; });
+    const unused = allowed.filter(function (k) { return got.indexOf(k) === -1; });
+    if (extra.length) problems.push(pair.what + ': written but not allowed by ' + pair.fn + ' — ' + extra.join(', '));
+    if (unused.length) problems.push(pair.what + ': allowed by ' + pair.fn + ' but never written — ' + unused.join(', '));
+  });
+
+  assert.deepEqual(problems, [],
+    'the client writes nested maps whose keys firestore.rules does not accept, or the reverse:\n  ' +
+    problems.join('\n  ') + '\nA key written but not allowed is a write Firebase mode will reject; ' +
+    'a key allowed but never written is an allowance nothing needs. Move both together.');
+});

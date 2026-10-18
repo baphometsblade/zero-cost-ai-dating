@@ -74,7 +74,9 @@
   // this listed order, which is also the order of the default weights.
   const REASON_ORDER = ['interests', 'personality', 'bio', 'distance', 'age', 'activity'];
 
-  // Compatibility bands, highest first.
+  // Compatibility bands, highest first. The last band's -Infinity min is the
+  // floor, not a threshold: compatibilityLabel has no fallback after its loop
+  // and relies on this band to take every score the bands above it do not.
   const LABEL_BANDS = [
     { min: 85, label: 'Exceptional match', tone: 'excellent' },
     { min: 70, label: 'Strong match', tone: 'strong' },
@@ -96,8 +98,12 @@
   };
 
   /**
-   * ~130 English function words. Anything in here carries no signal about who a
-   * person is, so it never reaches the TF-IDF vectors.
+   * 183 English function and filler words, contracted forms included. Anything
+   * in here carries no signal about who a person is, so it is dropped before it
+   * can reach the TF-IDF vectors. The lookup is made on each normalised word
+   * before it is stemmed, so a word the list does not carry can still stem
+   * into one that it does: 'likes' reaches the vectors as 'like', and
+   * 'evenings' as 'even'.
    */
   const STOPWORDS = new Set([
     'about', 'above', 'after', 'again', 'against', 'all', 'also', 'and', 'any', 'are',
@@ -1196,11 +1202,14 @@
    * @returns {{label: string, tone: string}}
    */
   function compatibilityLabel(score) {
+    // Anything that is not a finite number reads as 0 and the rest is clamped,
+    // so `value` is a finite number in 0..100, which the -Infinity floor in
+    // LABEL_BANDS always matches. The loop returns on every input, which is
+    // why there is no fallback after it: one could never run.
     const value = num(score) === null ? 0 : clamp(score, 0, 100);
     for (let i = 0; i < LABEL_BANDS.length; i++) {
       if (value >= LABEL_BANDS[i].min) return { label: LABEL_BANDS[i].label, tone: LABEL_BANDS[i].tone };
     }
-    return { label: LABEL_BANDS[LABEL_BANDS.length - 1].label, tone: LABEL_BANDS[LABEL_BANDS.length - 1].tone };
   }
 
   /** Lowercase the first letter of a sentence fragment so it can be joined on. */

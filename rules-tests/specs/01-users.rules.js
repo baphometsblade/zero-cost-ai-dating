@@ -127,7 +127,62 @@ module.exports = {
       // The one that mattered most: a map's *values* were never looked at, so
       // `{ hiking: <a megabyte of x> }` was one key, well inside the cap of 60.
       ['an affinity whose value is a string rather than a weight',
-        { learning: { interestAffinity: { hiking: 'x'.repeat(2000) }, likeCount: 0, passCount: 0 } }]
+        { learning: { interestAffinity: { hiking: 'x'.repeat(2000) }, likeCount: 0, passCount: 0 } }],
+
+      // The top-level padding check above, one level down. `userDocOk` closed its own
+      // key list and none of the validators it hands a map to closed theirs, so a
+      // field nobody reads could not be added BESIDE `profile` and could be added
+      // INSIDE it, at any size the 1 MiB ceiling would hold — while two comments in
+      // firestore.rules said that lever was shut. One unexpected key per map is the
+      // whole test, for the same reason as above.
+      ['a profile field the shape does not name', { profile: prof({ padding: 'x'.repeat(64) }) }],
+      ['a preferences field the shape does not name', { preferences: prefs({ padding: 'x'.repeat(64) }) }],
+      ['a learning field the shape does not name',
+        { learning: { interestAffinity: {}, likeCount: 0, passCount: 0, padding: 'x'.repeat(64) } }],
+      ['a usage field the shape does not name',
+        { usage: { date: '2026-01-01', likes: 0, superLikes: 0, rewinds: 0, padding: 'x'.repeat(64) } }],
+      ['a location field the shape does not name',
+        { profile: prof({ location: { label: 'X', lat: 45.5, lng: -122.7, padding: 'x'.repeat(64) } }) }],
+      // Closed already, and untested here until now.
+      ['a personality axis the shape does not name',
+        { profile: prof({ personality: { openness: 50, padding: 'x'.repeat(64) } }) }],
+
+      // Closing those lists cost evaluation budget, and it was paid for partly by
+      // dropping type tests that the next operation performs anyway — the trade
+      // `interestedIn` above already makes, and executed here for the same reason.
+      //
+      // `is map`, because `keys()` exists only on a map and raises on anything else.
+      // A LIST is the fixture that matters in profile, preferences, learning, usage and
+      // personality, where every field is optional: `'bio' in [...]` is a membership
+      // test that answers false rather than raising, so a list would sail past every
+      // guard in them if nothing pinned the type, and those five rows go red when
+      // `keys()` is removed. Location and interestAffinity lost their `is map` as well,
+      // but a list never depended on it there — `loc.lat` is read unconditionally, and
+      // affinityOk calls `keys()` and `values()` on whatever it is given — so their two
+      // rows stay green with or without it: guards, not evidence.
+      ['a profile that is a list, not a map', { profile: ['x'.repeat(64)] }],
+      ['preferences that are a list, not a map', { preferences: ['x'.repeat(64)] }],
+      ['learning that is a list, not a map', { learning: ['x'.repeat(64)] }],
+      ['usage that is a list, not a map', { usage: ['x'.repeat(64)] }],
+      ['a personality that is a list, not a map', { profile: prof({ personality: ['x'.repeat(64)] }) }],
+      ['a location that is a list, not a map', { profile: prof({ location: ['x'.repeat(64)] }) }],
+      ['an interestAffinity that is a list, not a map',
+        { learning: { interestAffinity: ['x'.repeat(64)], likeCount: 0, passCount: 0 } }],
+      // `is number`, because comparing anything else with a number denies. The
+      // one-sided counters are the rows that carry that claim: a value of the wrong
+      // type has to fail `>= 0` on its own, with no upper bound beside it to catch it.
+      ['a likeCount that is a string', { learning: { interestAffinity: {}, likeCount: 'x'.repeat(64), passCount: 0 } }],
+      ['a passCount that is a string', { learning: { interestAffinity: {}, likeCount: 0, passCount: 'x'.repeat(64) } }],
+      ['a likes counter that is a string',
+        { usage: { date: '2026-01-01', likes: 'x'.repeat(64), superLikes: 0, rewinds: 0 } }],
+      ['a superLikes counter that is a string',
+        { usage: { date: '2026-01-01', likes: 0, superLikes: 'x'.repeat(64), rewinds: 0 } }],
+      ['a rewinds counter that is a string',
+        { usage: { date: '2026-01-01', likes: 0, superLikes: 0, rewinds: 'x'.repeat(64) } }],
+      // ...and one from each validator whose two-sided ranges lost their `is number`.
+      ['a maxDistanceKm that is a string', { preferences: prefs({ maxDistanceKm: '50' }) }],
+      ['a latitude that is a string', { profile: prof({ location: { label: 'X', lat: '45.5', lng: -122.7 } }) }],
+      ['a personality axis that is a string', { profile: prof({ personality: { openness: '50' } }) }]
     ];
     for (const [label, over] of bad) {
       t.check('write rejected: ' + label,

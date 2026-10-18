@@ -1079,21 +1079,6 @@
      ------------------------------------------------------------------------ */
 
   /**
-   * The label to store with a set of coordinates: whatever the user typed,
-   * else the nearest bundled city, else the coordinates themselves. A
-   * location is never saved without something readable attached to it.
-   * @param {{lat:number,lng:number}} coords stored coordinates
-   * @returns {string}
-   */
-  function locationLabelFor(coords) {
-    const typed = state.locationLabel.trim();
-    if (typed) return typed;
-    const near = nearestCity(coords.lat, coords.lng);
-    if (near && near.km <= 120) return near.city.label;
-    return formatCoords(coords.lat, coords.lng);
-  }
-
-  /**
    * Build the patch ZC.store.updateUser merges into the user document.
    * @returns {Object} partial UserDoc
    */
@@ -1103,8 +1088,19 @@
       personality[axis.key] = Math.round(util.clamp(state.personality[axis.key], 0, 100));
     });
 
+    // The label is the one in the box, an empty box included. An empty one used
+    // to be filled in on the way out — the nearest bundled city, else the
+    // coordinates — and nothing else on this page knew: the form, the live
+    // preview and the unsaved-changes snapshot all held the empty box. So a label
+    // somebody deleted was written straight back, was in the box again on their
+    // next visit, and Discard after that save repainted from a stored document
+    // the baseline had never seen, leaving "Unsaved changes." with nothing to
+    // save. Picking a city and "Use my location" both fill the box, every bundled
+    // profile carries a label, and the old save wrote one every time — so an
+    // empty box beside coordinates is one somebody emptied. The rules accept an
+    // empty label, and every card that shows a label leaves out an empty one.
     const location = state.coords
-      ? { label: locationLabelFor(state.coords), lat: state.coords.lat, lng: state.coords.lng }
+      ? { label: state.locationLabel.trim(), lat: state.coords.lat, lng: state.coords.lng }
       : null;
 
     return {
@@ -1338,8 +1334,10 @@
 
   /**
    * Two columns with a sticky preview once the viewport can take it. Done
-   * from script because the CSP forbids style attributes and the design
-   * system has no two-column profile class.
+   * from script because the design system has no two-column profile class.
+   * Not because of the CSP: the shipped `style-src 'self' 'unsafe-inline'`
+   * allows style attributes. These are CSSOM writes, which `style-src` does not
+   * govern at all, so they would keep working if 'unsafe-inline' were dropped.
    * @returns {void}
    */
   function applyLayout() {

@@ -20,12 +20,20 @@ module.exports = {
       // redirected to auth.html before the cached page could prove anything.
       await h.signIn(page, server.origin);
       await page.goto(server.origin + '/index.html', { waitUntil: 'domcontentloaded' });
+      // `ready` settles only once a worker is active — never, when install
+      // fails — and page.evaluate has no timeout of its own, so on its own
+      // this check could not fail: a broken install hung the run at this line
+      // instead (measured: a CORE entry that 404s, killed after two minutes
+      // with nothing printed). Raced against the same 15 s the precache wait
+      // below allows, a worker that never activates is a FAIL here.
       const registered = await page.evaluate(function () {
-        return navigator.serviceWorker.ready.then(function (reg) {
-          return !!(reg && reg.active);
-        });
+        return Promise.race([
+          navigator.serviceWorker.ready.then(function (reg) { return !!(reg && reg.active); }),
+          new Promise(function (resolve) { setTimeout(function () { resolve(false); }, 15000); })
+        ]);
       });
-      t.check('the service worker installs and activates', registered);
+      if (!t.check('the service worker installs and activates', registered,
+        registered ? 'active' : 'no active worker after 15 s')) return;
 
       // The worker precaches on install; wait for the cache to actually hold
       // the shell rather than for an arbitrary delay.
