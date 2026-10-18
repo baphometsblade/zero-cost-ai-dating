@@ -39,6 +39,10 @@ Two further Pages constraints are worth knowing because they shaped the code:
   `Cache-Control` tiers — cannot be expressed as meta tags and exist only on Firebase
   Hosting. A policy in the markup applies wherever the file is served, your own machine
   included, which is why a browser cannot reach a local emulator without help — section 12.
+  Pages sends `max-age=600` on every file instead, so for ten minutes after a deploy a
+  returning visitor can mix a page and a script from either side of it; the most the app
+  can do there is what `sw.js` does, which is to install a new worker's offline copy from
+  the server rather than from that cache, so the copy is one deploy.
 
 That second point is the reason the rest of this guide exists: for a real deployment with
 accounts, a shared database, and the full header set, Firebase Hosting on the Spark plan is
@@ -259,7 +263,7 @@ firebase use --add          # pick your project, alias it "default"
 Then:
 
 ```bash
-npm test                    # 14 suites, 284 checks, no install required
+npm test                    # 14 suites, 287 checks, no install required
 npm run deploy              # firebase deploy --only hosting,firestore
 ```
 
@@ -267,6 +271,22 @@ That single command uploads `public/`, publishes `firestore.rules`, and creates 
 indexes from `firestore.indexes.json`. **Index builds take a few minutes** and the app will
 throw `failed-precondition` errors on Discover until they finish — the console's Firestore →
 Indexes tab shows the progress.
+
+**A deploy reaches returning visitors whole, on the next page they load.** Pages, scripts and
+stylesheets are all served `no-cache`, which is not "do not cache": the browser keeps them,
+and asks the server before each reuse whether the file has changed. Hosting sends an ETag with
+every file and answers that question with a `304` and no body when nothing has, so the cost is
+one round trip per file — nine or ten on a page, sent together — and no bytes. Scripts and
+stylesheets used to carry `max-age=3600` against pages that did not, so for an hour after
+every deploy a returning visitor ran the previous deploy's scripts against the new pages;
+the service worker did not help, because its network-first fetch reads the same HTTP cache.
+The first deploy carrying this header still meets copies cached under the old one, which
+keep their hour — once. The file names carry no version, so a cache lifetime of any length
+on them reopens that window; `e2e/specs/07-offline.e2e.js` deploys a changed script under a returning visitor,
+with Hosting's headers, and fails if a reload runs the old one, with a service worker or
+without. Images and fonts keep their year-long `immutable` lifetime. The only one in
+`public/` is `favicon.svg`, which no code depends on — but a changed icon reaches someone who
+has the old one only under a new file name.
 
 Useful narrower commands while iterating:
 
@@ -438,7 +458,7 @@ the suite still fails: *connect-src allows only what the three Firebase SDKs the
 can contact*, in the same file, holds every source in that directive to a list of the
 sources the shipped code actually connects to, each with its reason, and names both
 loopback origins as sources nothing in this app connects to. Be clear about what that does
-**not** catch — add them to that list as well and the suite goes quiet again, all 284
+**not** catch — add them to that list as well and the suite goes quiet again, all 287
 checks passing, and the weakened policy deploys to everyone. Change the meta copy only, and
 change it back.
 

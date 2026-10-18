@@ -267,7 +267,7 @@ npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.
 
 ### Unit suites
 
-Fourteen suites on Node's built-in runner — **284 checks**, no install, no browser, seconds:
+Fourteen suites on Node's built-in runner — **287 checks**, no install, no browser, seconds:
 
 | Suite | What it pins down |
 | --- | --- |
@@ -280,9 +280,9 @@ Fourteen suites on Node's built-in runner — **284 checks**, no install, no bro
 | `tests/limits.test.js` | Every bound in this app is written down twice — once in `public/js/profile.js`, which enforces it while you type and names it in the message, and once in `firestore.rules`, because a client-side limit is a courtesy. This reads both files and refuses to let them drift: no limit the form accepts may be one the rules refuse, the private document and the public projection must state each bound identically, and the rules' photo-link allowance must be exactly six of what the editor permits per link. Plus the two rules that made those caps necessary: every key a `hasOnly` allowlist admits must be one something in the same validator looks at, and a list whose *length* is bounded must have its *contents* bounded too, counted per occurrence, because one element can be a megabyte. And every closed vocabulary the rules pin — report reasons, genders, themes, plans — must be exactly the list the client offers, because the client validates against its own copy and cannot see the rules refuse a slug it added: a report reason added to the dialog alone would be an abuse report that cannot be filed, refused with nothing named. The first of the two rules above found `discovery/{uid}.personality` accepting anything at all, three lines from the `location` field that had the same defect and was caught by eye rounds earlier; it reads code with the comments stripped, because deleting a rule and leaving `// TODO: validate 'personality' here.` behind is the likeliest shape a real edit takes and the first version of the check passed against exactly that. |
 | `tests/matching-engine.test.js` | Every hard filter including the mutual gender/age cases, the neutral missing-location path, score bounds, determinism, tokeniser and cosine behaviour, learning clamp/prune/cap, ranking tie-breaks, weight renormalisation, and a golden end-to-end score. |
 | `tests/projection.test.js` | What is public about an account, agreed in one place. The key set `projectDiscovery()` emits must equal the closed `hasOnly` lists in `firestore.rules`, and drift either way is named. So must the keys a private user document is written with, against `userDocOk`'s list and each nested validator's: the document the shipped store creates for a new account, at the top level and in each of its maps but `learning.interestAffinity`, whose keys are interest tags and so an open set, and the location the profile editor writes, which a new account does not have — a key the client writes and the rules do not allow is a refused sign-up or profile save in Firebase mode only, where no demo-mode test would see it. And, separately, a fully populated private account is projected and searched for sentinels, so `email`, `birthdate`, `blocked`, `learning` or `usage` cannot reach the world-readable half even if somebody widens the rules to let them. |
-| `tests/pwa.test.js` | The manifest and the service worker carry no root-anchored assumptions, so the same `public/` installs and serves offline under a GitHub Pages project subpath as well as at a site root. |
+| `tests/pwa.test.js` | The manifest and the service worker carry no root-anchored assumptions, so the same `public/` installs and serves offline under a GitHub Pages project subpath as well as at a site root. And a new worker's install asks the server for the shell rather than the browser's HTTP cache, so the offline copy it stores is one deploy, not files from either side of one; has every file in hand before it stores any, so an install that fails partway leaves the cache its predecessor serves offline as it was; and reads each file as it arrives, because holding two dozen responses unread against the six connections a browser opens to a host left the new worker installing for good. |
 | `tests/seed.test.js` | The shape of all 32 seeded profiles against the data model, unique uids and emails, valid interest slugs, ages consistent with birthdates, and `seed-data.js` being in sync with `seed/profiles.json`. |
-| `tests/static.test.js` | Parses every HTML page: no dead local `src`/`href`, correct script load order, no inline script whose hash the CSP does not list and no `style=` attribute or `on*=` handler (the CSP would block them), no class token that the CSS does not define, and `lang` + `title` + viewport + description on every page. Then two things the pages depend on without naming them. The service worker's precache list names every file Hosting deploys, in any folder — the worker itself aside — and nothing that does not exist, so a file added in a folder of its own cannot ship uncached and missing offline. And every glyph the stylesheets generate carries alternative text, because generated content is read aloud: a decorative one is given `''`, and the plan rows' ✓ and ✕, the only thing separating an included feature from a missing one, are announced as *Included:* and *Not included:*. Last, the plans page's placeholder usage rows are the rows `subscription.js` draws, label for label: they hold the plan cards where they will stay while today's counters load, and one short would move the cards by its height on every visit. And the matches page ships its conversation card visible, leaving the loading state to the stylesheet: scripts are cached for an hour and pages are not, so a card shipped hidden for this deploy's `matches.js` to reveal stayed hidden, conversations and all, under the previous deploy's. |
+| `tests/static.test.js` | Parses every HTML page: no dead local `src`/`href`, correct script load order, no inline script whose hash the CSP does not list and no `style=` attribute or `on*=` handler (the CSP would block them), no class token that the CSS does not define, and `lang` + `title` + viewport + description on every page. Then two things the pages depend on without naming them. The service worker's precache list names every file Hosting deploys, in any folder — the worker itself aside — and nothing that does not exist, so a file added in a folder of its own cannot ship uncached and missing offline. And every glyph the stylesheets generate carries alternative text, because generated content is read aloud: a decorative one is given `''`, and the plan rows' ✓ and ✕, the only thing separating an included feature from a missing one, are announced as *Included:* and *Not included:*. Last, the plans page's placeholder usage rows are the rows `subscription.js` draws, label for label: they hold the plan cards where they will stay while today's counters load, and one short would move the cards by its height on every visit. And the matches page ships its conversation card visible, leaving the loading state to the stylesheet: a page and its scripts can come from two deploys, and a card shipped hidden for this deploy's `matches.js` to reveal stayed hidden, conversations and all, under the previous deploy's. |
 | `tests/usage.test.js` | The daily counter's decision, `nextUsage(current, field, amount, today)`, as a pure function: same-day increment, a stale day resetting to zeros *before* the amount lands, an unknown field, a missing or corrupt record, the clamp at zero. Then the same decision through the demo adapter, so it is proven to persist and `canSpend` is proven to agree with it. |
 | `tests/utils.test.js` | The pure half of `ZC.util` — numbers, timing on a hand-rolled fake clock, dates, geo, hashing, avatars, URL parsing. The DOM half needs a live document and belongs to the browser suite. |
 
@@ -293,7 +293,7 @@ store and its daily counter, the auth backend, the pure half of the utilities, t
 schema, the static HTML. It cannot reach the flows that only exist in a DOM — signing in,
 the deck and its keyboard, the match burst, chat that persists, reporting someone, deleting
 your account, and the service worker serving the app with the network gone. Those live in
-`e2e/`: **351 checks** across the twelve specs that need nothing installed but a browser, each
+`e2e/`: **353 checks** across the twelve specs that need nothing installed but a browser, each
 run at 390x844 and most of them at 1280x800 as well — plus a thirteenth, `10-firebase.e2e.js`,
 which needs the Firebase emulators and skips, by name and reason, when they are not running.
 
@@ -316,7 +316,7 @@ Firebase rather than `localStorage`: the real SDK, real Auth, real Firestore, an
 read back out of the emulator instead of off the page. It drives the pages **with their real
 CSP meta tag** — the emulators are reached through the page's own origin rather than by
 relaxing the policy, which is the whole reason it can exist; the Limitations section explains
-the constraint it is working around. With both emulators up the run is **370 checks**, all
+the constraint it is working around. With both emulators up the run is **372 checks**, all
 passing.
 
 It did not start that way. On its first run one check was red, and it had found a real bug:
@@ -328,7 +328,7 @@ fixture in `rules-tests/` ever used a null there. The rule now accepts null, and
 checks pin the shape.
 
 Without an emulator the runner prints `SKIP` and records nothing, so `npm run test:e2e` on a
-bare machine is still 351/351 — and CI runs it both ways, so the skip path and the emulator
+bare machine is still 353/353 — and CI runs it both ways, so the skip path and the emulator
 path are each exercised on every push.
 
 ### Security rules tests
@@ -439,7 +439,7 @@ inside a single boot, because booting costs more than either suite does. The `e2
 the browser suite twice: once bare, which is what a contributor with nothing installed gets
 and which proves the Firebase spec skips rather than silently passing, and once inside
 `emulators:exec`, which is the only run in which every spec executes and therefore the only
-one that can hold the 370-check total to account. There are no secrets and no deploy step —
+one that can hold the 372-check total to account. There are no secrets and no deploy step —
 deploying stays a deliberate local `npm run deploy`.
 
 ---
@@ -565,6 +565,20 @@ These are real, and worth knowing before you show this to anyone:
   publishes shares one, so the cache name now carries the deployment's path and cleanup
   stays inside it — and a failed runtime cache write escaped its `.catch` as an unhandled
   rejection. `tests/pwa.test.js` now runs the worker itself, not just reads it.
+- **For an hour after every deploy, returning visitors ran the previous deploy's scripts.**
+  `firebase.json` served pages `no-cache` and scripts and stylesheets `max-age=3600`, under
+  file names that never change, so a reload fetched the new page and took its scripts from
+  the browser's cache without asking. The service worker did not help: its network-first
+  fetch reads the same HTTP cache. It surfaced when a page started relying on its own
+  script — the matches page shipped its conversation card hidden for the new `matches.js`
+  to reveal, and under the old one there was nothing to tap — and the e2e suite could not
+  have seen it: every session it opens routes the Firebase SDK away, and Playwright turns
+  the HTTP cache off for any context that routes. Scripts and stylesheets are `no-cache`
+  now; Hosting answers each revalidation with a `304` and no body, measured against a live
+  Hosting site. `e2e/specs/07-offline.e2e.js` serves the app with Hosting's own headers to a
+  browser of its own, changes a script under it, and fails if a reload runs the old one,
+  with a service worker or without. GitHub Pages still caches every file for ten minutes and
+  cannot be told otherwise.
 - **Blocking stops contact, not visibility — and only the rules make even that true.**
   Your block list lives in your private `users/{uid}` document and is deliberately left
   out of the public `discovery/{uid}` projection, because publishing who somebody has

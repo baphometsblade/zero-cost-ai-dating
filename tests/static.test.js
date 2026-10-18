@@ -576,10 +576,10 @@ test('the plans page arrives with a placeholder for each usage row subscription.
 });
 
 test('the matches list pane ships its cards visible and leaves the loading state to the stylesheet', function () {
-  // Scripts are cached for an hour and pages are not (firebase.json), so for
-  // an hour after a deploy a returning visitor runs the previous matches.js
-  // against the new page. The conversation card once shipped `hidden` for the
-  // new script to reveal, and under the old one it never was: no
+  // A page and its scripts can come from two deploys: Hosting cached scripts
+  // for an hour against pages it did not, and GitHub Pages still caches every
+  // file for ten minutes. The conversation card once shipped `hidden` for the
+  // new matches.js to reveal, and under the old one it never was: no
   // conversations, nothing to tap. .list-skeleton (components.css) holds the
   // cards back while the loading card shows, whichever script is running.
   const html = blankHtmlComments(fs.readFileSync(path.join(PUBLIC_DIR, 'matches.html'), 'utf8'));

@@ -193,6 +193,7 @@ function runWorker(opts) {
   const stores = new Map();
   (o.existing || []).forEach(function (name) { stores.set(name, new Map()); });
   const deleted = [];
+  const fetched = [];
   const origin = 'https://example.test';
   function keyOf(req) {
     return new URL(typeof req === 'string' ? req : req.url, origin + '/').href;
@@ -226,12 +227,17 @@ function runWorker(opts) {
   };
   const context = vm.createContext({
     self: self, caches: caches, Response: Response, URL: URL, Blob: Blob, Headers: Headers,
-    fetch: function (req) { return Promise.resolve(o.fetch(typeof req === 'string' ? req : req.url)); }
+    fetch: function (req, init) {
+      const url = typeof req === 'string' ? req : req.url;
+      fetched.push({ url: url, init: init || null });
+      return Promise.resolve(o.fetch(url));
+    }
   });
   vm.runInContext(fs.readFileSync(SW_PATH, 'utf8'), context, { filename: SW_PATH });
   return {
     stores: stores,
     deleted: deleted,
+    fetched: fetched,
     cacheName: vm.runInContext('CACHE', context),
     core: vm.runInContext('CORE', context),
     fire: function (type, extra) {
@@ -275,6 +281,83 @@ test('install stores every page WITHOUT its redirect, so a navigation may be ser
     assert.equal(stored.headers.get('content-length'), null, file + ' still claims the compressed length');
     assert.equal(stored.headers.get('content-type'), 'text/html; charset=utf-8', file + ' lost its content type');
   }
+});
+
+test('install asks the server for the shell, not the browser\'s HTTP cache', async function () {
+  // A new worker installs because a deploy changed it, so what it stores as the
+  // offline copy has to be that deploy. A plain fetch is answered from the HTTP
+  // cache when it can be, and GitHub Pages caches every file for ten minutes:
+  // a page or script the browser kept from before the deploy would be stored as
+  // this deploy's shell, beside files that are not.
+  const worker = runWorker({ fetch: function (url) { return fakeResponse('ok ' + url); } });
+  await worker.fire('install');
+  assert.equal(worker.fetched.length, worker.core.length, 'install fetched ' + worker.fetched.length +
+    ' times for ' + worker.core.length + ' shell assets');
+  const cached = worker.fetched.filter(function (call) { return !call.init || call.init.cache !== 'no-cache'; });
+  assert.deepEqual(cached.map(function (call) { return call.url; }), [],
+    'fetched without `cache: \'no-cache\'`, so the browser may answer from its HTTP cache');
+});
+
+test('an install that fails leaves the cache it found exactly as it was', async function () {
+  // A worker installs into the cache its predecessor is still serving offline
+  // from whenever sw.js changes without a version bump. Writing each asset as
+  // it arrived meant that one asset failing rejected the install — the old
+  // worker stays — after the others had already overwritten its copies, and
+  // the shell it went on serving offline was half this deploy, half the last.
+  const worker = runWorker({
+    fetch: function (url) {
+      return /matches\.html$/.test(url) ? fakeResponse('gone', { ok: false, status: 404 }) : fakeResponse('new ' + url);
+    }
+  });
+  const before = new Map([['https://example.test/index.html', fakeResponse('old index.html')]]);
+  worker.stores.set(worker.cacheName, new Map(before));
+  await assert.rejects(worker.fire('install'), /matches\.html answered 404/);
+  // The assets that did arrive settle after the rejection; let them.
+  for (let i = 0; i < 10; i += 1) await new Promise(function (resolve) { setImmediate(resolve); });
+  const after = worker.stores.get(worker.cacheName);
+  assert.deepEqual(Array.from(after.keys()), Array.from(before.keys()), 'a failed install wrote into the cache it found');
+  assert.equal(await after.get('https://example.test/index.html').text(), 'old index.html',
+    'a failed install overwrote the copy the old worker serves offline');
+});
+
+test('install reads each asset as it arrives, so six connections are enough', async function () {
+  // A browser opens six HTTP/1.1 connections to a host, and a response holds
+  // its connection until its body is read. Gathering the shell by holding every
+  // response unread until the last one arrived left the seventh fetch waiting
+  // for a connection that never freed: in Chromium the new worker sat in
+  // `installing` for good. Modelled here: six responses at a time may be
+  // unread, and the next fetch waits for one of them to be.
+  const CONNECTIONS = 6;
+  let unread = 0;
+  const queued = [];
+  const worker = runWorker({
+    fetch: function (url) {
+      function answer() {
+        unread += 1;
+        const res = fakeResponse('ok ' + url);
+        const read = res.blob;
+        let freed = false;
+        res.blob = function () {
+          if (!freed) {
+            freed = true;
+            unread -= 1;
+            const next = queued.shift();
+            if (next) next();
+          }
+          return read();
+        };
+        return res;
+      }
+      if (unread < CONNECTIONS) return answer();
+      return new Promise(function (resolve) { queued.push(function () { resolve(answer()); }); });
+    }
+  });
+  const outcome = await Promise.race([
+    worker.fire('install').then(function () { return 'installed'; }),
+    new Promise(function (resolve) { setTimeout(function () { resolve('stalled'); }, 1000); })
+  ]);
+  assert.equal(outcome, 'installed', 'install stalled with ' + queued.length + ' of ' + worker.core.length +
+    ' fetches waiting on a connection held by an unread response');
 });
 
 test('install still fails as a whole when any shell asset is not a success', async function () {

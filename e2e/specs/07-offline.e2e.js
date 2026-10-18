@@ -1,7 +1,69 @@
 /* The service worker's whole point: once the shell is cached, the clean URLs
    Firebase Hosting serves must keep working with no server at all. This spec
-   runs its own server precisely so it can take it away. */
+   runs its own server precisely so it can take it away.
+
+   And the other side of caching: after a deploy, a returning visitor runs that
+   deploy's scripts, not the ones their browser kept. */
 'use strict';
+
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+/**
+ * Load the app as a returning visitor, deploy a changed script under it, and
+ * report whether a reload ran the new one.
+ *
+ * Production's caching, as close as this suite gets to it: the site is served
+ * with the Cache-Control firebase.json gives each file, and the browser is one
+ * of this spec's own. Every session the harness opens routes the Firebase SDK
+ * away, and Playwright turns the HTTP cache off for any context that routes —
+ * which is why no spec could see this. Here the SDK's hosts simply do not
+ * resolve, so the page falls back to demo mode with the cache left on.
+ *
+ * Scripts were cached for an hour against pages that were not, so for that
+ * hour after a deploy a reload ran the old scripts against the new page, with
+ * the service worker in control or without one: its network-first fetch goes
+ * through the same HTTP cache. PR #48 met it as a conversation list that never
+ * appeared, under a matches.js that did not know to reveal it.
+ * @param {Object} h the harness
+ * @param {'allow'|'block'} workers whether a service worker may take control
+ * @returns {Promise<{controlled:boolean, ran:*}>}
+ */
+async function deployedScriptRuns(h, workers) {
+  const site = fs.mkdtempSync(path.join(os.tmpdir(), 'zc-deploy-'));
+  let server = null;
+  let browser = null;
+  // Everything after the copy is inside the try, so a server that started
+  // and a browser that did not still end with the server stopped and the
+  // copy gone, rather than a listening port holding the run open.
+  try {
+    fs.cpSync(h.PUBLIC_DIR, site, { recursive: true });
+    server = await h.startServer(site, { cacheHeaders: true });
+    browser = await h.loadPlaywright().chromium.launch({
+      args: ['--host-resolver-rules=MAP www.gstatic.com ~NOTFOUND, MAP apis.google.com ~NOTFOUND']
+    });
+    const context = await browser.newContext({ serviceWorkers: workers });
+    const page = await context.newPage();
+    await h.signIn(page, server.origin);
+    // Two more pages, so the worker (when allowed) has installed and claimed
+    // the tab, and every script the next load asks for is in the HTTP cache.
+    await page.goto(server.origin + '/matches.html', { waitUntil: 'load' });
+    await page.goto(server.origin + '/settings.html', { waitUntil: 'load' });
+    const controlled = await page.evaluate(function () {
+      return !!(navigator.serviceWorker && navigator.serviceWorker.controller);
+    });
+    // The deploy: a script changes on the server, and nothing else does.
+    fs.appendFileSync(path.join(site, 'js', 'utils.js'), '\n;window.__zcDeployed = 2;\n');
+    await page.goto(server.origin + '/matches.html', { waitUntil: 'load' });
+    const ran = await page.evaluate(function () { return window.__zcDeployed || null; });
+    return { controlled: controlled, ran: ran };
+  } finally {
+    if (browser) await browser.close();
+    if (server) await server.stop();
+    fs.rmSync(site, { recursive: true, force: true });
+  }
+}
 
 module.exports = {
   title: 'Offline navigation after precache',
@@ -124,5 +186,17 @@ module.exports = {
       // idempotent and this call resolves against the same shutdown.
       await server.stop();
     }
+
+    /* ---- after a deploy, the deploy's scripts ---- */
+
+    // firebase.json serves scripts and stylesheets `no-cache` now, so the
+    // browser asks before it reuses one; Hosting answers 304 with no body when
+    // nothing changed. With the old `max-age=3600` both of these ran the
+    // cached script.
+    const withWorker = await deployedScriptRuns(h, 'allow');
+    t.check('after a deploy, a reload runs the new scripts with the service worker in control',
+      withWorker.controlled && withWorker.ran === 2, JSON.stringify(withWorker));
+    const withoutWorker = await deployedScriptRuns(h, 'block');
+    t.check('and with no service worker at all', withoutWorker.ran === 2, JSON.stringify(withoutWorker));
   }
 };
