@@ -760,6 +760,28 @@ test('the export\'s three reads reject on a store they cannot read, rather than 
   }
 });
 
+test('a store holding JSON that is not a map is a failed read, not an empty one', async function () {
+  // `[]` or a string parses, so it passed the strict reads' only check and came
+  // back as `{}`: the reports panel then said nobody had been reported, and an
+  // export with no swipes, matches or messages called itself complete. It is
+  // reset on the way past, as unparseable JSON is, so the fault is not sticky.
+  const reads = [
+    [KEYS.reports, function () { return store.getMyReports(YOU); }],
+    [KEYS.reports, function () { return store.retractReport(YOU, 'maya-okonkwo'); }],
+    [KEYS.swipes, function () { return store.getSwipes(YOU); }],
+    [KEYS.matches, function () { return store.getMatches(YOU); }],
+    [KEYS.messages, function () { return store.getMessages(DEVIN_MATCH, {}); }]
+  ];
+  for (const stored of ['[]', '"x"', '7']) {
+    for (const [key, read] of reads) {
+      await resetWorld();
+      backing.set(key, stored);
+      await assert.rejects(read(), /could not be read/, key + ' holding ' + stored + ' must reject');
+      await read();
+    }
+  }
+});
+
 /* ------------------------------------------------------------------------
    9. Account deletion
    ------------------------------------------------------------------------ */

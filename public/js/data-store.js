@@ -629,7 +629,16 @@
   function readMapOrThrow(key, what) {
     const read = readJsonResult(key, {});
     if (!read.ok) throw read.err || new Error('The stored ' + what + ' could not be read.');
-    return isPlainObject(read.value) ? read.value : {};
+    // Valid JSON that is not a map — `[]`, a string — is no more readable than
+    // JSON that does not parse, and turning it into `{}` here was the same
+    // "none" this function exists to refuse. Reset and reported, exactly as
+    // readJsonResult treats an entry that does not parse.
+    if (!isPlainObject(read.value)) {
+      console.warn('[zc.store] ' + key + ' holds something other than a map — resetting that entry.');
+      try { window.localStorage.removeItem(key); } catch (ignored) { /* nothing else to do */ }
+      throw new Error('The stored ' + what + ' could not be read.');
+    }
+    return read.value;
   }
 
   /* ------------------------------------------------------------------------
