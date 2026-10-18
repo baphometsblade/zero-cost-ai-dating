@@ -501,7 +501,37 @@ module.exports = {
       });
       t.check('signing out ends the Firebase session', signedOut === true, 'current=' + (signedOut ? 'null' : 'set'));
 
+      // A reset request answers the same for any address. The Auth emulator
+      // runs with email-enumeration protection off, as projects made before
+      // Firebase turned it on by default do: an unknown address rejects with
+      // auth/user-not-found, which the reset form used to show as the sign-in
+      // sentence "That email and password do not match an account" — on a
+      // form with no password field, and telling anyone which addresses have
+      // no account here. The real one is asked too, so the two can be compared.
       await page.goto(base + '/auth.html', { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#auth-form');
+      const resetSays = {};
+      for (const address of ['nobody-' + Date.now() + '@example.com', email]) {
+        // The emulator answers the unknown address with a 400, which Chromium
+        // logs as a failed resource; that is the answer under test, and the
+        // window closes again before the real address is asked.
+        if (ctx.session) ctx.session.expectConsoleError(address === email ? null : /status of 400/);
+        await page.click('#forgot-btn');
+        await page.fill('#input-reset-email', address);
+        await page.click('#reset-submit');
+        await page.waitForFunction(function () {
+          const box = document.getElementById('auth-alert');
+          return !!box && !box.classList.contains('hidden') && (box.textContent || '').trim().length > 0;
+        });
+        resetSays[address === email ? 'known' : 'unknown'] =
+          (await page.textContent('#auth-alert') || '').replace(/\s+/g, ' ').trim();
+        await page.click('#reset-back');
+      }
+      if (ctx.session) ctx.session.expectConsoleError(null);
+      t.check('a password reset answers an unknown address exactly as it answers a real one',
+        !!resetSays.known && resetSays.unknown === resetSays.known && !/password/i.test(resetSays.unknown),
+        JSON.stringify(resetSays));
+
       await page.waitForSelector('#auth-form');
       await page.fill('#input-email', email);
       await page.fill('#input-password', password);

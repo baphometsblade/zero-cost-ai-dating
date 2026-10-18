@@ -943,6 +943,12 @@
         await fbAuth().sendPasswordResetEmail(address);
         return { ok: true };
       } catch (err) {
+        // A project with email-enumeration protection off — every one made
+        // before Firebase turned it on by default — rejects an unknown address
+        // with auth/user-not-found. Shown, it was the sign-in sentence about a
+        // password on a form with no password field, and it told anyone which
+        // addresses have no account. Unknown and known get the same answer.
+        if (err && err.code === 'auth/user-not-found') return { ok: true };
         return { ok: false, error: humanError(err) };
       }
     },
