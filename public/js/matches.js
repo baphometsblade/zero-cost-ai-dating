@@ -443,6 +443,19 @@
   }
 
   /**
+   * Whether this account's plan ranks with the adaptive term, read from the
+   * limits table as dashboard.js reads it for the deck. The profile card here
+   * asked the plan's name instead, so with the table saying otherwise it
+   * scored a match with a term the deck that found them did not use.
+   * @returns {boolean}
+   */
+  function adaptiveRanking() {
+    const plan = state.me && state.me.plan === 'premium' ? 'premium' : 'free';
+    const limits = (ZC.config && ZC.config.limits && ZC.config.limits[plan]) || null;
+    return !!(limits && limits.adaptiveWeights);
+  }
+
+  /**
    * The Premium view: real faces, real names, and the one action that helps —
    * going back to the deck, where they are waiting.
    * @param {Object[]} likes UserDocs who liked me
@@ -1264,7 +1277,7 @@
       result = ZC.matching && typeof ZC.matching.scoreCandidate === 'function'
         ? ZC.matching.scoreCandidate(state.me, other, {
           corpus: ensureCorpus(),
-          adaptive: state.me.plan === 'premium',
+          adaptive: adaptiveRanking(),
           includeHardFails: true
         })
         : null;

@@ -33,9 +33,10 @@ const DIALOG_DISCLOSURE = ['no payment', 'no card', 'simulat'];
  * so this is an init script, and it runs again on every navigation before any
  * page script does. Everything it does is inert unless a URL asks for it:
  *
- *   - it records the `adaptive` option the deck hands the ranking engine. That
- *     is the gate's decision itself; its effect on a score is invisible for an
- *     account that has not swiped enough to have learned anything;
+ *   - it records the `adaptive` option the deck hands the ranking engine, and
+ *     the one the matches page's profile card hands it to score one person.
+ *     That is the gate's decision itself; its effect on a score is invisible
+ *     for an account that has not swiped enough to have learned anything;
  *   - `?zcfixedweights=1` turns premium's `adaptiveWeights` off in the limits
  *     table as firebase-config.js publishes it. It has to happen then:
  *     subscription.js builds its comparison from the table as it loads;
@@ -48,6 +49,7 @@ function instrument() {
   const fixedWeights = params.get('zcfixedweights') === '1';
   const usageFails = params.get('zcusagefail') === '1';
   window.__zcAdaptive = [];
+  window.__zcScored = [];
   window.__zcReads = { getUser: 0, getUsage: 0, updateUser: 0 };
 
   const ZC = window.ZC = window.ZC || {};
@@ -75,6 +77,11 @@ function instrument() {
     engine.rankCandidates = function (me, list, opts) {
       window.__zcAdaptive.push(!!opts && opts.adaptive === true);
       return rank.apply(engine, arguments);
+    };
+    const score = engine.scoreCandidate;
+    engine.scoreCandidate = function (me, other, opts) {
+      window.__zcScored.push(!!opts && opts.adaptive === true);
+      return score.apply(engine, arguments);
     };
     const store = ZC.store;
     Object.keys(window.__zcReads).forEach(function (name) {
@@ -277,6 +284,21 @@ module.exports = {
     });
     t.check('and the plans page, reading the same table, says what that deck does',
       rankingRow === 'Off — fixed weights', JSON.stringify(rankingRow));
+
+    // And the third reader: a match's full card on the matches page scores
+    // them again. It asked the plan's name, so under this table it scored with
+    // the adaptive term the deck had just ranked them without.
+    await page.goto(ctx.base + '/matches.html?zcfixedweights=1', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#match-list .match-row');
+    await page.locator('#match-list .match-row').first().click();
+    await page.waitForSelector('#chat:not(.hidden)');
+    await page.click('#chat-menu');
+    await h.clickModalAction(page, 'View profile');
+    await page.waitForSelector('.modal-backdrop .swipe-card');
+    const scored = await page.evaluate(function () { return window.__zcScored.slice(); });
+    t.check('and so does a match\'s card on the matches page',
+      scored.length > 0 && scored.every(function (adaptive) { return adaptive === false; }), JSON.stringify(scored));
+    await h.clickModalAction(page, 'Close');
 
     /* ---- a usage read that fails is not a day with nothing used ---- */
 
