@@ -62,11 +62,17 @@ const OPEN_RULES = [
 ].join('\n');
 
 /**
- * Record one billed read against the tally, empty results included.
+ * Record one billed read against the tally, empty results included — unless
+ * the client's cache answered it. A `get` with `{ source: 'cache' }` — which
+ * `cachedUsage` in data-store.js makes — never reaches Firestore and resolves
+ * with `metadata.fromCache` set, so nothing was billed, and this used to
+ * count it all the same. Any read whose snapshot says it came from the cache
+ * is passed over alike.
  * @param {Object} tally accumulator
  * @param {Object} snap the snapshot that came back
  */
 function noteRead(tally, snap) {
+  if (snap && snap.metadata && snap.metadata.fromCache === true) return;
   tally.calls += 1;
   tally.reads += (snap && typeof snap.size === 'number') ? Math.max(1, snap.size) : 1;
 }
@@ -82,46 +88,206 @@ function noteWrite(tally, path, op) {
  *
  * `add` is here for completeness rather than for current use: the shipped store
  * creates every document through `.doc(id).set(...)`, including messages, so
- * nothing exercises it today. It is listed anyway because the alternative is a
- * silent under-count the day somebody writes `messages.add(...)` — a counter
- * that quietly reports 1 where the bill is 2 is the failure this file's header
- * calls worse than no counter at all. A transaction and a batch have no `add`,
- * so only the reference path can reach it.
+ * nothing it does reaches `add` — `specs/19-write-cost` calls it directly so
+ * the branch is exercised anyway. It is listed because the alternative is a
+ * silent under-count the day somebody writes `messages.add(...)`: a counter
+ * that quietly reports 1 where the bill is 2. A transaction and a batch have
+ * no `add`, so only the reference path can reach it.
+ *
+ * A Set, and asked with `has`. This was an object literal asked
+ * `WRITE_OPS[prop]`, which is a property read, and a property read walks the
+ * prototype chain: `toString`, `valueOf`, `hasOwnProperty` and every other
+ * name on `Object.prototype` came back truthy, so turning a counted ref into
+ * text recorded a write that never touched Firestore. That is the over-count,
+ * the mirror image of the failure above, and just as quiet in a spec that
+ * checks only `tally.writes`.
  */
-const WRITE_OPS = { set: 1, update: 1, delete: 1, add: 1 };
+const WRITE_OPS = new Set(['set', 'update', 'delete', 'add']);
+
+/**
+ * The methods that mark a handle. `get` is a read on a reference or a query
+ * and a field lookup on a document snapshot, and both are wanted: a snapshot's
+ * `ref` is a reference. `onSnapshot` marks a reference or a query too,
+ * `collection` the database or a document reference, and `docChanges` a query
+ * snapshot, whose `docs` are document snapshots.
+ */
+const HANDLE_METHODS = ['get', 'onSnapshot', 'collection', 'docChanges'];
+
+/**
+ * Whether a value is one of the compat SDK's own objects with a handle's
+ * methods. Every compat class keeps the modular object it wraps in
+ * `_delegate`, so an object without one is not the SDK's, whatever methods it
+ * has; and an SDK object without a handle's methods — a `FieldValue`, the app
+ * the database belongs to — is not a handle.
+ * @param {*} value anything
+ * @returns {boolean} true for the database, a reference, a query or a snapshot
+ */
+function isSdkHandle(value) {
+  return !!value && typeof value === 'object' && !!value._delegate &&
+    typeof value._delegate === 'object' && typeof value.then !== 'function' &&
+    HANDLE_METHODS.some(function (name) { return typeof value[name] === 'function'; });
+}
+
+/**
+ * Whether Firestore handed back something a billed call can be made through,
+ * directly or by way of its members.
+ *
+ * Methods alone are not enough, which a test by methods alone showed while this
+ * counter was learning to follow snapshots (`specs/19-write-cost`, section 14,
+ * keeps it shown). It took anything with one of `HANDLE_METHODS` for a handle,
+ * and anything whose `doc` was one, asking that of `doc` again however deep it
+ * went. What a converter's `fromFirestore` returns is the app's own model,
+ * `data()` hands it back, and a Map has a `get`: the Map came back as a
+ * counting stand-in, its own `set` and `delete` were tallied as billed writes,
+ * and a model whose `doc` was itself sent the question round until `data()`
+ * threw. So a handle must also be the SDK's own object (see `isSdkHandle`), and
+ * a `DocumentChange` — an SDK object with no methods, only the snapshot in its
+ * `doc` — is asked about that one field and no deeper. Anything else comes back
+ * as it came: a model, and contents, whose maps are plain objects.
+ *
+ * The test reads a few of the value's members, and a getter can throw, so a
+ * throw here means "not a handle" rather than an exception inside the call
+ * being measured: the counter may miss a read, but it may not break the app.
+ * @param {*} value anything a Firestore object handed back
+ * @returns {boolean} true for the database, a reference, a query, a snapshot
+ *   or a document change
+ */
+function isHandle(value) {
+  try {
+    return isSdkHandle(value) ||
+      (!!value && typeof value === 'object' && !!value._delegate && isSdkHandle(value.doc));
+  } catch (err) {
+    return false;
+  }
+}
+
+/**
+ * Hand back what Firestore handed back, counted if a billed call could be made
+ * through it. An array with a handle in it — a query snapshot's `docs`,
+ * `docChanges()`, a list of references `snap.get(field)` returns — comes back
+ * as a new array of the same entries, each carried; the compat SDK builds each
+ * of those afresh on every read anyway, so nothing could have been holding on
+ * to the old one. An array without one comes back as it came.
+ * @param {*} value what came out of a counted object
+ * @param {Object} tally where anything carried goes on counting
+ * @returns {*} the value, or a counting stand-in for it
+ */
+function carry(value, tally) {
+  if (Array.isArray(value)) {
+    return value.some(isHandle) ? value.map(function (entry) { return carry(entry, tally); }) : value;
+  }
+  return isHandle(value) ? countingDb(value, tally) : value;
+}
+
+/**
+ * A method's arguments, with every callback among them handed what the SDK
+ * hands it carried — `snap.forEach(function (doc) { ... })` is as much a way
+ * out of the counter as `snap.docs`. A listener is not passed through here:
+ * `onSnapshot` counts and carries its deliveries itself, and finds the
+ * listener where the SDK does (see `listenerAt`).
+ * @param {Arguments|Array} args what the method was called with
+ * @param {Object} tally where anything carried goes on counting
+ * @returns {Array} the arguments to call the real method with
+ */
+function carryCallbacks(args, tally) {
+  return Array.prototype.map.call(args, function (arg) {
+    if (typeof arg !== 'function') return arg;
+    return function () {
+      return arg.apply(this, Array.prototype.map.call(arguments, function (given) {
+        return carry(given, tally);
+      }));
+    };
+  });
+}
+
+/**
+ * Whether an `onSnapshot` argument is an observer object. The same test the
+ * compat SDK makes in its own `isPartialObserver`: an object with at least one
+ * of `next`, `error` and `complete` as a function.
+ * @param {*} value one argument to `onSnapshot`
+ * @returns {boolean} true for an observer, false for a function or options
+ */
+function isObserver(value) {
+  return !!value && typeof value === 'object' && ['next', 'error', 'complete'].some(function (name) {
+    return typeof value[name] === 'function';
+  });
+}
+
+/**
+ * Where among its arguments `onSnapshot` will find the listener, asked in the
+ * order the compat SDK's own `wrapObserver` asks it: an observer first, then
+ * an observer second, then a function first, and otherwise whatever is
+ * second. That covers the four forms its typings declare — an observer or a
+ * function, alone or after an options object — and one they do not, a
+ * function followed by an observer, which the SDK accepts and listens to with
+ * the observer, never calling the function.
+ * @param {Array} args what `onSnapshot` was called with
+ * @returns {number} the index of the listener
+ */
+function listenerAt(args) {
+  if (isObserver(args[0])) return 0;
+  if (isObserver(args[1])) return 1;
+  return typeof args[0] === 'function' ? 0 : 1;
+}
 
 /**
  * A transaction or batch whose buffered writes land in `pending` rather than in
  * the tally, so a replayed attempt can be discarded and only the committed one
  * counted — and whose reads, if it has any, go straight to the tally, because a
  * replayed attempt's reads were billed.
+ *
+ * `set`, `update` and `delete` return the batch or transaction itself, so that
+ * writes can be chained — and this used to return what they returned, which is
+ * the REAL one. Everything chained after the first write went around the
+ * buffer: `tx.set(a, x).set(b, y)` counted one write for two, and a chained
+ * `batch.set(a, x).commit()` committed a batch the tally never heard of, so it
+ * counted none. The stand-in now hands back itself in its place. For the same
+ * reason a batch's `commit` is counted here, on the one proxy, rather than on a
+ * second proxy wrapped around this one that a chain would bypass.
+ *
+ * A write is buffered once the real call has returned. It used to be noted
+ * before the call, so a `set` the SDK refused on the spot — it throws on an
+ * `undefined` field, say — stayed in the tally though it was never sent, and
+ * a caller that caught the throw and committed anyway was billed for it.
  * @param {Object} target the real transaction or WriteBatch
  * @param {{writes:number, wrote:string[]}} pending this attempt's buffer
  * @param {Object} [tally] where a transaction's own reads are counted; a
  *   WriteBatch has no `get`, so it is passed without one
+ * @param {Function} [committed] called once a batch's `commit()` resolves, to
+ *   move `pending` into the tally; a transaction is committed by
+ *   `runTransaction` instead, so it is passed without one
  * @returns {Object} a stand-in that behaves identically
  */
-function bufferingWrites(target, pending, tally) {
-  return new Proxy(target, {
+function bufferingWrites(target, pending, tally, committed) {
+  const stand = new Proxy(target, {
     get: function (obj, prop) {
       const value = obj[prop];
       if (typeof value !== 'function') return value;
       return function () {
-        if (WRITE_OPS[prop]) {
+        const out = value.apply(obj, arguments);
+        // After the call, not before it: a write whose data the SDK refuses
+        // throws right here and is never sent, so it must not be buffered.
+        if (WRITE_OPS.has(prop)) {
           pending.writes += 1;
           pending.wrote.push(String((arguments[0] && arguments[0].path) || '?') + ':' + prop);
         }
-        const out = value.apply(obj, arguments);
         if (prop === 'get' && tally && out && typeof out.then === 'function') {
           return out.then(function (snap) {
             noteRead(tally, snap);
-            return snap;
+            return carry(snap, tally);
           });
         }
-        return out;
+        if (prop === 'commit' && committed && out && typeof out.then === 'function') {
+          return out.then(function (result) {
+            committed();
+            return result;
+          });
+        }
+        return out === obj ? stand : out;
       };
     }
   });
+  return stand;
 }
 
 /**
@@ -167,6 +333,50 @@ function bufferingWrites(target, pending, tally) {
  * `collection/id:op` strings — "three writes" is satisfied by three writes to
  * the wrong documents, so the identities are worth having.
  *
+ * WHAT IT HANDS OUT GOES ON COUNTING. A query is returned by `where`; a
+ * snapshot is what `get()` resolves to, in a transaction or out of one; its
+ * `ref` and `docs` are properties; `forEach` passes documents to a callback,
+ * and a listener is handed snapshots; `add()` resolves to a reference. This
+ * used to carry the tally along the first of those routes only, so a snapshot
+ * and every reference hanging off it were the real ones — and
+ * `deleteAccountData` reaches each match it deletes as `matches.docs[i].ref`,
+ * so its per-match message scan and the match's own delete were billed and
+ * never counted. Each of those routes now hands out a stand-in when what
+ * leaves is a handle (see `isHandle`), and only then.
+ *
+ * These ways out are known to be left open, and data-store.js takes none of
+ * them; the list is what has been found, not a proof that there is no other.
+ *   - A reference stored as a field's value comes back from `data()` as the
+ *     real one. `snap.get(field)` carries one it returns alone or in a list,
+ *     but not one inside a map it returns. No number here depends on it,
+ *     because this app stores no reference: data-store.js takes `.ref` off a
+ *     snapshot five times, each time to delete that document or to search
+ *     under it, and no write the store makes anywhere in this suite carries
+ *     one.
+ *   - A converter. Its `fromFirestore` is handed a snapshot the SDK builds
+ *     for it, which is the real one, and the model it returns is the app's
+ *     own object and comes back from `data()` untouched (see `isHandle`).
+ *     The store never calls `withConverter`.
+ *   - The database's `app`. It is not a handle, so it is not carried, and
+ *     `db.app.firestore()` is the real database. The store never reads it.
+ *   - A promise is carried where it resolves only when it is a read or a
+ *     write. The one other compat promise that resolves to a handle is
+ *     `namedQuery`'s, and the store never calls it.
+ *   - Properties whose names begin with an underscore, below.
+ * What a `runTransaction` callback returns is passed back untouched, being the
+ * app's own value; a snapshot the callback read with `tx.get` is a stand-in
+ * already. Properties whose names begin with an underscore are passed
+ * through untouched: they are the SDK's own plumbing — `_delegate` is how the
+ * compat layer reaches the modular object underneath, and it reads it off
+ * whatever it is handed, stand-ins included. That is a precaution, not a
+ * repair: nothing the app does goes through them, and this way the stand-ins
+ * stay on the app's side of the SDK. (Methods with such names are wrapped
+ * like any other — `__lookupGetter__`, inherited from `Object.prototype`, is —
+ * and the compat classes define none of their own.) Everything
+ * carried comes off the real object — one of its properties, the result of a
+ * method run against it, or an argument the SDK passes to a callback — so a
+ * stand-in is never wrapped in another and nothing is counted twice.
+ *
  * @param {Object} target the real compat Firestore, or one of its refs
  * @param {{reads:number, calls:number, writes?:number, wrote?:string[]}} tally
  *   accumulator, mutated in place
@@ -176,21 +386,25 @@ function countingDb(target, tally) {
   return new Proxy(target, {
     get: function (obj, prop) {
       const value = obj[prop];
-      if (typeof value !== 'function') return value;
+      if (typeof value !== 'function') {
+        return typeof prop === 'string' && prop.charAt(0) !== '_' ? carry(value, tally) : value;
+      }
       return function () {
-        if (WRITE_OPS[prop]) {
+        if (WRITE_OPS.has(prop)) {
           // On resolution, not on call: a write the rules refuse is not billed,
           // and this suite provokes those on purpose.
           const path = obj.path;
-          const out = value.apply(obj, arguments);
+          const out = value.apply(obj, carryCallbacks(arguments, tally));
           if (out && typeof out.then === 'function') {
             return out.then(function (result) {
               noteWrite(tally, path, prop);
-              return result;
+              // `add()` resolves to the reference it created, and a write made
+              // through that is as billed as any other.
+              return carry(result, tally);
             });
           }
           noteWrite(tally, path, prop);
-          return out;
+          return carry(out, tally);
         }
 
         if (prop === 'runTransaction') {
@@ -215,32 +429,27 @@ function countingDb(target, tally) {
 
         if (prop === 'batch') {
           const pending = { writes: 0, wrote: [] };
-          const real = value.apply(obj, arguments);
-          return new Proxy(bufferingWrites(real, pending), {
-            get: function (b, p) {
-              const v = b[p];
-              if (p !== 'commit' || typeof v !== 'function') return v;
-              return function () {
-                return v.apply(b, arguments).then(function (result) {
-                  tally.writes = (tally.writes || 0) + pending.writes;
-                  if (Array.isArray(tally.wrote)) {
-                    pending.wrote.forEach(function (entry) { tally.wrote.push('batch:' + entry); });
-                  }
-                  pending.writes = 0;
-                  pending.wrote.length = 0;
-                  return result;
-                });
-              };
+          return bufferingWrites(value.apply(obj, arguments), pending, null, function () {
+            tally.writes = (tally.writes || 0) + pending.writes;
+            if (Array.isArray(tally.wrote)) {
+              pending.wrote.forEach(function (entry) { tally.wrote.push('batch:' + entry); });
             }
+            pending.writes = 0;
+            pending.wrote.length = 0;
           });
         }
 
         if (prop === 'onSnapshot') {
           const args = Array.prototype.slice.call(arguments);
-          if (typeof args[0] === 'function') {
-            const next = args[0];
+          // This used to look at a function first and nowhere else, so a
+          // listener registered any other way was neither counted nor carried —
+          // a first delivery of three documents read as no reads.
+          const at = listenerAt(args);
+          const given = args[at];
+          const observer = isObserver(given);
+          if (observer || typeof given === 'function') {
             let first = true;
-            args[0] = function (snap) {
+            const counted = function (snap) {
               tally.calls += 1;
               // Deltas, not the result set. Firestore bills a listener for the
               // documents in its first snapshot and then for each document that
@@ -263,15 +472,31 @@ function countingDb(target, tally) {
               // cannot tell them apart — the removed document's snapshot still
               // carries its last known data either way.
               //
-              // In THIS app it can be settled from the rules rather than from the
-              // snapshot, which is why removals are dropped outright rather than
-              // caveated. Both live queries lose a document only by deletion:
-              // `swipes` carries `allow update: if false`, so the likes listener's
-              // `where to == uid` result can never be edited out of its own query;
-              // and a match document's id is `d.users[0] + '_' + d.users[1]`, so
-              // changing `users` would be a different document, which makes the
-              // list listener's `where users array-contains uid` equally immutable.
-              // A removal here is a deletion, and a deletion is free.
+              // For two of the three live queries in this app it can be settled
+              // from the rules rather than from the snapshot, which is why
+              // removals are dropped outright rather than caveated. `swipes`
+              // carries `allow update: if false`, so the likes listener's
+              // `where to == uid` result can never be edited out of its own
+              // query; and a match update must keep `users` exactly as it was,
+              // which makes the list listener's `where users array-contains uid`
+              // equally immutable. A removal from either is a deletion, and a
+              // deletion is free.
+              //
+              // The third is NOT settled, and this rule only guesses at it.
+              // `listenMessages` watches a window — the newest
+              // `LIVE_MESSAGE_WINDOW` (200) messages of one conversation — and a
+              // document leaves a window without being deleted or changed: past
+              // 200, each new message pushes the oldest out, and `docChanges()`
+              // reports that as 'removed' too. Messages cannot be edited, so it
+              // is never the billed kind of removal the pricing page names; it is
+              // not a deletion either, and the page says nothing about it. Run
+              // against the emulator, the delivery that carries the 201st message
+              // is one 'added' and one 'removed', for a document that still
+              // exists, and this counts it as one read. Nothing measures
+              // `listenMessages` through this helper (specs/08-conversation runs
+              // it against the real database), so no number in this suite rests
+              // on the guess; the first spec that measures a conversation past
+              // 200 messages inherits it.
               //
               // What this still CANNOT see, and a spec believed otherwise once:
               // two listeners on the same query report their reads twice here, and
@@ -288,23 +513,36 @@ function countingDb(target, tally) {
                 : (snap && typeof snap.size === 'number' ? snap.size : 1);
               tally.reads += first ? Math.max(1, changed) : changed;
               first = false;
-              return next.apply(null, arguments);
+              const delivered = carry(snap, tally);
+              if (!observer) return given.call(null, delivered);
+              return typeof given.next === 'function' ? given.next(delivered) : undefined;
             };
+            if (observer) {
+              // A new observer rather than the app's with its `next` swapped. The
+              // SDK calls `error` bound to the observer it is given, so the app's
+              // is handed on bound to the app's observer; left off, a refused
+              // listener would only be logged by the SDK. (`complete` is never
+              // called: a listener's observer inside the SDK has no such method.)
+              args[at] = { next: counted };
+              if (typeof given.error === 'function') args[at].error = given.error.bind(given);
+            } else {
+              args[at] = counted;
+            }
           }
           return value.apply(obj, args);
         }
-        const out = value.apply(obj, arguments);
+        const out = value.apply(obj, carryCallbacks(arguments, tally));
         if (prop === 'get' && out && typeof out.then === 'function') {
           return out.then(function (snap) {
             noteRead(tally, snap);
-            return snap;
+            return carry(snap, tally);
           });
         }
         // Refs and queries are chained off each other, so they have to carry the
-        // tally forward. Promises must not be wrapped: a thenable behind a proxy
-        // is still awaited, but nothing good comes of proxying one.
-        if (out && typeof out === 'object' && typeof out.then !== 'function') return countingDb(out, tally);
-        return out;
+        // tally forward. Promises are not wrapped: a thenable behind a proxy is
+        // still awaited, but nothing good comes of proxying one — what a read or
+        // a write resolves to is carried instead, where it resolves.
+        return carry(out, tally);
       };
     }
   });
