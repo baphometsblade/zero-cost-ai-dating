@@ -266,11 +266,22 @@ test('signUp validates the email, the password length and the display name', asy
   assert.equal((await auth.signUp('alice@example.com', 'longenough', 'x'.repeat(41))).error,
     'Please use a display name between 2 and 40 characters.');
 
+  assert.equal((await auth.signUp('alice@example.12', 'longenough', 'Alice')).error,
+    'That email address does not look right.', 'a numeric TLD is not one');
+
+  // Internationalised domains, as a browser's email field hands them over
+  // (punycode) and as typed. Both are addresses Firebase Auth accepts.
+  assert.equal((await auth.signUp('ivan@xn--80a1acny.xn--p1ai', 'longenough', 'Ivan')).ok, true,
+    'a punycode TLD is a TLD');
+  assert.equal((await auth.signUp('li@例子.中国', 'longenough', 'Li')).ok, true,
+    'a TLD in another script is a TLD');
+
   // An 8-character password is exactly on the allowed side of the boundary.
   assert.equal((await auth.signUp('alice@example.com', 'eightchr', 'Al')).ok, true);
 
   // Nothing that failed validation left a trace.
-  assert.deepEqual(Object.keys(raw(CREDENTIALS_KEY)), ['alice@example.com']);
+  assert.deepEqual(Object.keys(raw(CREDENTIALS_KEY)).sort(),
+    ['alice@example.com', 'ivan@xn--80a1acny.xn--p1ai', 'li@例子.中国'].sort());
   assert.equal(auth.current.email, 'alice@example.com');
 });
 

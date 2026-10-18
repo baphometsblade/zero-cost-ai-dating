@@ -48,7 +48,12 @@
   const NAME_MAX = 40;
 
   // Deliberately loose: the only authority on a valid address is the mail server.
-  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[A-Za-z]{2,}$/;
+  // The last label may be any letters, or punycode: a browser hands over
+  // `ivan@почта.рф` as `ivan@xn--80a1acny.xn--p1ai`, whose TLD has digits and
+  // hyphens, and an ASCII-letters-only TLD turned every internationalised
+  // domain away with "That does not look like an email address" — an address
+  // Firebase Auth accepts, measured against the emulator.
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.(?:\p{L}{2,}|xn--[A-Za-z0-9-]+)$/u;
 
   // If Firebase never reports an auth state (blocked network, dead SDK) the app
   // must still become usable rather than hang on ZC.auth.ready forever.
