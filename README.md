@@ -268,11 +268,11 @@ npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.
 
 ### Unit suites
 
-Fourteen suites on Node's built-in runner — **287 checks**, no install, no browser, seconds:
+Fourteen suites on Node's built-in runner — **288 checks**, no install, no browser, seconds:
 
 | Suite | What it pins down |
 | --- | --- |
-| `tests/auth.test.js` | The real `public/js/auth.js` on the demo backend, nothing mocked but the browser globals it reaches for: the salted credential vault (including the documented weak fallback when `crypto.subtle` is absent), sign-up and sign-in, the session record, `onChange`, and the three route guards. |
+| `tests/auth.test.js` | The real `public/js/auth.js` on the demo backend, nothing mocked but the browser globals it reaches for: the salted credential vault (including the documented weak fallback when `crypto.subtle` is absent), sign-up and sign-in, the session record, `onChange`, and the three route guards. The guards' `?next=` is held to this site against every trick it has met: protocol-relative, absolute, `javascript:`, backslashes, and a tab, newline or carriage return after the first slash, which the URL parser deletes and which once turned `/\t/evil.example` into `//evil.example` — an open redirect that fired on opening the link. Addresses on internationalised domains sign up as typed and as a browser's email field punycodes them. |
 | `tests/csp-sync.test.js` | The `<meta http-equiv>` copy of the Content-Security-Policy on every page equals the `firebase.json` header minus `frame-ancestors`, and sits before the first `<link>` and `<script>` — two copies of a policy drift apart unless something forces them together. And `connect-src`, the directive an injected script would send your data out through, may hold only the page's own origin and hosts under `googleapis.com`, where the three Firebase SDKs the pages load were measured to connect and nowhere else, each source listed in the test with its reason, so widening it is a deliberate edit rather than a quiet one. |
 | `tests/contrast.test.js` | Reads the three palette blocks out of `style.css` and holds the flat fill/ink pairs — and body text on each neutral surface — to WCAG AA in light and in both darks, and the deck's four action glyphs to the threshold their size calls for, at rest and on hover. A label on a two-stop gradient — the primary and send buttons, your own chat bubbles, the "how it works" numerals, the plan ribbon, the premium badge — has no single background but does have a worst one, so every rule in either stylesheet that declares such a fill as its background and a text colour beside it is found and held to AA at the lowest point along the whole line, not just at its two stops, because the darkest point of a gradient need not be a stop. Those six must keep being found, so a sweep that stopped finding rules fails rather than passing, and the heart in the wordmark is exempt by name, as WCAG exempts a logo; the lowest label today is 5.07:1. Glass over photos, `color-mix` and text clipped to its own gradient have no second flat colour to measure against, so they are left out and said so rather than measured badly. It found white text on dark's `--danger` at 2.85:1, on the button that deletes your account. |
 | `tests/data-store.test.js` | The demo storage adapter, loaded for real in Node against a `localStorage` shim: seeding (32 profiles, inbound likes, both conversations, idempotency, force re-seed), user create/update deep-merge semantics with wholesale `interestAffinity` replacement, swipe/match/undo idempotency, messaging with unread counters and the 1000-char cap, daily usage limits per plan, the reports lifecycle (file, list, retract, purge on account deletion), and export/import/reset round-trips. A store that cannot be read is a failure rather than an empty answer wherever a page would show the empty answer as a fact: your filed reports, retracting one (which would otherwise say it had already been removed), and the swipes, matches and messages the data export writes out as your whole record. And `getMatches` and `getMatch` hand over the same public projection of the other person that the live list does, as the Firestore adapter's do — never their address, birthdate or block list. |
@@ -294,7 +294,7 @@ store and its daily counter, the auth backend, the pure half of the utilities, t
 schema, the static HTML. It cannot reach the flows that only exist in a DOM — signing in,
 the deck and its keyboard, the match burst, chat that persists, reporting someone, deleting
 your account, and the service worker serving the app with the network gone. Those live in
-`e2e/`: **354 checks** across the twelve specs that need nothing installed but a browser, each
+`e2e/`: **358 checks** across the twelve specs that need nothing installed but a browser, each
 run at 390x844 and most of them at 1280x800 as well — plus a thirteenth, `10-firebase.e2e.js`,
 which needs the Firebase emulators and skips, by name and reason, when they are not running.
 
@@ -317,7 +317,7 @@ Firebase rather than `localStorage`: the real SDK, real Auth, real Firestore, an
 read back out of the emulator instead of off the page. It drives the pages **with their real
 CSP meta tag** — the emulators are reached through the page's own origin rather than by
 relaxing the policy, which is the whole reason it can exist; the Limitations section explains
-the constraint it is working around. With both emulators up the run is **373 checks**, all
+the constraint it is working around. With both emulators up the run is **379 checks**, all
 passing.
 
 It did not start that way. On its first run one check was red, and it had found a real bug:
@@ -329,7 +329,7 @@ fixture in `rules-tests/` ever used a null there. The rule now accepts null, and
 checks pin the shape.
 
 Without an emulator the runner prints `SKIP` and records nothing, so `npm run test:e2e` on a
-bare machine is still 354/354 — and CI runs it both ways, so the skip path and the emulator
+bare machine is still 358/358 — and CI runs it both ways, so the skip path and the emulator
 path are each exercised on every push.
 
 ### Security rules tests
@@ -440,7 +440,7 @@ inside a single boot, because booting costs more than either suite does. The `e2
 the browser suite twice: once bare, which is what a contributor with nothing installed gets
 and which proves the Firebase spec skips rather than silently passing, and once inside
 `emulators:exec`, which is the only run in which every spec executes and therefore the only
-one that can hold the 373-check total to account. There are no secrets and no deploy step —
+one that can hold the 379-check total to account. There are no secrets and no deploy step —
 deploying stays a deliberate local `npm run deploy`.
 
 ---
@@ -566,6 +566,15 @@ These are real, and worth knowing before you show this to anyone:
   publishes shares one, so the cache name now carries the deployment's path and cleanup
   stays inside it — and a failed runtime cache write escaped its `.catch` as an unhandled
   rejection. `tests/pwa.test.js` now runs the worker itself, not just reads it.
+- **The sign-in page could send people to another site.** `?next=` is how a guard sends
+  someone back after signing in, and its check refused `//evil.example` by looking at the
+  second character. The URL parser deletes every tab and newline before it reads a URL, so
+  `/<tab>/evil.example` passed as a site path and became `//evil.example` in
+  `location.replace()`: for anyone already signed in, opening the link was enough, and for
+  anyone else it happened the moment they signed in — the usual set-up for a fake
+  "session expired" page. The check now refuses control characters and also resolves the
+  address the way the browser will and requires this origin; `tests/auth.test.js` carries
+  the three spellings.
 - **For an hour after every deploy, returning visitors ran the previous deploy's scripts.**
   `firebase.json` served pages `no-cache` and scripts and stylesheets `max-age=3600`, under
   file names that never change, so a reload fetched the new page and took its scripts from
