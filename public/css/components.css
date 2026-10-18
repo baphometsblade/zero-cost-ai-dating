@@ -887,6 +887,19 @@
 /* --------------------------------------------------------------------------
    7. Match list + new matches strip
    -------------------------------------------------------------------------- */
+
+/* The list pane's loading card stands in for the cards after it, and it is
+   this rule, not matches.js, that keeps them out of the way while it shows;
+   they leave the frame it leaves, so nothing painted is pushed down the page.
+   They ship visible on purpose. Scripts are cached for an hour and pages are
+   not, so for an hour after a deploy a returning visitor runs the previous
+   matches.js against the new page, and that script knows only to hide
+   #list-loading: a conversation card the page shipped hidden, waiting for a
+   script to reveal it, stayed hidden with every conversation in it. */
+.list-skeleton:not(.hidden) ~ .list-after-load {
+  display: none;
+}
+
 .new-matches {
   display: flex;
   gap: var(--space-3);

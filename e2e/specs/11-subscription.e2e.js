@@ -41,13 +41,21 @@ const DIALOG_DISCLOSURE = ['no payment', 'no card', 'simulat'];
  *     table as firebase-config.js publishes it. It has to happen then:
  *     subscription.js builds its comparison from the table as it loads;
  *   - it counts the store calls that read `users/{uid}`, and `?zcusagefail=1`
- *     makes the usage read fail, the way it does offline.
+ *     makes the usage read fail, the way it does offline;
+ *   - `?zcbootfail=1` makes the page's sign-in guard reject, and
+ *     `?zcnoguard=1` takes it away, as a page whose auth.js did not load
+ *     finds it: the two ways the plans page can fail to start at all;
+ *   - `?zcusagehold=1` makes the usage read never answer, so the page stays
+ *     as it arrived, placeholder rows and all.
  * @returns {void}
  */
 function instrument() {
   const params = new URLSearchParams(window.location.search);
   const fixedWeights = params.get('zcfixedweights') === '1';
   const usageFails = params.get('zcusagefail') === '1';
+  const bootFails = params.get('zcbootfail') === '1';
+  const noGuard = params.get('zcnoguard') === '1';
+  const usageHolds = params.get('zcusagehold') === '1';
   window.__zcAdaptive = [];
   window.__zcScored = [];
   window.__zcReads = { getUser: 0, getUsage: 0, updateUser: 0 };
@@ -71,6 +79,12 @@ function instrument() {
   // ranks, and the plans page reads its counters, only once the first auth
   // state has settled, and a switch only on a click.
   document.addEventListener('DOMContentLoaded', function () {
+    if (bootFails && ZC.auth) {
+      ZC.auth.requireAuth = function () {
+        return Promise.reject(new Error('Simulated: the page could not start.'));
+      };
+    }
+    if (noGuard && ZC.auth) ZC.auth.requireAuth = undefined;
     if (!ZC.matching || !ZC.store) return;
     const engine = ZC.matching;
     const rank = engine.rankCandidates;
@@ -91,6 +105,7 @@ function instrument() {
         if (name === 'getUsage' && usageFails) {
           return Promise.reject(new Error('Failed to get document because the client is offline.'));
         }
+        if (name === 'getUsage' && usageHolds) return new Promise(function () {});
         return real.apply(store, arguments);
       };
     });
@@ -127,6 +142,28 @@ module.exports = {
     /** True when every ranking so far was asked for with `adaptive` set to `on`. */
     function rankedWith(deck, on) {
       return deck.adaptive.length > 0 && deck.adaptive.every(function (value) { return value === on; });
+    }
+
+    /**
+     * How tall today's usage is as the page arrives — the usage read held
+     * open, so the placeholder rows are still standing — and once the
+     * counters have replaced them. The plan cards sit below it, so any
+     * difference is how far they move as the page loads.
+     * @returns {Promise<{arrived:number, loaded:number}>}
+     */
+    async function usageHeights() {
+      const height = function () {
+        return page.evaluate(function () {
+          return Math.round(document.getElementById('usage-list').getBoundingClientRect().height * 10) / 10;
+        });
+      };
+      await page.goto(ctx.base + '/subscription.html?zcusagehold=1', { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('[data-zc-nav]');
+      await page.waitForFunction(function () { return window.__zcReads.getUsage > 0; });
+      const arrived = await height();
+      await page.goto(ctx.base + '/subscription.html', { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#usage-list[aria-busy="false"]', { state: 'attached' });
+      return { arrived: arrived, loaded: await height() };
     }
 
     await page.addInitScript(instrument);
@@ -210,6 +247,10 @@ module.exports = {
     };
     t.check('the account starts on the free plan', (await planOf()) === 'free', String(await planOf()));
 
+    // Measured on Free here and on Premium below: the placeholders are drawn
+    // in one shape, and Premium's unlimited rows are drawn in another.
+    const freeUsage = await usageHeights();
+
     await page.click('#premium-cta');
     await page.waitForSelector('.modal-backdrop .modal-body');
     const dialog = ((await page.locator('.modal-backdrop .modal-body').textContent()) || '').toLowerCase();
@@ -251,6 +292,11 @@ module.exports = {
     await page.waitForFunction(function () { return !!window.ZC.auth.doc; });
     t.check('and it survives a reload, so it was stored rather than shown',
       (await planOf()) === 'premium', String(await planOf()));
+
+    // Premium's unlimited rows are a pill with no meter, and they came out
+    // 10px shorter than the metered placeholders they replace, so loading the
+    // page pulled the plan cards and their switch buttons up by 20px.
+    const premiumUsage = await usageHeights();
 
     // The point of the switch: the deck has to actually treat the account
     // differently. The word "Premium" in the hint is no evidence of that — it
@@ -310,13 +356,62 @@ module.exports = {
     const unread = await page.evaluate(function () {
       return {
         asked: window.__zcReads.getUsage,
-        list: (document.getElementById('usage-list').textContent || '').replace(/\s+/g, ' ').trim()
+        list: (document.getElementById('usage-list').textContent || '').replace(/\s+/g, ' ').trim(),
+        height: Math.round(document.getElementById('usage-list').getBoundingClientRect().height * 10) / 10
       };
     });
     t.check('a usage read that fails says so, rather than showing a full allowance',
       unread.asked > 0 && /could not be read/i.test(unread.list) &&
       !/\bleft\b|\bused\b|no daily limit/i.test(unread.list),
-      JSON.stringify(unread));
+      JSON.stringify({ asked: unread.asked, list: unread.list }));
+
+    // Three ways today's usage can land: Free's rows, Premium's, and the one
+    // line a failed read draws. The plan cards sit below it, so any change in
+    // its height is how far they move as the page loads. Premium's unlimited
+    // rows have no meter and came out 10px shorter than the placeholders; the
+    // failed read's line, 130px shorter.
+    const steady = function (arrived, loaded) { return Math.abs(arrived - loaded) <= 1; };
+    t.check('today\'s usage is as tall as it arrives when the counters land, on Free, on Premium, and unread',
+      steady(freeUsage.arrived, freeUsage.loaded) && steady(premiumUsage.arrived, premiumUsage.loaded) &&
+        steady(premiumUsage.arrived, unread.height),
+      'free ' + freeUsage.arrived + ' -> ' + freeUsage.loaded + 'px, premium ' +
+        premiumUsage.arrived + ' -> ' + premiumUsage.loaded + 'px, unread ' + premiumUsage.arrived +
+        ' -> ' + unread.height + 'px');
+
+    /* ---- a page that cannot start leaves no placeholder behind ---- */
+
+    // subscription.html arrives with placeholder usage rows so the plan cards
+    // are painted where they will stay. Every path that settles the list has
+    // to replace them; this is the one that does not draw rows of its own.
+    // Two ways in: the guard rejecting, and the guard missing altogether, as
+    // it is when auth.js did not load. The second returned before the first's
+    // clean-up and left the rows up, still marked busy, with only a toast to
+    // say anything had gone wrong.
+    const unstarted = {};
+    ctx.session.expectConsoleError(/plans page could not start|needs auth\.js/);
+    for (const how of ['zcbootfail', 'zcnoguard']) {
+      await page.goto(ctx.base + '/subscription.html?' + how + '=1', { waitUntil: 'domcontentloaded' });
+      // Attached rather than visible: a list emptied as it should be has no
+      // height, and Playwright's default wait would never call it visible.
+      // Bounded, so a page that never settles is reported by the check below
+      // rather than ending the spec on a timeout.
+      await page.waitForSelector('#usage-list[aria-busy="false"]', { state: 'attached', timeout: 5000 })
+        .catch(function () {});
+      unstarted[how] = await page.evaluate(function () {
+        return {
+          summary: (document.getElementById('plan-summary').textContent || '').trim(),
+          busy: document.getElementById('usage-list').getAttribute('aria-busy'),
+          rows: document.querySelectorAll('#usage-list > *').length
+        };
+      });
+    }
+    ctx.session.expectConsoleError(null);
+    t.check('a plans page that cannot start says so, and leaves no placeholder usage rows standing',
+      Object.keys(unstarted).every(function (how) {
+        return /could not be loaded/i.test(unstarted[how].summary) &&
+          unstarted[how].busy === 'false' && unstarted[how].rows === 0;
+      }),
+      JSON.stringify(unstarted));
 
     /* ---- and back, because a simulation you cannot leave is worse ---- */
 

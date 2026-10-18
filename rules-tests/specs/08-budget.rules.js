@@ -45,6 +45,19 @@
    element could be a megabyte. Those bounds cost four of the eleven. What must
    not happen is spending the rest of it without noticing.
 
+   What a clause costs is measured too, because the advice this file and
+   `firestore.rules` give about spending the margin rests on it, and twice it
+   was written from memory instead. The rules said a call such as
+   `stampOk(d.createdAt)` cost about 2.2 plain clauses with its body worth 1.5,
+   and, a few hundred lines further down, that a wrapper which only forwarded
+   its clauses was therefore pure overhead. Put back, that wrapper moved the
+   headroom by nothing; the call measures about 2.4, the same check written
+   inline about 2.2, so the call itself is a fifth of a clause. Factoring a
+   repeated bound into a helper still costs rather than saves — in a validator
+   that takes the document as a parameter, which every one in this file does.
+   Where the inline form has to walk `request.resource.data.createdAt` twice,
+   the comparison comes out the other way round.
+
    The same budget binds a second thing, found later and from the other
    direction. `listCandidates` asks "have I already swiped on these people" with
    a key query — `swipes where __name__ in [ids]` — instead of reading the
@@ -105,6 +118,13 @@ const COSTLIEST = { plan: 'premium', planSince: '2026-01-01T00:00:00.000Z' };
 
 /** Both ways the app writes users/{uid}, and the floor holds on each. */
 const WRITES = ['create', 'update'];
+
+/**
+ * How many clauses a cost probe searches up to. The user document has a dozen
+ * clauses of room, too few to tell 2.2 from 2.4 apart, so clause costs are
+ * measured on a ruleset of their own where a plain clause fits about 165 times.
+ */
+const PROBE_CEILING = 512;
 
 /**
  * The batch size `public/js/data-store.js` uses for its swipe lookups.
@@ -175,6 +195,103 @@ module.exports = {
       return source.replace(ANCHOR, ANCHOR + new Array(n).fill(PAD).join(''));
     }
 
+    /* ---- what a clause costs: a helper call against the same check inline -- */
+
+    /**
+     * `clause` joined to itself `n` times with `&&`, as a balanced tree. The
+     * same clauses as one long chain are refused when the rules compile, as
+     * nested too deeply; a tree has the same number of `&&`s at a fraction of
+     * the depth.
+     * @param {string} clause one expression
+     * @param {number} n how many copies, at least 1
+     * @returns {string}
+     */
+    function tree(clause, n) {
+      if (n === 1) return clause;
+      const half = Math.floor(n / 2);
+      return '(' + tree(clause, half) + ' && ' + tree(clause, n - half) + ')';
+    }
+
+    /**
+     * Does a ruleset with `n` copies of `clause` still accept a one-field write?
+     * It is built the way userDocOk is — the incoming document bound to a
+     * parameter `d`, and `helper` defined beside it — because what a clause
+     * costs depends on where it sits.
+     * @param {string} helper the source of a function the clause may call
+     * @param {string} clause an expression over `d`
+     * @param {number} n how many copies
+     * @returns {Promise<boolean>}
+     */
+    async function probeAccepts(helper, clause, n) {
+      projects += 1;
+      const rules = [
+        "rules_version = '2';",
+        'service cloud.firestore {',
+        '  match /databases/{database}/documents {',
+        '    ' + helper,
+        '    function ok(d) { return d.uid is string' + (n ? ' && ' + tree(clause, n) : '') + '; }',
+        '    match /probe/{id} {',
+        '      allow create: if ok(request.resource.data);',
+        '    }',
+        '  }',
+        '}'
+      ].join('\n');
+      const env = await testing.initializeTestEnvironment({
+        projectId: 'demo-zc-cost-' + projects,
+        firestore: { rules: rules, host: address.host, port: address.port }
+      });
+      let allowed = true;
+      try {
+        await env.authenticatedContext('budget-probe').firestore()
+          .doc('probe/budget-probe').set({ uid: 'budget-probe', createdAt: '2026-01-01T00:00:00.000Z' });
+      } catch (err) {
+        allowed = false;
+      }
+      await env.cleanup();
+      return allowed;
+    }
+
+    /** The most copies of `clause` that fit, searched up to PROBE_CEILING. */
+    async function mostThatFit(helper, clause) {
+      let lo = 0;
+      let hi = PROBE_CEILING;
+      while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2);
+        if (await probeAccepts(helper, clause, mid)) lo = mid; else hi = mid - 1;
+      }
+      return lo;
+    }
+
+    // The shipped helper, copied out of the file, and its own body with the
+    // argument written in: the same question asked both ways.
+    const helper = /function stampOk\(v\) \{\s*return ([^;]+);\s*\}/.exec(source);
+    t.check('stampOk is still in firestore.rules, to measure a helper call with',
+      !!helper, 'looked for `function stampOk(v) { return …; }`');
+    let perCall = null;
+    if (helper) {
+      const plain = await mostThatFit(helper[0], PAD.replace(' && ', ''));
+      const called = await mostThatFit(helper[0], 'stampOk(d.createdAt)');
+      const inline = await mostThatFit(helper[0], '(' + helper[1].replace(/\bv\b/g, 'd.createdAt') + ')');
+      const counts = plain + ' `' + PAD.replace(' && ', '') + '`, ' + called + ' `stampOk(d.createdAt)`, ' +
+        inline + ' of its body written inline';
+
+      // As above: a probe that accepted everything would report the ceiling
+      // three times, and the comparison below would be between two ceilings.
+      t.check('a clause can be repeated until it exhausts the budget, for each kind measured',
+        Math.max(plain, called, inline) < PROBE_CEILING && Math.min(plain, called, inline) > 0,
+        counts + ' fit, searched up to ' + PROBE_CEILING);
+
+      perCall = (plain / called).toFixed(1);
+      t.check('and a bound behind a helper call costs more than the same bound written inline',
+        called < inline,
+        counts + ' fit — about ' + perCall + ' and ' + (plain / inline).toFixed(1) +
+        ' plain clauses each. ' +
+        (called < inline
+          ? 'Factoring repeated bounds into helpers spends margin; it does not buy any.'
+          : 'A helper is no longer the dearer form here, and the comments in firestore.rules ' +
+            'and docs/DEPLOY.md that say it is need correcting.'));
+    }
+
     const headroom = {};
     for (const write of WRITES) {
       // A search on a path the unpadded file is already over on would mean
@@ -210,7 +327,9 @@ module.exports = {
         least >= FLOOR,
         least + ' more `' + PAD.trim() + '` clauses fit before a user write fails (' + both + '). ' +
         (least >= FLOOR
-          ? 'Spend it knowing a clause that is a function call costs about 2.2 of these.'
+          ? 'Spend it knowing ' + (perCall
+            ? 'a call such as `stampOk(d.createdAt)` costs about ' + perCall + ' of these, measured above.'
+            : 'a helper call costs more than one of these.')
           : 'Buy some back before adding anything: inline a helper, or drop a check ' +
             'that a write path already enforces.'));
     }

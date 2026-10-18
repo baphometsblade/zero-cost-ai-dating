@@ -257,7 +257,7 @@
   function usageRow(row, usage, limits) {
     const used = Math.max(0, Number(usage[row.field]) || 0);
     const limit = limits[row.limitKey];
-    const wrap = el('div', { class: 'stack stack-sm' });
+    const wrap = el('div', { class: 'stack stack-sm usage-row' });
 
     if (limit === Infinity) {
       wrap.appendChild(el('div', { class: 'spread' }, [
@@ -305,16 +305,22 @@
         ' Nothing was charged and nothing is owed — it is a flag on your own profile, and you can switch back below.'
       : 'You are on the Free plan, which is the real one. Premium below is a simulation you can switch on to see how the limits and the premium-only features behave.';
 
+    // Measured before the rows go, for the branch below that draws one line.
+    const held = dom.usageList.offsetHeight;
     clear(dom.usageList);
     dom.usageList.setAttribute('aria-busy', 'false');
     // Unknown is not zero. Rows of untouched counters here would tell someone
     // who has used every like today that they have all of them left.
     if (!usage) {
+      // One line where three rows were would pull the plan cards and their
+      // buttons a hundred pixels up the page, so the list keeps its height.
+      dom.usageList.style.setProperty('min-height', held + 'px');
       dom.usageList.appendChild(el('p', {
         class: 'text-muted',
         text: 'Today\'s usage could not be read, so it is not shown. Reload the page to try again.'
       }));
     } else {
+      dom.usageList.style.removeProperty('min-height');
       USAGE_ROWS.forEach(function (row) {
         dom.usageList.appendChild(usageRow(row, usage, limits));
       });
@@ -480,6 +486,19 @@
      ------------------------------------------------------------------------ */
 
   /**
+   * Settle the plan card on a page that cannot start, whichever way it failed:
+   * say so where the plan would be, and take down the placeholder usage rows.
+   * The rows the page arrives with are placeholders, and left standing they
+   * would read as a usage record with its numbers still on the way.
+   * @returns {void}
+   */
+  function cannotStart() {
+    dom.planSummary.textContent = 'Your plan could not be loaded. Reload the page to try again.';
+    clear(dom.usageList);
+    dom.usageList.setAttribute('aria-busy', 'false');
+  }
+
+  /**
    * Start the page: require an account, then paint the plans and the usage.
    * @returns {Promise<void>}
    */
@@ -492,6 +511,7 @@
 
     if (!ZC.auth || typeof ZC.auth.requireAuth !== 'function' || !ZC.store) {
       console.error('[zc] subscription.js needs auth.js and data-store.js.');
+      cannotStart();
       toast('The app scripts did not all load. Try reloading the page.', 'error');
       return;
     }
@@ -506,8 +526,7 @@
       dom.freeCta.addEventListener('click', onDowngrade);
     } catch (err) {
       console.error('[zc] The plans page could not start:', err);
-      dom.planSummary.textContent = 'Your plan could not be loaded. Reload the page to try again.';
-      dom.usageList.setAttribute('aria-busy', 'false');
+      cannotStart();
       toast('Could not load your plan.', 'error');
     }
   }

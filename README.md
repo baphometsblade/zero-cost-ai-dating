@@ -267,7 +267,7 @@ npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.
 
 ### Unit suites
 
-Fourteen suites on Node's built-in runner — **282 checks**, no install, no browser, seconds:
+Fourteen suites on Node's built-in runner — **284 checks**, no install, no browser, seconds:
 
 | Suite | What it pins down |
 | --- | --- |
@@ -282,7 +282,7 @@ Fourteen suites on Node's built-in runner — **282 checks**, no install, no bro
 | `tests/projection.test.js` | What is public about an account, agreed in one place. The key set `projectDiscovery()` emits must equal the closed `hasOnly` lists in `firestore.rules`, and drift either way is named. So must the keys a private user document is written with, against `userDocOk`'s list and each nested validator's: the document the shipped store creates for a new account, at the top level and in each of its maps but `learning.interestAffinity`, whose keys are interest tags and so an open set, and the location the profile editor writes, which a new account does not have — a key the client writes and the rules do not allow is a refused sign-up or profile save in Firebase mode only, where no demo-mode test would see it. And, separately, a fully populated private account is projected and searched for sentinels, so `email`, `birthdate`, `blocked`, `learning` or `usage` cannot reach the world-readable half even if somebody widens the rules to let them. |
 | `tests/pwa.test.js` | The manifest and the service worker carry no root-anchored assumptions, so the same `public/` installs and serves offline under a GitHub Pages project subpath as well as at a site root. |
 | `tests/seed.test.js` | The shape of all 32 seeded profiles against the data model, unique uids and emails, valid interest slugs, ages consistent with birthdates, and `seed-data.js` being in sync with `seed/profiles.json`. |
-| `tests/static.test.js` | Parses every HTML page: no dead local `src`/`href`, correct script load order, no inline script whose hash the CSP does not list and no `style=` attribute or `on*=` handler (the CSP would block them), no class token that the CSS does not define, and `lang` + `title` + viewport + description on every page. Then two things the pages depend on without naming them. The service worker's precache list names every file Hosting deploys, in any folder — the worker itself aside — and nothing that does not exist, so a file added in a folder of its own cannot ship uncached and missing offline. And every glyph the stylesheets generate carries alternative text, because generated content is read aloud: a decorative one is given `''`, and the plan rows' ✓ and ✕, the only thing separating an included feature from a missing one, are announced as *Included:* and *Not included:*. |
+| `tests/static.test.js` | Parses every HTML page: no dead local `src`/`href`, correct script load order, no inline script whose hash the CSP does not list and no `style=` attribute or `on*=` handler (the CSP would block them), no class token that the CSS does not define, and `lang` + `title` + viewport + description on every page. Then two things the pages depend on without naming them. The service worker's precache list names every file Hosting deploys, in any folder — the worker itself aside — and nothing that does not exist, so a file added in a folder of its own cannot ship uncached and missing offline. And every glyph the stylesheets generate carries alternative text, because generated content is read aloud: a decorative one is given `''`, and the plan rows' ✓ and ✕, the only thing separating an included feature from a missing one, are announced as *Included:* and *Not included:*. Last, the plans page's placeholder usage rows are the rows `subscription.js` draws, label for label: they hold the plan cards where they will stay while today's counters load, and one short would move the cards by its height on every visit. And the matches page ships its conversation card visible, leaving the loading state to the stylesheet: scripts are cached for an hour and pages are not, so a card shipped hidden for this deploy's `matches.js` to reveal stayed hidden, conversations and all, under the previous deploy's. |
 | `tests/usage.test.js` | The daily counter's decision, `nextUsage(current, field, amount, today)`, as a pure function: same-day increment, a stale day resetting to zeros *before* the amount lands, an unknown field, a missing or corrupt record, the clamp at zero. Then the same decision through the demo adapter, so it is proven to persist and `canSpend` is proven to agree with it. |
 | `tests/utils.test.js` | The pure half of `ZC.util` — numbers, timing on a hand-rolled fake clock, dates, geo, hashing, avatars, URL parsing. The DOM half needs a live document and belongs to the browser suite. |
 
@@ -293,7 +293,7 @@ store and its daily counter, the auth backend, the pure half of the utilities, t
 schema, the static HTML. It cannot reach the flows that only exist in a DOM — signing in,
 the deck and its keyboard, the match burst, chat that persists, reporting someone, deleting
 your account, and the service worker serving the app with the network gone. Those live in
-`e2e/`: **345 checks** across the twelve specs that need nothing installed but a browser, each
+`e2e/`: **351 checks** across the twelve specs that need nothing installed but a browser, each
 run at 390x844 and most of them at 1280x800 as well — plus a thirteenth, `10-firebase.e2e.js`,
 which needs the Firebase emulators and skips, by name and reason, when they are not running.
 
@@ -316,7 +316,7 @@ Firebase rather than `localStorage`: the real SDK, real Auth, real Firestore, an
 read back out of the emulator instead of off the page. It drives the pages **with their real
 CSP meta tag** — the emulators are reached through the page's own origin rather than by
 relaxing the policy, which is the whole reason it can exist; the Limitations section explains
-the constraint it is working around. With both emulators up the run is **364 checks**, all
+the constraint it is working around. With both emulators up the run is **370 checks**, all
 passing.
 
 It did not start that way. On its first run one check was red, and it had found a real bug:
@@ -328,7 +328,7 @@ fixture in `rules-tests/` ever used a null there. The rule now accepts null, and
 checks pin the shape.
 
 Without an emulator the runner prints `SKIP` and records nothing, so `npm run test:e2e` on a
-bare machine is still 345/345 — and CI runs it both ways, so the skip path and the emulator
+bare machine is still 351/351 — and CI runs it both ways, so the skip path and the emulator
 path are each exercised on every push.
 
 ### Security rules tests
@@ -338,7 +338,7 @@ readable by other accounts, that nobody can mint a match with a stranger and the
 them, that the abuse queue cannot be enumerated — is a claim about one file,
 `firestore.rules`, because there is no server to enforce anything else. Reading it
 carefully is not evidence. `rules-tests/` executes it against the Firestore emulator:
-**213 checks**, including the attacks each rule exists to stop.
+**216 checks**, including the attacks each rule exists to stop.
 
 ```sh
 npm install --prefix /tmp/zc-rules @firebase/rules-unit-testing firebase-tools
@@ -439,7 +439,7 @@ inside a single boot, because booting costs more than either suite does. The `e2
 the browser suite twice: once bare, which is what a contributor with nothing installed gets
 and which proves the Firebase spec skips rather than silently passing, and once inside
 `emulators:exec`, which is the only run in which every spec executes and therefore the only
-one that can hold the 364-check total to account. There are no secrets and no deploy step —
+one that can hold the 370-check total to account. There are no secrets and no deploy step —
 deploying stays a deliberate local `npm run deploy`.
 
 ---

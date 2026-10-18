@@ -43,6 +43,24 @@
         <section class="stack" id="list-pane" aria-labelledby="list-heading">
           <h2 class="sr-only" id="list-heading">Your matches</h2>
 
+          <!-- What the pane shows until the list's first answer, standing in for
+               the cards below rather than sitting inside one of them. Inside the
+               conversations card it was painted first, and when the new-matches
+               strip appeared above it the whole card dropped 228px down a phone
+               screen: a layout shift of 0.16 on every load with a new match. The
+               cards after it appear in the frame it leaves, so nothing on screen
+               moves; .list-skeleton in components.css holds them back, and says
+               why that is not done by shipping them hidden. -->
+          <div class="card list-skeleton" id="list-loading" aria-live="polite" aria-busy="true">
+            <div class="card-head" aria-hidden="true"><span>Conversations</span></div>
+            <div class="card-body stack stack-sm">
+              <p class="sr-only">Loading your matches…</p>
+              <div class="skeleton skeleton-text" aria-hidden="true"></div>
+              <div class="skeleton skeleton-text" aria-hidden="true"></div>
+              <div class="skeleton skeleton-text" aria-hidden="true"></div>
+            </div>
+          </div>
+
           <!-- Matches with no messages yet. Hidden until there is at least one. -->
           <section class="card hidden" id="new-matches-card" aria-labelledby="new-matches-title">
             <div class="card-head">
@@ -55,19 +73,12 @@
           </section>
 
           <!-- The conversation list itself. -->
-          <section class="card" id="conversations-card" aria-labelledby="conversations-title">
+          <section class="card list-after-load" id="conversations-card" aria-labelledby="conversations-title">
             <div class="card-head">
               <span id="conversations-title">Conversations</span>
               <span class="badge hidden" id="unread-badge"></span>
             </div>
             <div class="card-body">
-
-              <div class="stack stack-sm" id="list-loading" aria-live="polite" aria-busy="true">
-                <p class="sr-only">Loading your matches…</p>
-                <div class="skeleton skeleton-text" aria-hidden="true"></div>
-                <div class="skeleton skeleton-text" aria-hidden="true"></div>
-                <div class="skeleton skeleton-text" aria-hidden="true"></div>
-              </div>
 
               <ul class="match-list hidden" id="match-list"></ul>
 
@@ -98,7 +109,7 @@
 
           <!-- Who liked you. Real names for Premium, a blurred placeholder and
                an honest upsell for everyone else. matches.js fills both. -->
-          <section class="card hidden" id="likes-card" aria-labelledby="likes-title">
+          <section class="card hidden list-after-load" id="likes-card" aria-labelledby="likes-title">
             <div class="card-head">
               <span id="likes-title">Who liked you</span>
               <span class="badge badge-premium hidden" id="likes-badge">Premium</span>
