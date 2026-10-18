@@ -1368,17 +1368,57 @@ test('the live views carry the public projection, not the private user document'
   // Demo mode stores whole user documents, so composing a view from one hands
   // the page the other person's email and block list — where firebase mode hands
   // it `discovery/{uid}`, which has neither. Adapter divergence, in the direction
-  // that leaks. Both halves are asserted: the projection is applied here, AND
-  // `getMatches` in this mode still is not, which is what makes this a
-  // divergence check rather than a shape check.
+  // that leaks. The stored document is checked for an address first, so the
+  // empty one below is the projection at work rather than a fixture with nothing
+  // to leak. That used to be shown by asserting `getMatches` in this mode still
+  // handed the address over; it was the same leak, and the next check holds it
+  // closed.
   await resetWorld();
-  const polled = await store.getMatches(YOU);
   const pushed = await firstDelivery(function (cb) { return store.listenMatchViews(YOU, cb); });
 
-  assert.ok(polled[0].other.email, 'the polled path still hands over the private document');
+  assert.ok(raw(KEYS.users)[pushed[0].otherUid].email, 'the stored document has an address to leak');
   assert.equal(pushed[0].other.email, '', 'the live view does not');
   assert.deepEqual(pushed[0].other.blocked, [], 'nor the block list');
   assert.equal(pushed[0].other.profile.birthdate, null, 'nor the birthdate');
+});
+
+test('getMatches and getMatch hand over the same projection, as the Firestore adapter does', async function () {
+  // The Firestore adapter builds every MatchView from `discovery/{uid}`, which
+  // never held an address, a birthdate or a block list. This adapter built them
+  // from the whole stored document, so one facade method returned the other
+  // person's private fields in one mode and not in the other: the divergence the
+  // live list was fixed for, left standing on the polled path beside it.
+  await resetWorld();
+  // Two accounts nothing else here subscribes to. The live list's memo of faces
+  // lasts as long as the page — in this file, as long as the process — so a
+  // face it kept from an earlier test's world would differ from this one's by
+  // its `lastActiveAt` alone. And a block list to leak, because an empty one
+  // satisfies "no block list" whether or not anything was projected.
+  await store.createUser('projected-a', { email: 'a@example.com' });
+  await store.createUser('projected-b', {
+    email: 'b@example.com', blocked: ['somebody-else'], profile: { birthdate: '1990-04-01' }
+  });
+  await store.recordSwipe('projected-a', 'projected-b', 'like');
+  const matchId = (await store.recordSwipe('projected-b', 'projected-a', 'like')).matchId;
+  const stored = raw(KEYS.users)['projected-b'];
+
+  const polled = await store.getMatches('projected-a');
+  const single = await store.getMatch(matchId, 'projected-a');
+  const pushed = await firstDelivery(function (cb) { return store.listenMatchViews('projected-a', cb); });
+
+  assert.ok(stored.email && stored.profile.birthdate && stored.blocked.length,
+    'the stored document has an address, a birthdate and a block list to leak');
+  assert.equal(polled.length, 1, 'the one conversation');
+  [polled[0], single].forEach(function (view, i) {
+    const via = i ? 'getMatch' : 'getMatches';
+    assert.equal(view.other.email, '', via + ' hands over no address');
+    assert.equal(view.other.profile.birthdate, null, via + ' hands over no birthdate');
+    assert.deepEqual(view.other.blocked, [], via + ' hands over no block list');
+  });
+  // Not merely scrubbed of three fields: the very document the live list
+  // delivers, so the two paths cannot drift apart again one key at a time.
+  assert.deepStrictEqual(polled[0].other, pushed[0].other, 'getMatches and the live list agree');
+  assert.deepStrictEqual(single.other, polled[0].other, 'and so does getMatch');
 });
 
 test('and the projection keeps everything the conversation list scores on', async function () {

@@ -16,10 +16,12 @@
    because the SDK was already sharing the target — the correction that file's
    header records. So the number here is counted, and counted with the same
    `harness.countingDb` whose blind spot is documented there: that blind spot is
-   about two listeners on one query, and there are no listeners in this file. A
-   `get()` that does not happen is a read that is not billed under any model.
+   about two listeners on one query, and this file never holds two — its only
+   listeners are the live list's, one at a time, each ended after its first
+   delivery. A `get()` that does not happen is a read that is not billed under
+   any model.
 
-   Twelve claims, in the order somebody would doubt them:
+   Fifteen claims, in the order somebody would doubt them:
 
      1. A cold page pays for the rows and one face per conversation.
      2. The next page pays for the rows and NOTHING for the faces.
@@ -33,6 +35,12 @@
     10. The cache is bounded, and it is the newest faces that survive.
     11. Storage that refuses writes costs reads, never correctness.
     12. A profile that is missing is not remembered as missing.
+    13. The live list, which is what matches.html actually runs, files its
+        faces in ONE write as `getMatches` does, and pays the same reads.
+    14. It reads through the same cache, so a face filed on the last page is
+        shown on this one without being read.
+    15. The likes panel files faces here too and cannot evict a conversation's
+        to do it — but a conversation face past its window gives way.
 
    And one that is not about cost: what gets stored is the public projection,
    so a cache dump cannot hold an email or a block list.
@@ -89,6 +97,32 @@ module.exports = {
     function nameOf(views, uid) {
       const hit = (views || []).filter(function (v) { return v.otherUid === uid; })[0];
       return hit && hit.other ? hit.other.displayName : '';
+    }
+
+    /**
+     * The live list's first delivery, the way matches.html subscribes, and
+     * then nothing more: the subscription ends with it.
+     * @param {string} uid the viewer
+     * @returns {Promise<Object[]|null>} the MatchViews, or null on a timeout
+     */
+    function firstLiveDelivery(uid) {
+      return new Promise(function (resolve) {
+        let stop = null;
+        let done = false;
+        function finish(value) {
+          if (done) return;
+          done = true;
+          // Deferred, because `stop` is assigned only once the subscribe call
+          // has returned.
+          Promise.resolve().then(function () { if (stop) stop(); });
+          resolve(value);
+        }
+        const timer = setTimeout(function () { finish(null); }, 10000);
+        stop = k.store.listenMatchViews(uid, function (views) {
+          clearTimeout(timer);
+          finish(views);
+        });
+      });
     }
 
     // The store is loaded once per process and every spec shares its storage,
@@ -374,5 +408,145 @@ module.exports = {
       'stored email ' + k.show(doc.email) + ', stored blocked ' + k.show(doc.blocked) +
       ' — users/' + others[1] + ' holds ' + k.show(others[1] + '@example.com') + ' and ' +
       k.show([me]) + ', so a copy taken from the private half would show them here');
+
+    /* ---- 12. the live list files its faces once, not once a face ---------- */
+
+    // Every check above runs `getMatches`, and matches.html never calls it: the
+    // conversation list subscribes through `listenMatchViews` (an e2e check
+    // holds the page to zero `getMatches` calls), whose faces come through
+    // `resolveProfiles`. That asked for each face on its own, and every ask
+    // that read something ended by rewriting the WHOLE blob, so a cold load
+    // with N conversations was N synchronous rewrites of a growing blob on the
+    // one page the cache was built for. Counted at `setItem`, which is where
+    // the cost is, and set beside `getMatches` doing the same work.
+    //
+    // One face is filed before the load, under a name no document holds. The
+    // live list showing it unread is the proof that a navigation does not start
+    // it from nothing: its per-page memo empties, and the cache it is filled
+    // from does not.
+    function presetCache() {
+      const faces = {};
+      faces[others[2]] = { at: Date.now(), doc: { uid: others[2], displayName: 'Filed Last Page' } };
+      put(faces);
+    }
+
+    /** Run one call, counting every write of the cache and its size. */
+    async function filing(fn) {
+      const realSet = globalThis.localStorage.setItem;
+      const sizes = [];
+      globalThis.localStorage.setItem = function (key, value) {
+        if (key === KEY) sizes.push(String(value).length);
+        return realSet.apply(globalThis.localStorage, arguments);
+      };
+      try {
+        const out = await measure(fn);
+        out.writes = sizes.length;
+        out.bytes = sizes.reduce(function (sum, n) { return sum + n; }, 0);
+        return out;
+      } finally {
+        globalThis.localStorage.setItem = realSet;
+      }
+    }
+
+    presetCache();
+    const polledFiling = await filing(function () { return k.store.getMatches(me); });
+    k.ctx.drainWarnings();
+
+    presetCache();
+    const liveFiling = await filing(function () { return firstLiveDelivery(me); });
+    k.ctx.drainWarnings();
+    const liveFiled = Object.keys(stored());
+
+    t.check('the live list files what it read in one write, as getMatches does, not one a face',
+      polledFiling.writes === 1 && liveFiling.writes === 1 && liveFiled.length === MATCHES &&
+        others.every(function (them) { return liveFiled.indexOf(them) !== -1; }),
+      'live list ' + liveFiling.writes + ' write(s), ' + liveFiling.bytes + ' byte(s); getMatches ' +
+      polledFiling.writes + ' write(s), ' + polledFiling.bytes + ' byte(s); ' + liveFiled.length +
+      ' face(s) filed for ' + MATCHES + ' conversations');
+
+    // The bill is not what changed, and this pins that it did not: the rows,
+    // the faces nobody had filed, and the account with no profile — whose miss
+    // is read again, as check 10 requires. The face filed last page is shown
+    // from storage and not read.
+    t.check('and it reads exactly what it did before: the rows, and only the faces not on file',
+      !!liveFiling.value && liveFiling.reads === (MATCHES + 1) + (MATCHES - 1) + 1 &&
+        nameOf(liveFiling.value, others[2]) === 'Filed Last Page',
+      liveFiling.reads + ' read(s): ' + (MATCHES + 1) + ' rows, ' + (MATCHES - 1) + ' faces and the ' +
+      'ghost\'s miss; the face filed last page shows as ' +
+      k.show(nameOf(liveFiling.value, others[2])));
+
+    /* ---- 13. the likes panel files faces too, and must not evict these ---- */
+
+    // On premium, matches.html draws the who-liked-you panel once the list's
+    // first delivery is in, and `getLikesReceived` files its faces in this same
+    // cache. Eviction went by age alone, so the likers — filed last — outlived
+    // the conversations the cache exists for whenever the two together passed
+    // the bound, and the next page load paid for those conversations again.
+    // Thirty-five conversations and fifteen people waiting, in the page's order.
+    const busy = 'face-busy';
+    const TALKING = 35;
+    const WAITING = 15;
+    const talking = [];
+    const waiting = [];
+    for (let i = 0; i < TALKING; i += 1) talking.push('face-talk-' + String(i).padStart(2, '0'));
+    for (let i = 0; i < WAITING; i += 1) waiting.push('face-liker-' + String(i).padStart(2, '0'));
+    await k.admin.set('users', busy, k.h.userDoc(busy));
+    await k.admin.setMany('matches', talking.map(function (them) {
+      return { id: k.h.pairId(busy, them), data: k.h.matchDoc(busy, them) };
+    }));
+    await k.admin.setMany('swipes', waiting.map(function (them) {
+      return { id: them + '_' + busy, data: k.h.swipeDoc(them, busy, 'like') };
+    }));
+    await k.admin.setMany('discovery', talking.concat(waiting).map(function (them) {
+      return { id: them, data: k.h.discoveryDoc(them) };
+    }));
+
+    globalThis.localStorage.removeItem(KEY);
+    const busyList = await firstLiveDelivery(busy);
+    const busyLikes = await k.store.getLikesReceived(busy);
+    k.ctx.drainWarnings();
+
+    const busyFiled = Object.keys(stored());
+    const talkingKept = talking.filter(function (them) { return busyFiled.indexOf(them) !== -1; });
+    const waitingKept = waiting.filter(function (them) { return busyFiled.indexOf(them) !== -1; });
+
+    t.check('the likes panel filing after the list does not evict a single conversation',
+      !!busyList && busyList.length === TALKING && busyLikes.length === WAITING &&
+        talkingKept.length === TALKING,
+      talkingKept.length + ' of ' + TALKING + ' conversation faces kept after ' + WAITING +
+      ' likers were filed; ' + busyFiled.length + ' entries in all');
+
+    // The room the conversations leave is the likes panel's, and it is used:
+    // not filing likers at all would also pass the check above, and would make
+    // every premium page load re-read every face in the panel.
+    t.check('and the room they leave is still the likes panel\'s',
+      busyFiled.length === CACHE_MAX && waitingKept.length === CACHE_MAX - TALKING,
+      waitingKept.length + ' liker face(s) kept in the ' + (CACHE_MAX - TALKING) + ' places left');
+
+    const busyNext = await measure(function () { return k.store.getMatches(busy); });
+    k.ctx.drainWarnings();
+
+    t.check('so the next page load pays for the rows and not one conversation face',
+      busyNext.reads === TALKING && busyNext.value.length === TALKING,
+      busyNext.reads + ' read(s) for ' + TALKING + ' conversations — every face evicted for a liker ' +
+      'would be one more');
+
+    // Outranking holds only while a face can still be served. A conversation
+    // that has ended is never read again, so its face is never filed again
+    // either; if having once been filed for a conversation were enough, those
+    // would pile up past their window and the panel would never keep a face.
+    // Age-only eviction got this for free, by dropping the oldest first.
+    const lapsed = stored();
+    talking.forEach(function (them) { if (lapsed[them]) lapsed[them].at = Date.now() - TTL_MS - 1000; });
+    put(lapsed);
+    await k.store.getLikesReceived(busy);
+    k.ctx.drainWarnings();
+
+    const relapsed = Object.keys(stored());
+    const waitingNow = waiting.filter(function (them) { return relapsed.indexOf(them) !== -1; });
+    t.check('and a conversation face past its window gives way to a fresh one from the panel',
+      relapsed.length === CACHE_MAX && waitingNow.length === WAITING,
+      waitingNow.length + ' of ' + WAITING + ' liker faces kept, beside ' +
+      (relapsed.length - waitingNow.length) + ' conversation faces that can no longer be served');
   }
 };

@@ -109,11 +109,15 @@
   const PROFILE_CACHE_TTL_MS = TOUCH_THROTTLE_MS;
 
   /**
-   * How many faces to keep. Conversations, not the deck — see `rememberFaces`.
-   * A projected profile is bounded by the rules (six photo links of 1024, a
-   * capped bio and interest list), so forty of them is a few hundred KB at the
-   * absolute worst and typically far less. The whole blob is rewritten on every
-   * fetch, which is the other reason not to make this large.
+   * How many faces to keep. Conversations first, and never the deck. The likes
+   * panel and the reports list read through this cache as well and file what
+   * they read, but only into the room the conversations leave — see
+   * `rememberFaces`. A projected profile is bounded by the rules (six photo
+   * links of 1024, a capped bio and interest list), so forty of them is a few
+   * hundred KB at the absolute worst and typically far less. The whole blob is
+   * rewritten on every fetch that reads anything, which is the other reason not
+   * to make this large, and the reason the conversation list asks for all its
+   * faces in one fetch rather than one fetch a face.
    *
    * Somebody with more conversations than this is not a broken case, just a
    * partly served one: the oldest go, the newest stay, and a page load pays for
@@ -1246,10 +1250,15 @@
       // The accounts stay forgiving: they only lend each view a name and a face.
       const users = readUsers();
       const matches = readMapOrThrow(KEYS.matches, 'matches');
+      // `publicFace`, not the stored document. This used to hand `toMatchView`
+      // the other person's whole private record — address, birthdate, block
+      // list — from the same facade method whose Firestore half can only ever
+      // read `discovery/{uid}`. The live list had been fixed for exactly that;
+      // this, beside it, had not.
       return Object.keys(matches)
         .map(function (key) { return matches[key]; })
         .filter(function (match) { return isPlainObject(match) && Array.isArray(match.users) && match.users.indexOf(uid) !== -1; })
-        .map(function (match) { return toMatchView(match, uid, users[otherOf(match, uid)]); })
+        .map(function (match) { return toMatchView(match, uid, publicFace(users[otherOf(match, uid)])); })
         .sort(byRecency);
     },
 
@@ -1259,7 +1268,8 @@
       if (!isPlainObject(match)) return null;
       const viewer = uid || currentUid() || (Array.isArray(match.users) ? match.users[0] : null);
       const users = readUsers();
-      return toMatchView(match, viewer, users[otherOf(match, viewer)]);
+      // The same projection `getMatches` applies, for the same reason.
+      return toMatchView(match, viewer, publicFace(users[otherOf(match, viewer)]));
     },
 
     async unmatch(matchId, uid) {
@@ -1445,6 +1455,20 @@
       return demoAdapter.getUser(uid);
     },
 
+    async getPublicProfiles(uids) {
+      // The list form, for `resolveProfiles`, in one read of the store for the
+      // whole list. Like the method above it serves the stored document, and
+      // `resolveProfiles` applies the projection to what comes back. The
+      // Firestore adapter's version takes an option about its face cache, and
+      // there is no cache here to file in.
+      const users = readUsers();
+      const out = {};
+      (uids || []).forEach(function (uid) {
+        if (uid && users[uid]) out[uid] = normalizeUser(users[uid]);
+      });
+      return out;
+    },
+
     async deleteAccountData(uid) {
       // Swipes in both directions, matches (and their messages) either way,
       // then the account document itself — mirroring the Firestore adapter.
@@ -1599,6 +1623,23 @@
       details: text,
       createdAt: nowIso()
     };
+  }
+
+  /**
+   * What one account may see of another: the discovery projection, filled out
+   * to the UserDoc shape a MatchView carries.
+   *
+   * The Firestore adapter has nothing else to hand over — the only copy of
+   * another person it can read is `discovery/{uid}` — and the demo adapter,
+   * which stores whole documents, has to make it. Composed here once, for
+   * `resolveProfiles` in both modes and for the demo adapter's `getMatches`
+   * and `getMatch`, so the live list and the polled one cannot disagree about
+   * it a key at a time.
+   * @param {Object} doc a UserDoc or a discovery document, or nothing
+   * @returns {Object|null} the public face, or null for a missing account
+   */
+  function publicFace(doc) {
+    return doc ? normalizeUser(projectDiscovery(normalizeUser(doc))) : null;
   }
 
   /**
@@ -1888,7 +1929,10 @@
    * deck could seed this with for free. Those are people the viewer has mostly
    * not matched with and mostly never will, and at forty entries seeding them
    * would evict the conversations this exists for on the first deck load. The
-   * cache holds faces somebody is actually talking to.
+   * cache is for faces somebody is actually talking to. The likes panel and the
+   * reports list do file the faces they read, but below those: they use the
+   * room the conversations leave, and never evict a fresh face that a
+   * conversation lookup filed.
    *
    * There is no invalidation hook, and that is a fact about the rules rather
    * than an omission: `discovery/{uid}` is writable only by that account, so
@@ -1958,20 +2002,40 @@
   }
 
   /**
-   * File the faces just fetched, evicting the oldest beyond PROFILE_CACHE_MAX.
+   * File the faces just fetched, evicting beyond PROFILE_CACHE_MAX.
+   *
+   * Eviction went by age alone, and that was wrong once something other than
+   * the conversation list filed faces here. On premium, matches.html draws the
+   * likes panel after the list's first delivery, so the likers were filed last
+   * and the conversations just before them: with more than forty faces between
+   * the two, the panel evicted exactly the faces the list had just paid for,
+   * and the next page load paid for them again. Measured in
+   * `store-tests/specs/17-face-cache.store.js`: thirty-five conversations and
+   * fifteen people waiting lost ten conversation faces, and the next load read
+   * those ten again. So what goes is decided by `rankOf` first and age second:
+   * an entry that cannot be served now, then a face filed for anything but a
+   * conversation, then the oldest conversation faces.
    * @param {Object} fetched map of uid -> UserDoc-shaped public profile
    * @param {number} now epoch ms
+   * @param {boolean} conversation whether these are the faces of people this
+   *   account is talking to
    * @returns {void}
    */
-  function rememberFaces(fetched, now) {
+  function rememberFaces(fetched, now, conversation) {
     const uids = Object.keys(fetched);
     if (!uids.length) return;
     const faces = readFaceCache();
-    uids.forEach(function (uid) { faces[uid] = { at: now, doc: fetched[uid] }; });
+    uids.forEach(function (uid) {
+      const entry = { at: now, doc: fetched[uid] };
+      if (conversation) entry.conversation = true;
+      faces[uid] = entry;
+    });
 
     const all = Object.keys(faces);
     if (all.length > PROFILE_CACHE_MAX) {
-      all.sort(function (a, b) { return stampOf(faces[a]) - stampOf(faces[b]); })
+      all.sort(function (a, b) {
+        return (rankOf(faces[a], now) - rankOf(faces[b], now)) || (stampOf(faces[a]) - stampOf(faces[b]));
+      })
         .slice(0, all.length - PROFILE_CACHE_MAX)
         .forEach(function (uid) { delete faces[uid]; });
     }
@@ -1984,6 +2048,29 @@
   }
 
   /**
+   * How hard an entry holds its place, lowest evicted first.
+   *
+   * 0 is an entry that is expired, stamped in the future, or malformed, none of
+   * which `cachedFaces` will serve. Age-only eviction dropped the expired ones
+   * first for free, being the oldest; ranking has to say so, or an expired
+   * conversation face would outlast a fresh face from the likes panel. 1 is a
+   * fresh face filed by anything other than a conversation lookup, and 2 a
+   * fresh one filed by one. The flag goes with the read that filed the entry,
+   * so a liker who becomes a match keeps rank 1 for what is left of that
+   * entry's TTL, and is filed at 2 the next time the list reads them. An entry
+   * written before the flag existed ranks as one filed by anything else, which
+   * is why adding it did not need PROFILE_CACHE_VERSION bumped.
+   * @param {*} entry a stored cache entry
+   * @param {number} now epoch ms
+   * @returns {number} 0, 1 or 2
+   */
+  function rankOf(entry, now) {
+    const age = now - stampOf(entry);
+    if (!isPlainObject(entry) || !isPlainObject(entry.doc) || !(age >= 0 && age < PROFILE_CACHE_TTL_MS)) return 0;
+    return entry.conversation === true ? 2 : 1;
+  }
+
+  /**
    * Fetch several public discovery profiles at once, tolerating individual
    * failures. Other people are only ever read through this projection.
    *
@@ -1992,10 +2079,16 @@
    * account whose profile was briefly unreadable. The cost of that choice is
    * one read per page for a genuinely deleted account, which is the right way
    * round.
+   *
+   * Every call that reads anything ends in one rewrite of the whole cache, so
+   * a caller with several faces to find passes them all in one call.
    * @param {string[]} uids ids to fetch
+   * @param {{conversation:boolean}} [options] `conversation: true` when these
+   *   are the faces of people this account is talking to, which files them
+   *   above everybody else's — see `rememberFaces`
    * @returns {Promise<Object>} map of uid -> UserDoc-shaped public profile
    */
-  async function fetchProfiles(uids) {
+  async function fetchProfiles(uids, options) {
     const unique = [];
     (uids || []).forEach(function (uid) {
       if (uid && unique.indexOf(uid) === -1) unique.push(uid);
@@ -2015,7 +2108,7 @@
         fresh[uid] = results[index];
       }
     });
-    rememberFaces(fresh, Date.now());
+    rememberFaces(fresh, Date.now(), !!(options && options.conversation));
     return map;
   }
 
@@ -2094,19 +2187,24 @@
     }
 
     const results = await Promise.all(batches.map(async function (ids) {
-      if (path) {
-        try {
-          const snap = await db().collection('swipes').where(path, 'in', ids).get();
-          const found = [];
-          snap.forEach(function (doc) { found.push(doc.id); });
-          return found;
-        } catch (err) {
-          // A denial here is the expression budget above, or an SDK that does
-          // not take this query. Either way the deck must still load, so fall
-          // through to one read per person: dearer, still bounded by the people
-          // actually being considered, and never the whole history again.
-          console.warn('[zc.store] Batched swipe lookup unavailable, asking one at a time.', err);
-        }
+      try {
+        // Inside the `try`, so that an SDK with no way to name a document id
+        // takes the same loud fallback as a refused query. It used to be an
+        // `if (path)` around the query instead, which went straight to one read
+        // per person — ten for a batch of ten that a key query would have billed
+        // one — and said nothing at all.
+        if (!path) throw new Error('This SDK has no FieldPath.documentId.');
+        const snap = await db().collection('swipes').where(path, 'in', ids).get();
+        const found = [];
+        snap.forEach(function (doc) { found.push(doc.id); });
+        return found;
+      } catch (err) {
+        // A denial here is the expression budget above, or an SDK that does
+        // not take this query or cannot name its field. Either way the deck must
+        // still load, so fall through to one read per person: dearer, still
+        // bounded by the people actually being considered, and never the whole
+        // history again.
+        console.warn('[zc.store] Batched swipe lookup unavailable, asking one at a time.', err);
       }
       const snaps = await Promise.all(ids.map(function (id) {
         return db().collection('swipes').doc(id).get();
@@ -2696,7 +2794,8 @@
         data.id = data.id || doc.id;
         docs.push(data);
       });
-      const users = await fetchProfiles(docs.map(function (match) { return otherOf(match, uid); }));
+      const users = await fetchProfiles(docs.map(function (match) { return otherOf(match, uid); }),
+        { conversation: true });
       return docs
         .map(function (match) { return toMatchView(match, uid, users[otherOf(match, uid)]); })
         .sort(byRecency);
@@ -2709,7 +2808,7 @@
       data.id = data.id || snap.id;
       const viewer = uid || currentUid() || (Array.isArray(data.users) ? data.users[0] : null);
       const otherUid = otherOf(data, viewer);
-      const users = await fetchProfiles([otherUid]);
+      const users = await fetchProfiles([otherUid], { conversation: true });
       return toMatchView(data, viewer, users[otherUid]);
     },
 
@@ -3073,6 +3172,14 @@
       // fetch uses, so the shape and the failure handling stay identical.
       const map = await fetchProfiles([uid]);
       return map[uid] || null;
+    },
+
+    async getPublicProfiles(uids, options) {
+      // The list form, for `resolveProfiles`: every face the conversation list
+      // is missing in ONE `fetchProfiles`, so the face cache is read twice and
+      // rewritten once for the whole list. One call a face read it twice and
+      // rewrote it once for every face.
+      return fetchProfiles(uids, options);
     },
 
     async deleteAccountData(uid) {
@@ -3628,10 +3735,15 @@
    * Public profiles already fetched this page, by uid.
    *
    * Per page load, not per call: every page here is its own document, so this
-   * empties on navigation, which is honest — a name cached across pages could
-   * outlive an edit. What it does buy is the thing that matters, which is that a
-   * conversation changing costs ONE read for the row rather than one plus a
-   * profile for everyone in the list.
+   * empties on navigation. What it is filled from does not. In firebase mode
+   * the faces come through `fetchProfiles`, which serves one from the
+   * `zc.profiles` cache for up to PROFILE_CACHE_TTL_MS, so a name can outlive
+   * an edit by up to five minutes on the next page too — a window that
+   * constant's comment argues for, and that
+   * `store-tests/specs/17-face-cache.store.js` executes for this list. Within a
+   * page nothing here is refreshed at all: a face is kept for as long as the
+   * page stays open. What it buys is that a conversation changing costs ONE
+   * read for the row rather than one plus a profile for everyone in the list.
    *
    * Failures are deliberately not memoised. A cached failure is a permanent
    * "Someone" for an account whose profile was momentarily unreadable.
@@ -3648,28 +3760,45 @@
 
   async function resolveProfiles(uids) {
     const wanted = [];
+    const waits = [];
     uids.forEach(function (uid) {
-      if (uid && !(uid in profileMemo) && wanted.indexOf(uid) === -1) wanted.push(uid);
+      if (!uid || uid in profileMemo) return;
+      const inFlight = profilePending[uid];
+      if (inFlight) {
+        if (waits.indexOf(inFlight) === -1) waits.push(inFlight);
+      } else if (wanted.indexOf(uid) === -1) {
+        wanted.push(uid);
+      }
     });
-    await Promise.all(wanted.map(function (uid) {
-      if (profilePending[uid]) return profilePending[uid];
-      const pending = Promise.resolve()
-        .then(function () { return adapter.getPublicProfile(uid); })
-        .then(function (doc) {
-          // Projected, so a live view carries the same public subset the
-          // Firestore path serves. Without this the demo adapter would hand the
-          // page the whole private document — the other person's email and block
-          // list — where firebase mode hands it `discovery/{uid}`. The two
-          // adapters agreeing is the point of composing here rather than in each.
-          if (doc) profileMemo[uid] = normalizeUser(projectDiscovery(normalizeUser(doc)));
+    if (wanted.length) {
+      // ONE ask for every face that is missing, never one each. Asking per uid
+      // made every face its own `fetchProfiles`, and each of those that read
+      // anything ended by rewriting the whole face cache: a cold list of N
+      // conversations was N synchronous rewrites of a growing blob, on the page
+      // the cache was built for, where `getMatches` had always made one.
+      const batch = Promise.resolve()
+        .then(function () { return adapter.getPublicProfiles(wanted, { conversation: true }); })
+        .then(function (docs) {
+          wanted.forEach(function (uid) {
+            // Projected, so a live view carries the same public subset the
+            // Firestore path serves. Without this the demo adapter would hand
+            // the page the whole private document — the other person's email
+            // and block list — where firebase mode hands it `discovery/{uid}`.
+            // The two adapters agreeing is the point of composing here rather
+            // than in each.
+            if (docs && docs[uid]) profileMemo[uid] = publicFace(docs[uid]);
+          });
         })
         .catch(function (err) {
           console.warn('[zc.store] Could not load a profile for the conversation list.', err);
         })
-        .then(function () { delete profilePending[uid]; });
-      profilePending[uid] = pending;
-      return pending;
-    }));
+        .then(function () {
+          wanted.forEach(function (uid) { delete profilePending[uid]; });
+        });
+      wanted.forEach(function (uid) { profilePending[uid] = batch; });
+      waits.push(batch);
+    }
+    await Promise.all(waits);
     return profileMemo;
   }
 
