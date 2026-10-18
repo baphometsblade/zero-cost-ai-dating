@@ -157,11 +157,15 @@ async function main() {
   // this suite provokes both on purpose.
   if (typeof firestoreSdk.setLogLevel === 'function') firestoreSdk.setLogLevel('silent');
 
-  // The suite's own project runs open rules (harness.OPEN_RULES): the client
-  // SDK has no way to mint an auth token without the Auth emulator, so a
-  // rules-enforcing project would deny every write and prove nothing about
-  // atomicity. The separate project below carries the *real* firestore.rules
-  // and is used by 04-rules-accept to replay what the store stored.
+  // The suite's own project runs open rules (harness.OPEN_RULES): the store is
+  // loaded with a compat Firestore that context.js connects to the emulator
+  // without an auth token, and that one store acts for every account a spec
+  // needs, so a rules-enforcing project would deny every write and prove
+  // nothing about atomicity. The separate project below carries the *real*
+  // firestore.rules. 04-rules-accept, 13-messaging and 14-reports replay what
+  // the store stored against it, as the account that wrote it; 08-conversation
+  // points the shipped undoSwipe at it as a signed-in user; and 19-write-cost
+  // opens a listener on it that the rules refuse to a signed-out caller.
   const env = await testing.initializeTestEnvironment({
     projectId: harness.PROJECT_ID,
     firestore: { rules: harness.OPEN_RULES, host: address.host, port: address.port }

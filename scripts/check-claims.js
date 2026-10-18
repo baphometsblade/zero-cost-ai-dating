@@ -14,7 +14,7 @@
    is all that file can check), and the wrong number would have shipped.
 
    So this runs the suite in a child process and reads the count back out of
-   its TAP summary. It is a second run of a suite that takes under a second,
+   its TAP summary. It is a second run of a suite that takes about a second,
    which is a cheap price for the one number the project cannot otherwise
    verify.
    ========================================================================== */

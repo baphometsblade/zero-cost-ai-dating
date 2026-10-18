@@ -50,12 +50,12 @@ without a row here.
 | --- | --- |
 | `specs/01-users.rules.js` | `users/{uid}` — owner-only, and shape-validated on write |
 | `specs/02-discovery.rules.js` | `discovery/{uid}` — world-readable, but only the public shape |
-| `specs/03-swipes.rules.js` | `swipes/{from_to}` — authored by you, immutable, id-pinned, and probeable when absent only by the pair named in the id |
+| `specs/03-swipes.rules.js` | `swipes/{from_to}` — authored by you, immutable, id-pinned, and probeable — or deletable — when absent only by the pair named in the id |
 | `specs/04-matches.rules.js` | `matches/{a_b}` — participants only, only with a reciprocal like, and the same id-bounded probe when absent |
 | `specs/05-messages.rules.js` | `matches/{id}/messages` — participants only, append-only, self-authored |
 | `specs/06-reports.rules.js` | `reports/{from_about}` — bounded, author-only, unprobeable |
 | `specs/07-default-deny.rules.js` | everything else — denied by default |
-| `specs/08-budget.rules.js` | the rules file itself — how much of Firestore's 1000-expression-per-request ceiling `userDocOk` has left, and how long an `in` list the swipes read rule accepts before the same ceiling denies it. The second one binds the deck: `listCandidates` asks "have I swiped on these people" as `swipes where __name__ in [ids]`, the read rule is evaluated once per value, and going over comes back as a `permission-denied` naming nothing. Measured at 20; the store asks about 10 |
+| `specs/08-budget.rules.js` | the rules file itself — how much of Firestore's 1000-expression-per-request ceiling `userDocOk` has left on both the create and the update of the costliest document the store writes (a premium account with every optional field set, a location among them), and how long an `in` list the swipes read rule accepts before the same ceiling denies it. The second one binds the deck: `listCandidates` asks "have I swiped on these people" as `swipes where __name__ in [ids]`, the read rule is evaluated once per value, and going over comes back as a `permission-denied` naming nothing. Measured at 20; the store asks about 10 |
 
 Each spec starts from an empty database, so one spec's fixtures can never satisfy
 another's preconditions and mask a missing rule.
@@ -63,12 +63,19 @@ another's preconditions and mask a missing rule.
 ## What is covered
 
 - **`users/{uid}`** — owner-only reads (the private-data split), the frozen `uid`/`email`/
-  `createdAt`, and every documented field bound, one field at a time.
+  `createdAt`, every documented field bound, one field at a time, and a key list closed in
+  every map that names its fields: one unexpected key at the top and in each of `profile`,
+  `preferences`, `learning`, `usage`, `profile.personality` and `profile.location` is
+  refused, as is a list where each of those maps belongs. `learning.interestAffinity` is
+  keyed by interest rather than by field, so it is bounded instead of closed: at most 60
+  keys, with a cap on the characters of its keys and another on its values.
 - **`discovery/{uid}`** — readable by any signed-in user by design, and the closed key list
   that makes that safe: `email`, `blocked`, `learning`, `usage`, `plan` and `birthdate` all
   fail to smuggle in.
 - **`swipes/{from_to}`** — the id convention, authorship, immutability, and deletes in both
-  directions (rewind, and account deletion purging inbound likes).
+  directions (rewind, and account deletion purging inbound likes), including a second
+  rewind of a swipe that is already gone, which is allowed by the id exactly as a read of a
+  miss is, and refused to a stranger and to a signed-out visitor.
 - **`matches/{a_b}`** — that a match cannot be created without proof the other person liked
   you first, which is what stops an account minting a match against a uid found through the
   open `discovery` collection and then messaging a stranger.
@@ -124,16 +131,27 @@ another's preconditions and mask a missing rule.
   `userDocOk`, with its fourteen keys and forty-odd validated fields, had room for **eleven**
   more trivial clauses and nothing had ever measured that. `08-budget` measures it now, by
   padding `userDocOk` with a known number of always-true clauses and finding where a valid
-  document stops being accepted. It also measures the shape of the cost, which is not what
-  it looks like: a function call is worth about 2.2 plain clauses, and `in` on a map is
-  *cheaper* than reading a field, so factoring repeated bounds into helpers — the obvious
-  tidy-up — spends the margin rather than saving it.
+  document stops being accepted — on create and on update, for the costliest document the
+  store writes, with the floor applied to the lower. It used to measure only the create of
+  a free account, the write with the most room, and that hid the one that binds: updating
+  the suite's fixture as a premium account, every optional field set and a location among
+  them, was already over the limit. So the shipped upgrade to premium, run as that
+  account's owner, came back as a flat `permission-denied`, while the same account without
+  its location upgraded and the spec reported five clauses to spare. The shape of the cost
+  was measured against the rules file rather than by the spec, and it is not what it looks
+  like: `firestore.rules` records a call such as `stampOk(d.createdAt)` at about 2.2 plain
+  clauses, where its body alone is worth about 1.5, so factoring repeated bounds into
+  helpers — the obvious tidy-up — spends the margin rather than saving it.
 
-  The number is a measurement of the rules engine's accounting rather than of anything in
-  this repository, so an emulator upgrade could move it with nothing here changing. It has
-  read the same on two independent machines so far. Whatever moves it, the response is to
-  find out what did — never to lower the floor until the build goes green, which is the one
-  thing that would make the check worthless.
+  These figures are a measurement of the rules engine's accounting rather than of anything
+  in this repository, so an emulator upgrade could move them with nothing here changing.
+  The single figure the spec used to print, 5 for creating a free account, read the same on
+  two independent machines, and that old spec, run against the old rules on firebase-tools
+  15.32.1, which fetches the same emulator jar, still reads 5. The two it prints now, for
+  creating and for updating a premium account, have been measured on one machine only, and
+  until CI prints the same nothing says they reproduce. Whatever moves them, the response is
+  to find out what did — never to lower the floor until the build goes green, which is the
+  one thing that would make the check worthless.
 
 Query-level rules are covered too, not just document reads: the suite asserts that the
 constrained queries the app issues are allowed and that an unconstrained scan of the same

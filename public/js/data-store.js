@@ -60,7 +60,8 @@
    * The closed list of report reasons with their UI labels — the single place
    * both the validation and the report dialog draw from. firestore.rules
    * repeats the slug list literally (rules cannot import), so a change here
-   * must land there in the same commit.
+   * must land there in the same commit; tests/limits.test.js compares the two
+   * and fails until it does.
    */
   const REPORT_REASONS = [
     { slug: 'fake-profile', label: 'Fake or impersonating profile' },
@@ -2497,13 +2498,16 @@
       // behave exactly like the demo adapter (a merged set would resurrect
       // keys that learning pruning removed) — but the read and the set are one
       // atomic unit now. They have to be: a set writes back every field it
-      // read, so anything that landed in between is silently reverted, and
-      // dashboard.js makes that the ordinary case rather than an exotic one.
-      // Every swipe leaves this write in flight across the usage transaction,
-      // and a plain get-then-set put `usage` back the way it read it and threw
-      // the increment away. Firestore replays the callback when the document
-      // moved under it, so whichever write loses the race re-reads and both
-      // survive.
+      // read, so anything that landed in between is silently reverted.
+      // dashboard.js used to make that the ordinary case: every like and super
+      // like left this write in flight, carrying the learning map, across the
+      // usage transaction, and a plain get-then-set put `usage` back the way it
+      // read it and threw the increment away. The deck now saves learning
+      // through saveLearning, after the bump, but a profile or settings save
+      // can still land while a swipe bumps the counter — the overlap
+      // store-tests/specs/05-swipe-race.store.js pins. Firestore replays the
+      // callback when the document moved under it, so whichever write loses
+      // the race re-reads and both survive.
       // The projection goes in the same transaction, which is why this is not
       // writeDiscovery(): two concurrent saves commit their user documents in
       // one order, but two independent follow-up writes can land in the other,
@@ -3375,9 +3379,10 @@
    * This was a bare `{}`, and in a multi-page app that is not a throttle. Every
    * page here is its own HTML document, so every navigation is a fresh JS context
    * with an empty map — and `app.js` calls `touchActive` on every page that
-   * resolves a user. Six pages in a minute was six writes, while
-   * `docs/ARCHITECTURE.md` said "one write per five minutes". The bound held only
-   * within a single page, which is the one case it was not needed for.
+   * resolves a user. Six pages in a minute was six touches — twelve Firestore
+   * writes, since each touch writes `users/{uid}` and then `discovery/{uid}` —
+   * while `docs/ARCHITECTURE.md` said "one write per five minutes". The bound
+   * held only within a single page, which is the one case it was not needed for.
    *
    * Storage failures are not an error here: a throttle that cannot remember is a
    * throttle that lets the write through, which is the safe direction — the write
@@ -3952,7 +3957,10 @@
     },
 
     /**
-     * Record that the user is around. Throttled to one write per 5 minutes.
+     * Record that the user is around. Throttled to one touch per 5 minutes
+     * across page loads (the stamp lives in localStorage); a touch that gets
+     * through is setLastActive, which in firebase mode is two writes —
+     * `users/{uid}`, then `discovery/{uid}`.
      * @param {string} uid user id
      * @returns {Promise<boolean>} true when a write happened
      */
