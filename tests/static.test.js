@@ -12,6 +12,8 @@
      (c) no inline <script> bodies, no style="…", no on*="…" handlers (CSP)
      (d) every class token used in HTML is defined somewhere in the CSS
      (e) every page has <html lang>, <title>, viewport and description
+     (f) sw.js CORE lists exactly what Hosting deploys, worker aside
+     (g) every glyph the stylesheets generate has alternative text
 
    Failures print the offending page and line, because a static check nobody
    can act on is worse than no check at all.
