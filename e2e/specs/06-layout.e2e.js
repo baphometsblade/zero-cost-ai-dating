@@ -81,29 +81,55 @@ function measureReach(page) {
 }
 
 /**
+ * Core Web Vitals' line between a "good" cumulative layout shift and one that
+ * needs improvement. Fixed by the metric's authors, not tuned to this app.
+ */
+const GOOD_SHIFT = 0.1;
+
+/**
  * Load each page, add up the layout shift that moved <main> itself while it
  * loaded, and measure whether the page can be scrolled sideways once it has.
  * Layout shift is reported per element, so content arriving later inside a
  * page does not count as a jump — only the page as a whole moving.
+ *
+ * Then let the page finish — nothing marked busy still on screen, and half a
+ * second without a shift — and add up every shift it made, whatever moved.
+ * That is the number a visitor feels: content arriving above a button they
+ * are reaching for.
  * @param {Object} page a Playwright Page, signed in
  * @param {string} base the site's base URL, without a trailing slash
  * @param {string[]} names page names, without .html
- * @returns {Promise<{jumped:string[], wide:string[]}>} "name shift" for every
- *   page that jumped, "name width" for every page wider than the viewport
+ * @returns {Promise<{jumped:string[], wide:string[], unsettled:string[]}>}
+ *   "name shift" for every page that jumped, "name width" for every page
+ *   wider than the viewport, and "name total (what moved)" for every page
+ *   whose shift while loading came to GOOD_SHIFT or more
  */
 async function mainShifts(page, base, names) {
   await page.context().addInitScript(function () {
     window.__zcMainShift = 0;
+    window.__zcShift = { total: 0, last: 0, moved: [] };
     new PerformanceObserver(function (list) {
       list.getEntries().forEach(function (entry) {
         (entry.sources || []).forEach(function (source) {
           if (source.node && source.node.tagName === 'MAIN') window.__zcMainShift += entry.value;
+        });
+        // A shift right after a click or a key is the page answering, and the
+        // metric leaves it out too.
+        if (entry.hadRecentInput) return;
+        window.__zcShift.total += entry.value;
+        window.__zcShift.last = performance.now();
+        (entry.sources || []).forEach(function (source) {
+          const node = source.node;
+          if (!node || !node.tagName) return;
+          const name = node.id ? '#' + node.id : node.tagName.toLowerCase();
+          if (window.__zcShift.moved.indexOf(name) === -1) window.__zcShift.moved.push(name);
         });
       });
     }).observe({ type: 'layout-shift', buffered: true });
   });
   const jumped = [];
   const wide = [];
+  const unsettled = [];
   for (const name of names) {
     await page.goto(base + '/' + name + '.html', { waitUntil: 'load' });
     await page.waitForSelector('[data-zc-nav]');
@@ -122,8 +148,21 @@ async function mainShifts(page, base, names) {
     if (seen.shift > 0) jumped.push(name + ' ' + seen.shift.toFixed(3));
     // The same one-pixel allowance measureDeck makes for sub-pixel rounding.
     if (seen.width > seen.viewport + 1) wide.push(name + ' ' + seen.width + 'px');
+
+    // The predicate returns a boolean, never a promise: waitForFunction takes
+    // a returned promise as a truthy answer and stops waiting at once.
+    await page.waitForFunction(function () {
+      const busy = Array.prototype.some.call(document.querySelectorAll('[aria-busy="true"]'), function (node) {
+        return node.getClientRects().length > 0;
+      });
+      return !busy && performance.now() - window.__zcShift.last >= 500;
+    }, null, { polling: 100, timeout: 10000 });
+    const loaded = await page.evaluate(function () { return window.__zcShift; });
+    if (loaded.total >= GOOD_SHIFT) {
+      unsettled.push(name + ' ' + loaded.total.toFixed(3) + ' (' + loaded.moved.join(' ') + ')');
+    }
   }
-  return { jumped: jumped, wide: wide };
+  return { jumped: jumped, wide: wide, unsettled: unsettled };
 }
 
 module.exports = {
@@ -180,6 +219,16 @@ module.exports = {
     const pages = await mainShifts(page, ctx.base, ['dashboard', 'matches', 'profile', 'settings', 'subscription']);
     t.check('no page jumps when the shared header mounts', pages.jumped.length === 0,
       pages.jumped.length ? 'shifted: ' + pages.jumped.join(', ') : 'no shift on <main>');
+
+    // That check is about the page as a whole, so content arriving inside it
+    // was free to move everything below: the matches page painted its
+    // conversation card with a skeleton and then dropped it 228px when the
+    // new-matches strip arrived above it (0.16 at the phone size), and the
+    // plans page filled an empty usage list above the plan cards and their
+    // switch buttons (0.17). Either change undone fails this.
+    t.check('no signed-in page shifts by ' + GOOD_SHIFT + ' or more while its data arrives',
+      pages.unsettled.length === 0,
+      pages.unsettled.length ? 'shifted: ' + pages.unsettled.join(', ') : 'every page under ' + GOOD_SHIFT);
 
     // Only the deck was measured for sideways overflow, so a conversation row
     // that carried a hidden span past the right edge made the matches page

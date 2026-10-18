@@ -57,6 +57,7 @@
     newCount: document.getElementById('new-matches-count'),
     unreadBadge: document.getElementById('unread-badge'),
     listLoading: document.getElementById('list-loading'),
+    listCard: document.getElementById('conversations-card'),
     list: document.getElementById('match-list'),
     listEmpty: document.getElementById('list-empty'),
     listError: document.getElementById('list-error'),
@@ -401,6 +402,7 @@
    */
   function renderList() {
     show(dom.listLoading, state.loading);
+    show(dom.listCard, !state.loading);
     show(dom.listError, !state.loading && !!state.error);
     show(dom.list, !state.loading && !state.error && state.matches.length > 0);
     show(dom.listEmpty, !state.loading && !state.error && state.matches.length === 0);

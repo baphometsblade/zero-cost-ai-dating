@@ -547,3 +547,30 @@ test('(g) every glyph the stylesheets generate has alternative text', function (
   assert.ok(glyphs >= 14, 'found only ' + glyphs + ' generated glyphs in the stylesheets');
   assert.equal(problems.length, 0, report('Generated glyphs a screen reader reads raw:', problems));
 });
+
+test('the plans page arrives with a placeholder for each usage row subscription.js draws', function () {
+  // subscription.html holds today's usage open with rows in the shape the
+  // script draws, so the plan cards below are painted where they will stay
+  // (the page explains, above #usage-list). The rows are written down twice,
+  // here and as USAGE_ROWS, and a placeholder short of a row moves the cards
+  // again by that row's height on every load.
+  const html = blankHtmlComments(fs.readFileSync(path.join(PUBLIC_DIR, 'subscription.html'), 'utf8'));
+  const start = html.indexOf('id="usage-list"');
+  const end = html.indexOf('id="usage-reset"');
+  assert.ok(start !== -1 && end > start, 'subscription.html has #usage-list followed by #usage-reset');
+  const held = [];
+  const row = /<div class="spread"><span>([^<]+)<\/span>/g;
+  let m;
+  const block = html.slice(start, end);
+  while ((m = row.exec(block)) !== null) held.push(m[1]);
+
+  const js = fs.readFileSync(path.join(PUBLIC_DIR, 'js', 'subscription.js'), 'utf8');
+  const rows = /const USAGE_ROWS = \[([\s\S]*?)\];/.exec(js);
+  assert.ok(rows, 'subscription.js declares `const USAGE_ROWS = [ … ];`');
+  const drawn = [];
+  const label = /label: '([^']+)'/g;
+  while ((m = label.exec(rows[1])) !== null) drawn.push(m[1]);
+
+  assert.ok(drawn.length > 0, 'found no labels in USAGE_ROWS');
+  assert.deepEqual(held, drawn, 'the placeholder rows in subscription.html are not the rows USAGE_ROWS draws');
+});

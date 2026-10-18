@@ -43,6 +43,23 @@
         <section class="stack" id="list-pane" aria-labelledby="list-heading">
           <h2 class="sr-only" id="list-heading">Your matches</h2>
 
+          <!-- What the pane shows until the list's first answer, standing in for
+               both cards below rather than sitting inside one of them. Inside the
+               conversations card it was painted first, and when the new-matches
+               strip appeared above it the whole card dropped 228px down a phone
+               screen: a layout shift of 0.16 on every load with a new match. The
+               two cards now appear in the frame this one leaves, so nothing on
+               screen moves. -->
+          <div class="card" id="list-loading" aria-live="polite" aria-busy="true">
+            <div class="card-head" aria-hidden="true"><span>Conversations</span></div>
+            <div class="card-body stack stack-sm">
+              <p class="sr-only">Loading your matches…</p>
+              <div class="skeleton skeleton-text" aria-hidden="true"></div>
+              <div class="skeleton skeleton-text" aria-hidden="true"></div>
+              <div class="skeleton skeleton-text" aria-hidden="true"></div>
+            </div>
+          </div>
+
           <!-- Matches with no messages yet. Hidden until there is at least one. -->
           <section class="card hidden" id="new-matches-card" aria-labelledby="new-matches-title">
             <div class="card-head">
@@ -55,19 +72,12 @@
           </section>
 
           <!-- The conversation list itself. -->
-          <section class="card" id="conversations-card" aria-labelledby="conversations-title">
+          <section class="card hidden" id="conversations-card" aria-labelledby="conversations-title">
             <div class="card-head">
               <span id="conversations-title">Conversations</span>
               <span class="badge hidden" id="unread-badge"></span>
             </div>
             <div class="card-body">
-
-              <div class="stack stack-sm" id="list-loading" aria-live="polite" aria-busy="true">
-                <p class="sr-only">Loading your matches…</p>
-                <div class="skeleton skeleton-text" aria-hidden="true"></div>
-                <div class="skeleton skeleton-text" aria-hidden="true"></div>
-                <div class="skeleton skeleton-text" aria-hidden="true"></div>
-              </div>
 
               <ul class="match-list hidden" id="match-list"></ul>
 

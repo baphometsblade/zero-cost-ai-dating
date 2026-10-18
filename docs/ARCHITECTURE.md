@@ -716,8 +716,18 @@ match id current without adding history entries.
   write is not governed by `style-src` at all.
 - **No inline scripts or `on*` handlers.** All behaviour is wired with `addEventListener` in
   the page controller.
-- **Skeletons, not spinners, for content.** Lists render `.skeleton` nodes while loading so
-  layout does not jump.
+- **Skeletons, not spinners, for content — and in the place the content will take.** A
+  skeleton only stops a jump if nothing painted around it moves when the content lands, and
+  this said so for two pages it was untrue of. The matches page drew its skeleton inside the
+  conversations card, and the new-matches strip then appeared above that card and dropped it
+  228px (a layout shift of 0.16 on a phone); the skeleton is its own card now, standing in
+  for both, and they replace it in one frame. The plans page started today's usage empty
+  above the plan cards and their switch buttons (0.17); it arrives with placeholder rows in
+  the shape `subscription.js` draws, which `tests/static.test.js` holds to `USAGE_ROWS`.
+  `e2e/specs/06-layout.e2e.js` lets every signed-in page finish loading and holds the total
+  to under 0.1, Core Web Vitals' "good". What is left is the plan summary growing from its
+  one-line "Loading" to its full sentence — 0.008 on a laptop, about 0.03 on a phone — which
+  only knowing the plan before it is read could avoid.
 - **The shared header has its room before it exists.** `app.js` builds the nav on
   `DOMContentLoaded`, so a page's first paint has nothing above `<main>`, and the nav's
   arrival used to push the whole page down by its own height. Until it is there, `style.css`

@@ -507,6 +507,9 @@
     } catch (err) {
       console.error('[zc] The plans page could not start:', err);
       dom.planSummary.textContent = 'Your plan could not be loaded. Reload the page to try again.';
+      // The rows the page arrives with are placeholders, and left standing
+      // they would read as a usage record with its numbers still on the way.
+      clear(dom.usageList);
       dom.usageList.setAttribute('aria-busy', 'false');
       toast('Could not load your plan.', 'error');
     }

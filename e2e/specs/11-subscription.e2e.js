@@ -41,13 +41,16 @@ const DIALOG_DISCLOSURE = ['no payment', 'no card', 'simulat'];
  *     table as firebase-config.js publishes it. It has to happen then:
  *     subscription.js builds its comparison from the table as it loads;
  *   - it counts the store calls that read `users/{uid}`, and `?zcusagefail=1`
- *     makes the usage read fail, the way it does offline.
+ *     makes the usage read fail, the way it does offline;
+ *   - `?zcbootfail=1` makes the page's sign-in guard reject, which sends the
+ *     plans page down the branch it takes when it cannot start at all.
  * @returns {void}
  */
 function instrument() {
   const params = new URLSearchParams(window.location.search);
   const fixedWeights = params.get('zcfixedweights') === '1';
   const usageFails = params.get('zcusagefail') === '1';
+  const bootFails = params.get('zcbootfail') === '1';
   window.__zcAdaptive = [];
   window.__zcScored = [];
   window.__zcReads = { getUser: 0, getUsage: 0, updateUser: 0 };
@@ -71,6 +74,11 @@ function instrument() {
   // ranks, and the plans page reads its counters, only once the first auth
   // state has settled, and a switch only on a click.
   document.addEventListener('DOMContentLoaded', function () {
+    if (bootFails && ZC.auth) {
+      ZC.auth.requireAuth = function () {
+        return Promise.reject(new Error('Simulated: the page could not start.'));
+      };
+    }
     if (!ZC.matching || !ZC.store) return;
     const engine = ZC.matching;
     const rank = engine.rankCandidates;
@@ -317,6 +325,28 @@ module.exports = {
       unread.asked > 0 && /could not be read/i.test(unread.list) &&
       !/\bleft\b|\bused\b|no daily limit/i.test(unread.list),
       JSON.stringify(unread));
+
+    /* ---- a page that cannot start leaves no placeholder behind ---- */
+
+    // subscription.html arrives with placeholder usage rows so the plan cards
+    // are painted where they will stay. Every path that settles the list has
+    // to replace them; this is the one that does not draw rows of its own.
+    ctx.session.expectConsoleError(/plans page could not start/);
+    await page.goto(ctx.base + '/subscription.html?zcbootfail=1', { waitUntil: 'domcontentloaded' });
+    // Attached rather than visible: a list emptied as it should be has no
+    // height, and Playwright's default wait would never call it visible.
+    await page.waitForSelector('#usage-list[aria-busy="false"]', { state: 'attached' });
+    const unstarted = await page.evaluate(function () {
+      return {
+        summary: (document.getElementById('plan-summary').textContent || '').trim(),
+        rows: document.querySelectorAll('#usage-list > *').length,
+        list: (document.getElementById('usage-list').textContent || '').replace(/\s+/g, ' ').trim()
+      };
+    });
+    ctx.session.expectConsoleError(null);
+    t.check('a plans page that cannot start says so, and leaves no placeholder usage rows standing',
+      /could not be loaded/i.test(unstarted.summary) && unstarted.rows === 0,
+      JSON.stringify(unstarted));
 
     /* ---- and back, because a simulation you cannot leave is worse ---- */
 
