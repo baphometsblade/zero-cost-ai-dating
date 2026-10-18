@@ -574,3 +574,25 @@ test('the plans page arrives with a placeholder for each usage row subscription.
   assert.ok(drawn.length > 0, 'found no labels in USAGE_ROWS');
   assert.deepEqual(held, drawn, 'the placeholder rows in subscription.html are not the rows USAGE_ROWS draws');
 });
+
+test('the matches list pane ships its cards visible and leaves the loading state to the stylesheet', function () {
+  // Scripts are cached for an hour and pages are not (firebase.json), so for
+  // an hour after a deploy a returning visitor runs the previous matches.js
+  // against the new page. The conversation card once shipped `hidden` for the
+  // new script to reveal, and under the old one it never was: no
+  // conversations, nothing to tap. .list-skeleton (components.css) holds the
+  // cards back while the loading card shows, whichever script is running.
+  const html = blankHtmlComments(fs.readFileSync(path.join(PUBLIC_DIR, 'matches.html'), 'utf8'));
+  const classOf = function (id) {
+    const tag = new RegExp('<[a-z]+\\b[^>]*\\bid="' + id + '"[^>]*>').exec(html);
+    assert.ok(tag, 'matches.html has #' + id);
+    const cls = /\bclass="([^"]*)"/.exec(tag[0]);
+    return cls ? cls[1].split(/\s+/) : [];
+  };
+  assert.ok(classOf('list-loading').indexOf('list-skeleton') !== -1, '#list-loading is not a .list-skeleton');
+  const card = classOf('conversations-card');
+  assert.ok(card.indexOf('hidden') === -1,
+    '#conversations-card ships hidden, so only a matches.js of the same deploy can ever show it');
+  assert.ok(card.indexOf('list-after-load') !== -1,
+    '#conversations-card is not a .list-after-load, so nothing keeps it back while the list loads');
+});

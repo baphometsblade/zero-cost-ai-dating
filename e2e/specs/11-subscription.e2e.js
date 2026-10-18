@@ -297,11 +297,6 @@ module.exports = {
     // 10px shorter than the metered placeholders they replace, so loading the
     // page pulled the plan cards and their switch buttons up by 20px.
     const premiumUsage = await usageHeights();
-    const steady = function (m) { return Math.abs(m.arrived - m.loaded) <= 1; };
-    t.check('today\'s usage is as tall as it arrives when the counters land, on Free and on Premium',
-      steady(freeUsage) && steady(premiumUsage),
-      'free ' + freeUsage.arrived + ' -> ' + freeUsage.loaded + 'px, premium ' +
-        premiumUsage.arrived + ' -> ' + premiumUsage.loaded + 'px');
 
     // The point of the switch: the deck has to actually treat the account
     // differently. The word "Premium" in the hint is no evidence of that — it
@@ -361,13 +356,27 @@ module.exports = {
     const unread = await page.evaluate(function () {
       return {
         asked: window.__zcReads.getUsage,
-        list: (document.getElementById('usage-list').textContent || '').replace(/\s+/g, ' ').trim()
+        list: (document.getElementById('usage-list').textContent || '').replace(/\s+/g, ' ').trim(),
+        height: Math.round(document.getElementById('usage-list').getBoundingClientRect().height * 10) / 10
       };
     });
     t.check('a usage read that fails says so, rather than showing a full allowance',
       unread.asked > 0 && /could not be read/i.test(unread.list) &&
       !/\bleft\b|\bused\b|no daily limit/i.test(unread.list),
-      JSON.stringify(unread));
+      JSON.stringify({ asked: unread.asked, list: unread.list }));
+
+    // Three ways today's usage can land: Free's rows, Premium's, and the one
+    // line a failed read draws. The plan cards sit below it, so any change in
+    // its height is how far they move as the page loads. Premium's unlimited
+    // rows have no meter and came out 10px shorter than the placeholders; the
+    // failed read's line, 130px shorter.
+    const steady = function (arrived, loaded) { return Math.abs(arrived - loaded) <= 1; };
+    t.check('today\'s usage is as tall as it arrives when the counters land, on Free, on Premium, and unread',
+      steady(freeUsage.arrived, freeUsage.loaded) && steady(premiumUsage.arrived, premiumUsage.loaded) &&
+        steady(premiumUsage.arrived, unread.height),
+      'free ' + freeUsage.arrived + ' -> ' + freeUsage.loaded + 'px, premium ' +
+        premiumUsage.arrived + ' -> ' + premiumUsage.loaded + 'px, unread ' + premiumUsage.arrived +
+        ' -> ' + unread.height + 'px');
 
     /* ---- a page that cannot start leaves no placeholder behind ---- */
 

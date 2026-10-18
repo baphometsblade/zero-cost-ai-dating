@@ -92,8 +92,9 @@ const GOOD_SHIFT = 0.1;
  * Layout shift is reported per element, so content arriving later inside a
  * page does not count as a jump — only the page as a whole moving.
  *
- * Then let the page finish — nothing marked busy still on screen, and half a
- * second without a shift — and add up every shift it made, whatever moved.
+ * Then let the page finish — its data landed, nothing marked busy still on
+ * screen, and half a second without a shift — and add up every shift it
+ * made, whatever moved.
  * That is the number a visitor feels: content arriving above a button they
  * are reaching for.
  * @param {Object} page a Playwright Page, signed in
@@ -151,12 +152,26 @@ async function mainShifts(page, base, names) {
 
     // The predicate returns a boolean, never a promise: waitForFunction takes
     // a returned promise as a truthy answer and stops waiting at once.
-    await page.waitForFunction(function () {
+    //
+    // Quiet for half a second is not the same as finished: a page whose data
+    // lands later than that, with nothing on it marked busy, would be read
+    // before its shift. So the two pages that mark nothing busy are asked in
+    // their own terms — the deck has a card, or its empty or error state, and
+    // no skeleton; the reports section has stopped saying it is loading.
+    await page.waitForFunction(function (name) {
       const busy = Array.prototype.some.call(document.querySelectorAll('[aria-busy="true"]'), function (node) {
         return node.getClientRects().length > 0;
       });
-      return !busy && performance.now() - window.__zcShift.last >= 500;
-    }, null, { polling: 100, timeout: 10000 });
+      let landed = true;
+      if (name === 'dashboard') {
+        const stack = document.getElementById('deck-stack');
+        landed = !!stack && !stack.querySelector('.skeleton') && !!stack.querySelector('.swipe-card, .empty');
+      } else if (name === 'settings') {
+        const status = document.getElementById('reports-status');
+        landed = !!status && !/^Loading/.test((status.textContent || '').trim());
+      }
+      return landed && !busy && performance.now() - window.__zcShift.last >= 500;
+    }, name, { polling: 100, timeout: 10000 });
     const loaded = await page.evaluate(function () { return window.__zcShift; });
     if (loaded.total >= GOOD_SHIFT) {
       unsettled.push(name + ' ' + loaded.total.toFixed(3) + ' (' + loaded.moved.join(' ') + ')');

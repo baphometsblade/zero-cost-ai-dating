@@ -305,16 +305,22 @@
         ' Nothing was charged and nothing is owed — it is a flag on your own profile, and you can switch back below.'
       : 'You are on the Free plan, which is the real one. Premium below is a simulation you can switch on to see how the limits and the premium-only features behave.';
 
+    // Measured before the rows go, for the branch below that draws one line.
+    const held = dom.usageList.offsetHeight;
     clear(dom.usageList);
     dom.usageList.setAttribute('aria-busy', 'false');
     // Unknown is not zero. Rows of untouched counters here would tell someone
     // who has used every like today that they have all of them left.
     if (!usage) {
+      // One line where three rows were would pull the plan cards and their
+      // buttons a hundred pixels up the page, so the list keeps its height.
+      dom.usageList.style.setProperty('min-height', held + 'px');
       dom.usageList.appendChild(el('p', {
         class: 'text-muted',
         text: 'Today\'s usage could not be read, so it is not shown. Reload the page to try again.'
       }));
     } else {
+      dom.usageList.style.removeProperty('min-height');
       USAGE_ROWS.forEach(function (row) {
         dom.usageList.appendChild(usageRow(row, usage, limits));
       });

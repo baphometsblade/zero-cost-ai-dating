@@ -41,7 +41,7 @@
  */
 const CLAIMS = {
   unit: {
-    total: 283,
+    total: 284,
     how: 'npm test',
     note: 'Node\'s built-in runner, no install'
   },
