@@ -1443,6 +1443,28 @@ test('getMatches and getMatch hand over the same projection, as the Firestore ad
   assert.deepStrictEqual(single.other, polled[0].other, 'and so does getMatch');
 });
 
+test('getPublicProfiles answers a list with the public projection, in both modes\' shape', async function () {
+  // The settings page names the accounts it has reported through this. The demo
+  // adapter's list read hands back stored documents, so the facade projects
+  // them, as the live list does: an address, a birthdate or a block list must
+  // not reach the page in one mode when `discovery/{uid}` never holds them in
+  // the other.
+  await resetWorld();
+  await store.createUser('listed-a', { email: 'a@example.com', displayName: 'Listed A' });
+  await store.createUser('listed-b', {
+    email: 'b@example.com', blocked: ['somebody-else'], profile: { birthdate: '1990-04-01' }
+  });
+  const faces = await store.getPublicProfiles(['listed-a', 'listed-b', 'listed-a', 'nobody', '']);
+  assert.deepEqual(Object.keys(faces).sort(), ['listed-a', 'listed-b'], 'one entry per account found, duplicates and blanks dropped');
+  assert.equal(faces['listed-a'].displayName, 'Listed A');
+  ['listed-a', 'listed-b'].forEach(function (uid) {
+    assert.equal(faces[uid].email, '', uid + ': no address');
+    assert.equal(faces[uid].profile.birthdate, null, uid + ': no birthdate');
+    assert.deepEqual(faces[uid].blocked, [], uid + ': no block list');
+  });
+  assert.deepEqual(await store.getPublicProfiles([]), {}, 'nothing asked, nothing answered');
+});
+
 test('and the projection keeps everything the conversation list scores on', async function () {
   // The cheap version of the memo would hold a name and a photo. That would
   // silently degrade the matches page's TF-IDF corpus to empty bios with no

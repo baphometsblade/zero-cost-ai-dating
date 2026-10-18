@@ -683,9 +683,12 @@
     setStatus(dom.reportsStatus, 'Loading your reports…');
     try {
       const reports = await ZC.store.getMyReports(me.uid);
-      const subjects = await Promise.all(reports.map(function (report) {
-        return ZC.store.getPublicProfile(report.about).catch(function () { return null; });
-      }));
+      // One ask for every subject, not one each: a name that cannot be read is
+      // shown as a deleted account, as a missing one is, and does not cost the
+      // panel its list.
+      const faces = await ZC.store.getPublicProfiles(reports.map(function (report) { return report.about; }))
+        .catch(function () { return {}; });
+      const subjects = reports.map(function (report) { return faces[report.about] || null; });
       renderReports(reports, subjects);
     } catch (err) {
       console.error('[zc] Could not load your reports:', err);

@@ -4495,6 +4495,28 @@
     },
 
     /**
+     * getPublicProfile for a list, in one ask: the settings page resolves every
+     * account it has reported at once. Asked one at a time, each was its own
+     * `fetchProfiles`, which reads the face cache and then rewrites the whole
+     * of it, once per report. Projected as the live conversation list projects
+     * faces, so both modes answer the same public subset.
+     * @param {string[]} uids accounts to look up
+     * @returns {Promise<Object<string,Object>>} uid → public profile; an
+     *   account that is gone or unreadable is simply absent
+     */
+    async getPublicProfiles(uids) {
+      await ready;
+      const wanted = (uids || []).filter(function (uid, i, all) { return !!uid && all.indexOf(uid) === i; });
+      if (!wanted.length) return {};
+      const docs = (await adapter.getPublicProfiles(wanted)) || {};
+      const out = {};
+      wanted.forEach(function (uid) {
+        if (docs[uid]) out[uid] = publicFace(docs[uid]);
+      });
+      return out;
+    },
+
+    /**
      * Remove everything stored about an account: swipes in both directions,
      * matches with their messages, the public discovery projection (firebase
      * mode) and the account document itself. Deleting the sign-in credential

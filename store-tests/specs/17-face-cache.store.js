@@ -548,5 +548,28 @@ module.exports = {
       relapsed.length === CACHE_MAX && waitingNow.length === WAITING,
       waitingNow.length + ' of ' + WAITING + ' liker faces kept, beside ' +
       (relapsed.length - waitingNow.length) + ' conversation faces that can no longer be served');
+
+    /* ---- 14. a list of public profiles, in one ask ----------------------- */
+
+    // The settings page names every account it has reported. It asked
+    // getPublicProfile once a report, and each of those was its own
+    // fetchProfiles: a read of the cache and a rewrite of the whole of it, per
+    // report. getPublicProfiles is the list form: a read a face, one write.
+    globalThis.localStorage.removeItem(KEY);
+    const absent = 'face-cache-nobody';
+    const listing = await filing(function () {
+      return k.store.getPublicProfiles(others.concat([others[0], absent]));
+    });
+    k.ctx.drainWarnings();
+    const listed = listing.value || {};
+    t.check('a list of public profiles is one ask: a read a face, one cache write, and only public values',
+      listing.writes === 1 && listing.reads === others.length + 1 && !(absent in listed) &&
+        others.every(function (uid) {
+          const face = listed[uid];
+          return !!face && face.email === '' && Array.isArray(face.blocked) && face.blocked.length === 0;
+        }),
+      listing.reads + ' read(s) for ' + others.length + ' faces, a duplicate and a missing account; ' +
+      listing.writes + ' cache write(s); ' + Object.keys(listed).length + ' answered; ' +
+      others[1] + ' email ' + k.show((listed[others[1]] || {}).email));
   }
 };

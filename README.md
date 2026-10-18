@@ -365,8 +365,8 @@ conversation that has to stay live at its newest end, survive a rewind, and leav
 underneath it when it is finally unmatched, a page load whose bill is counted
 document by document and has to come out the same against a swipe history twice as long — and
 a match document the rules refuse, which has to come back as "no match" rather than as a
-swipe the deck believes it lost, and the messaging and abuse-report paths — fifteen of the
-thirty-five facade methods had never run against a real Firestore at all, so the documents
+swipe the deck believes it lost, and the messaging and abuse-report paths — of what are now
+thirty-six facade methods, fifteen had never run against a real Firestore at all, so the documents
 the adapter writes had never met the rules that judge them. And, in both directions, the two documents an account is
 split across: the counter the transaction stores and the projection the profile save
 publishes are each replayed against the real `firestore.rules` on a separate project, because
