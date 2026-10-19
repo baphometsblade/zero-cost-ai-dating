@@ -330,6 +330,98 @@ test('(b) the script block matches the load order in §2', function () {
   assert.equal(problems.length, 0, report('Script load order problems:', problems));
 });
 
+test('CI drives the store suite through the compat SDK the pages load', function () {
+  // The store suite is the only place data-store.js meets a real Firestore
+  // client, and it used to meet 12.18 while every page loaded 10.12.2. The two
+  // are not interchangeable: 10.12.2's memory cache lets a document go once no
+  // listener is attached to it, 12.18 keeps it, and a store guarantee that
+  // leaned on the cache held on the SDK CI installed and on no page anybody
+  // opened. So the version the emulator job installs for the store suite is
+  // pinned to the one in the gstatic tags (b) holds every page to, and the job
+  // has to hand that very install to the suite: store-tests/context.js loads
+  // the compat build from ZC_STORE_SDK, and refuses one of any other version.
+  const shipped = /\/firebasejs\/(\d+\.\d+\.\d+)\//.exec(FIREBASE_SDK[0]);
+  assert.ok(shipped, 'no version in ' + FIREBASE_SDK[0]);
+  const ci = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
+  const pinned = ci.match(/^\s*FIREBASE_SDK_VERSION:\s*'([^']*)'\s*$/gm) || [];
+  assert.equal(pinned.length, 1, 'ci.yml should set FIREBASE_SDK_VERSION exactly once, found ' + pinned.length);
+  const version = /'([^']*)'/.exec(pinned[0])[1];
+  assert.equal(version, shipped[1], 'ci.yml installs firebase ' + version + ' for the store suite; the pages load ' + shipped[1]);
+  const install = /--prefix\s+"\$RUNNER_TEMP\/([^"]+)"\s+"firebase@\$FIREBASE_SDK_VERSION"/.exec(ci);
+  assert.ok(install, 'ci.yml never installs firebase@$FIREBASE_SDK_VERSION into a prefix of its own');
+  const handed = /^\s*ZC_STORE_SDK:\s*(\S.*?)\s*$/m.exec(ci);
+  assert.ok(handed, 'ci.yml never hands the store suite ZC_STORE_SDK');
+  assert.equal(handed[1], '${{ runner.temp }}/' + install[1] + '/node_modules',
+    'ZC_STORE_SDK does not point at the prefix firebase@$FIREBASE_SDK_VERSION is installed into');
+});
+
+test('CI\'s emulator run of the browser suite fails, rather than skips, the Firebase spec', function () {
+  // The step that boots the emulators for the browser suite exists to run the
+  // Firebase spec, but e2e/run.js accepts that spec skipped as the plain
+  // total's shape wherever it happens: a probe that missed the emulators inside
+  // emulators:exec passed as a run without them. --require=firebase turns the
+  // skip into a failing check, and only the flag on that command does.
+  const ci = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
+  // Comments mention emulators:exec too; only the commands count.
+  const code = ci.split('\n').filter(function (line) { return !/^\s*#/.test(line); }).join('\n');
+  const commands = [];
+  const exec = /emulators:exec\b[^"]*"([^"]*)"/g;
+  let m;
+  while ((m = exec.exec(code)) !== null) {
+    if (/e2e\/run\.js/.test(m[1])) commands.push(m[1]);
+  }
+  assert.equal(commands.length, 1, 'expected one emulators:exec running e2e/run.js in ci.yml, found ' + commands.length);
+  assert.match(commands[0], /--require=firebase\b/, 'the emulator e2e run lets the Firebase spec skip: ' + commands[0]);
+});
+
+test('the Pages deploy waits for CI, and publishes only a commit CI passed', function () {
+  // pages.yml ran on every push to main, beside CI rather than after it, and
+  // main is not a protected branch, so nothing it published had to have passed
+  // the browser or emulator suites. CI finishing is what wakes it now, and a
+  // gate job asks whether CI passed on the commit before the deploy job runs.
+  const strip = function (text) {
+    return text.split('\n').filter(function (line) { return !/^\s*#/.test(line); }).join('\n');
+  };
+  const pages = strip(fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'pages.yml'), 'utf8'));
+  const ci = strip(fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8'));
+  const on = /^on:\n((?:[ \t]+.*\n|\n)*)/m.exec(pages);
+  assert.ok(on, 'pages.yml has no `on:` block');
+  assert.doesNotMatch(on[1], /^\s+push:/m, 'pages.yml still deploys on push, beside CI instead of after it');
+  const unquote = function (s) { return s.trim().replace(/^(['"])(.*)\1$/, '$2'); };
+  const ciName = /^name:[ \t]*(.+?)[ \t]*$/m.exec(ci);
+  assert.ok(ciName, 'ci.yml has no top-level name');
+  // The workflows whose finishing wakes this one, written either way YAML
+  // allows a list: `workflows: [CI]`, or `- CI` lines under `workflows:`.
+  const run = /^([ \t]+)workflow_run:[ \t]*\n((?:\1[ \t]+.*\n|\n)*)/m.exec(on[1]);
+  assert.ok(run, 'pages.yml is not woken by another workflow finishing');
+  const list = /^([ \t]+)workflows:[ \t]*(?:\[([^\]\n]*)\][ \t]*\n|\n((?:\1[ \t]*-.*\n)+))/m.exec(run[2]);
+  assert.ok(list, 'pages.yml\'s workflow_run names no workflows');
+  const woken = (list[2] !== undefined ? list[2].split(',') : list[3].split('\n').map(function (line) {
+    return line.replace(/^[ \t]*-/, '');
+  })).map(unquote).filter(Boolean);
+  assert.ok(woken.indexOf(unquote(ciName[1])) !== -1,
+    'pages.yml is not woken by the "' + unquote(ciName[1]) + '" workflow, only by: ' + woken.join(', '));
+  // The gate's question, in whatever order its parameters come: CI's runs for
+  // exactly the commit about to go out, pushed to main, that passed. A pull
+  // request's run is not enough: it tests a merge with the base, not the commit.
+  const asked = /actions\/workflows\/ci\.yml\/runs\?([^"'\s]+)/.exec(pages);
+  assert.ok(asked, 'the gate never asks the API about CI\'s runs');
+  const query = new URLSearchParams(asked[1]);
+  assert.deepEqual(
+    { head_sha: (query.get('head_sha') || '').replace(/^\$\{(\w+)\}$/, '$$$1'), event: query.get('event'),
+      branch: query.get('branch'), status: query.get('status') },
+    { head_sha: '$GITHUB_SHA', event: 'push', branch: 'main', status: 'success' },
+    'the gate does not ask whether CI passed on the commit it publishes: ' + asked[1]);
+  assert.match(pages, /^\s+needs:\s*gate\s*$/m, 'the deploy job does not wait for the gate');
+  // Without this the deploy runs whatever the gate found, and a checkout of an
+  // empty ref checks out main's tip, so it would go out whether CI passed on
+  // it or not.
+  assert.match(pages, /^\s+if:\s*needs\.gate\.outputs\.sha\s*!=\s*''\s*$/m,
+    'the deploy job runs even when the gate found no commit CI passed');
+  assert.match(pages, /^\s+ref:\s*\$\{\{\s*needs\.gate\.outputs\.sha\s*\}\}\s*$/m,
+    'the deploy does not check out the commit the gate checked');
+});
+
 /* ------------------------------------------------------------------------
    (c) Nothing the shipped CSP would refuse to run
    ------------------------------------------------------------------------ */

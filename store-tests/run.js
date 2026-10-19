@@ -8,7 +8,8 @@
      npm run test:store
 
    Exit codes: 0 all passed · 1 a check failed · 2 usage/crash ·
-   3 the testing packages are not installed (see harness.INSTALL_HINT).
+   3 the testing packages are not installed (see harness.INSTALL_HINT), or
+   ZC_STORE_SDK holds a compat SDK the pages do not load (see context.js).
    ========================================================================== */
 'use strict';
 
@@ -153,6 +154,14 @@ async function main() {
     return 2;
   }
 
+  // A pinned compat SDK that is not the pages' version is an install problem,
+  // and is said before anything boots. See context.sdkProblem.
+  const sdkProblem = context.sdkProblem();
+  if (sdkProblem) {
+    process.stderr.write(sdkProblem + '\n');
+    return 3;
+  }
+
   // A denial or an aborted transaction is logged by the SDK as an error, and
   // this suite provokes both on purpose.
   if (typeof firestoreSdk.setLogLevel === 'function') firestoreSdk.setLogLevel('silent');
@@ -184,6 +193,15 @@ async function main() {
     await rulesEnv.cleanup();
     return 3;
   }
+
+  // Which SDK this run certifies. Two majors behave differently under the
+  // store (context.js says how), so a run on any version but the pages' is
+  // evidence about that version, and the log should not leave it to be guessed.
+  const shipped = context.shippedSdkVersion();
+  process.stdout.write('data-store.js driven through the firebase compat SDK ' + ctx.firebase.SDK_VERSION +
+    (ctx.firebase.SDK_VERSION === shipped
+      ? ', the version the pages load\n'
+      : '; the pages load ' + shipped + ' — set ZC_STORE_SDK to run on theirs (store-tests/context.js)\n'));
 
   const admin = adminAccess(env, firestoreSdk);
   const results = [];

@@ -28,27 +28,106 @@
    ========================================================================== */
 'use strict';
 
+const fs = require('fs');
 const path = require('path');
+const Module = require('module');
 const harness = require('./harness');
 
 const PUBLIC_JS = path.join(harness.ROOT, 'public', 'js');
 
 /**
+ * The compat SDK version the pages load from gstatic, read out of the deck's
+ * own script tag so there is no second copy of the number to drift.
+ * tests/static.test.js holds every page to the same three tags.
+ * @returns {string|null} e.g. '10.12.2', or null when the tag is not found
+ */
+function shippedSdkVersion() {
+  const html = fs.readFileSync(path.join(harness.ROOT, 'public', 'dashboard.html'), 'utf8');
+  const tag = /https:\/\/www\.gstatic\.com\/firebasejs\/(\d+\.\d+\.\d+)\/firebase-firestore-compat\.js/.exec(html);
+  return tag ? tag[1] : null;
+}
+
+/**
+ * Load a module from one node_modules directory and nowhere else.
+ * @param {string} root a node_modules directory
+ * @param {string} name the module to load
+ * @returns {Object|null} the module, or null when `root` does not hold it
+ */
+function loadFrom(root, name) {
+  let resolved;
+  try {
+    resolved = Module.createRequire(path.join(root, 'noop.js')).resolve(name);
+  } catch (err) {
+    return null;
+  }
+  // Resolution also walks up from `root` and into NODE_PATH, so a directory
+  // without the package would quietly hand back another install's copy —
+  // measured: an empty ZC_STORE_SDK loaded NODE_PATH's 12.19.0. `resolve`
+  // answers with the real path, so `root` is compared as one too.
+  let real;
+  try {
+    real = fs.realpathSync(root);
+  } catch (err) {
+    return null;
+  }
+  if (path.relative(real, resolved).split(path.sep)[0] === '..') return null;
+  return require(resolved);
+}
+
+/**
  * Load the compat SDK from outside the repository and register its Firestore
- * component. Both halves resolve through the same NODE_PATH roots, so they
- * are guaranteed to be the same copy of @firebase/app-compat.
+ * component. Both halves resolve through the same roots, so they are
+ * guaranteed to be the same copy of @firebase/app-compat.
+ *
+ * Those roots are NODE_PATH's, unless ZC_STORE_SDK names a node_modules
+ * directory of its own. It exists because one install cannot hold both SDKs
+ * this suite needs: @firebase/rules-unit-testing peers with firebase ^12 for
+ * the modular `firebase/firestore` run.js reads stored documents back through,
+ * while the compat build the store is driven through has to be the one the
+ * pages load (shippedSdkVersion). The two are not interchangeable: measured,
+ * 12.18 and 12.19 keep a document in their memory cache after a read and the
+ * pages' 10.12.2 does not, which let an offline-bump check pass here that
+ * failed on the pages' version. So CI installs the pages' version apart and
+ * points ZC_STORE_SDK at it, and run.js refuses a pinned SDK of any other
+ * version (see sdkProblem).
  * @returns {Object|null} the `firebase` compat namespace, or null when the
  *   package is not installed
  */
 function loadCompat() {
-  const app = harness.loadOutside('firebase/compat/app');
+  const pinned = process.env.ZC_STORE_SDK;
+  const load = pinned ? function (name) { return loadFrom(pinned, name); } : harness.loadOutside;
+  const app = load('firebase/compat/app');
   if (!app) return null;
   // The compat bundles are transpiled ESM, so the namespace is under .default
   // in CommonJS.
   const firebase = app.default || app;
   // Required for the side effect: it is what puts .firestore() on the app.
-  if (!harness.loadOutside('firebase/compat/firestore')) return null;
+  if (!load('firebase/compat/firestore')) return null;
   return typeof firebase.initializeApp === 'function' ? firebase : null;
+}
+
+/**
+ * Why this run must not drive the store through the SDK it would load, or
+ * null. Only a pinned SDK is held to the pages' version: ZC_STORE_SDK is a
+ * statement that this run certifies what ships, and a pin that delivers some
+ * other version would turn a green run back into the false one it replaced.
+ * An unpinned run uses whatever NODE_PATH holds, and run.js says which.
+ * @returns {string|null} a message for stderr, or null to go ahead
+ */
+function sdkProblem() {
+  const pinned = process.env.ZC_STORE_SDK;
+  if (!pinned) return null;
+  const firebase = loadCompat();
+  if (!firebase) {
+    return 'ZC_STORE_SDK=' + pinned + ' holds no firebase compat SDK. Install the version the pages load:\n' +
+      '  npm install --prefix <dir> firebase@' + shippedSdkVersion() + '   and set ZC_STORE_SDK=<dir>/node_modules';
+  }
+  if (firebase.SDK_VERSION !== shippedSdkVersion()) {
+    return 'ZC_STORE_SDK=' + pinned + ' holds firebase ' + firebase.SDK_VERSION + ', but the pages load ' +
+      shippedSdkVersion() + ' (public/dashboard.html). A pinned run has to drive the store through the\n' +
+      'SDK that ships; install firebase@' + shippedSdkVersion() + ' there, or move the pages and CI together.';
+  }
+  return null;
 }
 
 /**
@@ -145,4 +224,8 @@ function createContext() {
   };
 }
 
-module.exports = { createContext: createContext };
+module.exports = {
+  createContext: createContext,
+  sdkProblem: sdkProblem,
+  shippedSdkVersion: shippedSdkVersion
+};

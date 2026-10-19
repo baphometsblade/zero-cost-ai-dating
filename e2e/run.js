@@ -10,6 +10,7 @@
      node e2e/run.js                     every spec, every viewport it declares
      node e2e/run.js deck matches        only specs whose file name matches
      node e2e/run.js --viewport=mobile   restrict to one viewport
+     node e2e/run.js --require=firebase  a matching spec that skips is a failure
    ========================================================================== */
 'use strict';
 
@@ -25,17 +26,29 @@ const SPEC_DIR = path.join(__dirname, 'specs');
    -------------------------------------------------------------------------- */
 
 /**
- * Split argv into a viewport filter and a list of spec-name substrings.
+ * Split argv into a viewport filter, a list of spec-name substrings, and the
+ * spec-name substrings `--require=` says may not skip.
  * @param {string[]} argv raw arguments, without node and the script path
- * @returns {{viewport:string|null, filters:string[]}}
+ * @returns {{viewport:string|null, filters:string[], required:string[]}}
  */
 function parseArgs(argv) {
   let viewport = null;
   const filters = [];
+  const required = [];
   argv.forEach(function (arg) {
     const match = /^--viewport=(.+)$/.exec(arg);
     if (match) {
       viewport = match[1];
+      return;
+    }
+    const need = /^--require=(.*)$/.exec(arg);
+    if (need) {
+      const names = need[1].split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+      // `--require=` or `--require=,` names nothing, and a requirement that
+      // names nothing would let every spec skip in silence, which is the very
+      // thing the flag is there to stop.
+      if (!names.length) throw new Error('--require needs a spec name, e.g. --require=firebase');
+      names.forEach(function (s) { required.push(s); });
       return;
     }
     if (arg.indexOf('--') === 0) throw new Error('Unknown flag: ' + arg);
@@ -44,7 +57,7 @@ function parseArgs(argv) {
   if (viewport && !harness.VIEWPORTS[viewport]) {
     throw new Error('Unknown viewport "' + viewport + '". Known: ' + Object.keys(harness.VIEWPORTS).join(', '));
   }
-  return { viewport: viewport, filters: filters };
+  return { viewport: viewport, filters: filters, required: required };
 }
 
 /* --------------------------------------------------------------------------
@@ -145,6 +158,27 @@ async function main() {
     return 2;
   }
 
+  // --require names specs that must run here rather than skip. A skip is the
+  // honest answer on a machine without what a spec needs, and the claims
+  // check below accepts a complete run with the Firebase spec skipped as the
+  // emulator-free total, wherever it happens. So inside CI's emulators:exec,
+  // where that spec is the reason the step exists, a probe that missed the
+  // emulators for any reason turned the step into a second copy of the plain
+  // run, and it went green. Measured: inside emulators:exec, with the Auth
+  // emulator's address pointed at a closed port, a complete run reported
+  // 362/362 and exited 0. A requirement that names nothing in this run would
+  // be the same silence, so it is a usage error.
+  const isRequired = function (spec) {
+    return args.required.some(function (name) { return spec.file.indexOf(name) !== -1; });
+  };
+  const unmet = args.required.filter(function (name) {
+    return !runnable.some(function (spec) { return spec.file.indexOf(name) !== -1; });
+  });
+  if (unmet.length) {
+    process.stderr.write('--require=' + unmet.join(',') + ' matches no spec this run includes\n');
+    return 2;
+  }
+
   const results = [];
   const skipped = [];
   const skippedFiles = [];
@@ -162,6 +196,11 @@ async function main() {
         const verdict = await spec.available();
         if (!verdict || !verdict.ok) {
           const why = (verdict && verdict.why) || 'no reason given';
+          if (isRequired(spec)) {
+            process.stdout.write('\n--- ' + spec.title + '\n');
+            createRecorder(results, spec.title).check('the spec ran, as --require demands, instead of skipping', false, why);
+            continue;
+          }
           process.stdout.write('\n--- ' + spec.title + '\n  SKIP  ' + why + '\n');
           skipped.push(spec.title + ' — ' + why);
           skippedFiles.push(spec.file);

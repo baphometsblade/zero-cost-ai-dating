@@ -1947,24 +1947,39 @@
   }
 
   /**
-   * The last `usage` the SDK already holds for a user, without touching the
-   * network. Only reached when a bump's transaction failed before its read
-   * landed — offline, in practice. Without it the optimistic answer would
-   * restart the day at 1 for someone who had already spent twelve likes,
-   * which is a worse lie than "the last count we saw, plus this swipe".
-   * @param {Object} ref the users/{uid} document reference
-   * @returns {Promise<Object|null>} the cached usage record, or null when the
-   *   SDK has never seen this document
+   * The last `usage` this page saw stored for each user, by uid. Only read
+   * when a bump's transaction failed before its read landed — offline, in
+   * practice. Without it the optimistic answer would restart the day at 1 for
+   * someone who had already spent twelve likes, which is a worse lie than "the
+   * last count we saw, plus this swipe".
+   *
+   * Remembered here rather than asked of the SDK's cache, which is what this
+   * used to do, and which had nothing to answer with on the SDK the pages
+   * load. Measured against the emulator: after a server `get()` of
+   * users/{uid}, compat 10.12.2 — the version every page loads from gstatic —
+   * rejects `get({ source: 'cache' })` with `unavailable`, because its memory
+   * cache holds a document only while a listener is attached to it, and
+   * nothing in this file listens to users/{uid}. 12.18 and 12.19 answer from
+   * the earlier read. The store suite ran on 12.18, so the fallback passed
+   * there, while on 10.12.2 the same offline bump answered 1 for someone who
+   * had spent twelve. A map depends on no SDK, and lasts as long as that
+   * memory cache does here, with no persistence enabled: one page, which in
+   * this app is one navigation.
    */
-  async function cachedUsage(ref) {
-    try {
-      const snap = await ref.get({ source: 'cache' });
-      return snap.exists ? (snap.data() || {}).usage || null : null;
-    } catch (err) {
-      // Nothing cached. The caller then answers for a fresh day, which is
-      // genuinely all it knows.
-      return null;
-    }
+  const knownUsage = new Map();
+
+  /**
+   * Remember a usage record this page read from, or committed to, users/{uid}.
+   * `getUser` is the read `getUsage`, `canSpend` and `canSpendAll` go through,
+   * and a committed bump is newer than any read before it. A copy, because the
+   * record itself goes back to the caller (`getUser`'s `user.usage`, the
+   * committed bump's return value), and what a caller does to it must not
+   * change what the offline answer counts on from.
+   * @param {string} uid user id
+   * @param {Object|null} usage the stored usage record
+   */
+  function noteUsage(uid, usage) {
+    if (uid && usage) knownUsage.set(String(uid), cloneDeep(usage));
   }
 
   /* ----------------------------------------------------------------------
@@ -2581,7 +2596,9 @@
 
     async getUser(uid) {
       if (!uid) return null;
-      return docToUser(await db().collection('users').doc(uid).get());
+      const user = docToUser(await db().collection('users').doc(uid).get());
+      if (user) noteUsage(uid, user.usage);
+      return user;
     },
 
     async createUser(uid, partial) {
@@ -3272,7 +3289,7 @@
       let seen = null;
       let read = false;
       try {
-        return await db().runTransaction(async function (tx) {
+        const committed = await db().runTransaction(async function (tx) {
           const snap = await tx.get(ref);
           seen = snap.exists ? (snap.data() || {}).usage : null;
           read = true;
@@ -3280,12 +3297,14 @@
           tx.update(ref, { usage: usage });
           return usage;
         });
+        noteUsage(uid, committed);
+        return committed;
       } catch (err) {
         // Transactions need a server round-trip, so they fail offline. A
         // counter that did not persist must never take the deck down: warn,
         // hand back the optimistic figure, carry on.
         console.warn('[zc.store] Could not persist usage.', err);
-        if (!read) seen = await cachedUsage(ref);
+        if (!read) seen = knownUsage.get(String(uid)) || null;
         return nextUsage(seen, field, by, today);
       }
     },

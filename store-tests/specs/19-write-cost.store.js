@@ -716,11 +716,14 @@ module.exports = {
 
     /* ---- 16. the instrument: a read the cache answers is no read --------- */
 
-    // `cachedUsage` asks for a document with `{ source: 'cache' }`, and a read
-    // the client answers from what it already holds never reaches Firestore,
-    // so it is not billed. The counter used to count every `get` that
-    // resolved. A listener on the document keeps it in the client's cache, and
-    // its one delivery is the only read here that Firestore bills.
+    // A `get` with `{ source: 'cache' }` is answered from what the client
+    // already holds and never reaches Firestore, so it is not billed. The
+    // counter used to count every `get` that resolved. The store's offline
+    // usage fallback made such reads until it turned out that, on the SDK the
+    // pages load, they had nothing to answer with (see 03-writes); the
+    // instrument still has to tell them apart for whatever makes one next. A
+    // listener on the document keeps it in the client's cache, and its one
+    // delivery is the only read here that Firestore bills.
     await k.admin.set('wc-scratch', 'cached', { n: 1 });
     const cachedRead = await measure(async function () {
       const ref = k.ctx.ZC.firebase.db.collection('wc-scratch').doc('cached');

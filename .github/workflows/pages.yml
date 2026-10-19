@@ -18,23 +18,26 @@
 #     only on Firebase Hosting, which stays the recommended host for a real deployment —
 #     see docs/DEPLOY.md.
 #
-# Deploys only from main, so nothing reaches the public site without going through the
-# CI workflow on a pull request first. Firebase deploys are unaffected and stay a
-# deliberate local `npm run deploy`.
+# Publishes main's tip, and only once the CI workflow has passed on that exact commit.
+# This used to run on every push to main, beside CI rather than after it, so nothing
+# waited for the browser and emulator suites; and main is not a protected branch, so
+# nothing stopped a commit CI failed from going out (2581d89 failed CI on main, and
+# this workflow started a deploy of it all the same). Now CI finishing on main is what
+# wakes this up, and the gate job asks the API whether CI passed on the commit about to
+# go out. Firebase deploys are unaffected and stay a deliberate local `npm run deploy`.
 name: pages
 
 on:
-  push:
-    branches:
-      - main
+  # Fires when a CI run on main completes, whatever its result; the jobs below decide.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  # Re-deploys main by hand, through the same gate.
   workflow_dispatch:
 
-# The deploy needs exactly what actions/deploy-pages documents: pages to publish,
-# id-token for the OIDC handshake that proves the artifact came from this workflow.
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+# Nothing by default; each job asks for what it uses.
+permissions: {}
 
 # One deploy at a time, and never cancel a running one: a half-cancelled deploy can
 # leave the site on an artifact no commit points at.
@@ -43,24 +46,72 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  gate:
+    name: Check CI passed on the commit to publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    # workflow_dispatch runs against whatever ref the person dispatching picks, so
+    # without the ref test a manual run could publish an unmerged branch. A
+    # workflow_run always runs on the default branch, and only a CI run that passed
+    # on a push to main is worth waking for.
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.conclusion == 'success'))
+
+    # Reading workflow runs is all this job does.
+    permissions:
+      actions: read
+
+    outputs:
+      sha: ${{ steps.ci.outputs.sha }}
+
+    steps:
+      # What gets published is github.sha, main's tip when this run started — never
+      # the triggering run's head_sha, so a pull request's CI run cannot choose what
+      # is published. The tip is not always the commit whose CI just finished: after
+      # two quick pushes the older one's CI can finish last. So the question is put
+      # about the tip itself, and when CI has not passed on it (yet) nothing is
+      # published: the tip's own CI run wakes this workflow again when it finishes.
+      - name: Ask whether CI passed on main's tip
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          passed=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&branch=main&status=success" --jq '.total_count')
+          if [ "$passed" -gt 0 ]; then
+            echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::CI has not passed on $GITHUB_SHA, so nothing is published."
+          fi
+
   deploy:
     name: Publish the demo to GitHub Pages
+    needs: gate
+    if: needs.gate.outputs.sha != ''
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
-    # The push trigger is filtered to main, but workflow_dispatch runs against
-    # whatever ref the person dispatching picks — without this, a manual run
-    # could publish an unmerged branch and skip the CI gate the comment above
-    # relies on. Manual dispatch stays useful for re-deploying main itself.
-    if: github.ref == 'refs/heads/main'
+    # The deploy needs exactly what actions/deploy-pages documents: pages to publish,
+    # id-token for the OIDC handshake that proves the artifact came from this workflow.
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
 
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
+      # The commit the gate checked, by hash, so a push landing in between cannot
+      # swap in one it did not.
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -68,7 +119,8 @@ jobs:
           node-version: '22'
 
       # The suite is dependency-free and runs in seconds; a shell the unit tests
-      # reject must never be published, even though main is already gated by CI.
+      # reject must never be published, even though the gate has already seen CI
+      # pass on this commit.
       - name: Run tests before publishing
         run: npm test
 
