@@ -752,8 +752,12 @@
     dom.reportsList.classList.remove('hidden');
     reports.forEach(function (report, index) {
       const subject = subjects[index];
-      // A missing subject is expected: deleted accounts keep their reports.
-      const name = (subject && subject.displayName) || 'a deleted account';
+      // A missing subject is expected. Deleted accounts keep their reports, and
+      // the rules show a paused account only to the people it has a match or
+      // a like with, which an account that ended the conversation no longer
+      // has. The page gets no face either way and cannot tell which, so the
+      // name says only what is true of both.
+      const name = (subject && subject.displayName) || 'an account you can no longer see';
       dom.reportsList.appendChild(reportRow(report, name));
     });
   }
@@ -768,8 +772,8 @@
     try {
       const reports = await ZC.store.getMyReports(me.uid);
       // One ask for every subject, not one each: a name that cannot be read is
-      // shown as a deleted account, as a missing one is, and does not cost the
-      // panel its list.
+      // shown as an account you can no longer see, as a missing one is, and
+      // does not cost the panel its list.
       const faces = await ZC.store.getPublicProfiles(reports.map(function (report) { return report.about; }))
         .catch(function () { return {}; });
       const subjects = reports.map(function (report) { return faces[report.about] || null; });

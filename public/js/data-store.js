@@ -927,8 +927,8 @@
    * ends it, `unmatch` turns their like into a pass, and once they pause, the
    * reporter's settings page asks as none of the three. Both adapters answer
    * that with null, and the page, which cannot tell it from an account that is
-   * gone, names it "a deleted account". A missing account is "shown" so that
-   * it comes back missing, as a miss does there.
+   * gone, names it "an account you can no longer see". A missing account is
+   * "shown" so that it comes back missing, as a miss does there.
    *
    * The rule's other half, that a signed-out caller reads nothing at all, is not
    * restated: this adapter has always answered a discoverable profile without a
@@ -5090,8 +5090,9 @@
      * Demo mode serves the stored document itself; firebase mode reads the
      * discovery projection. Null when the account is gone or this viewer may
      * not read it, which are not told apart: a paused account that has ended
-     * its conversation with the viewer is null as well, since `unmatch` turned
-     * its like into a pass. Either way it is not an error.
+     * its conversation with the viewer is null as well, once `unmatch` has
+     * turned its like into a pass (a conversation ended before `unmatch` did
+     * that still has the like). Either way it is not an error.
      * @param {string} uid the account to look up
      * @returns {Promise<Object|null>} UserDoc-shaped public profile or null
      */

@@ -107,6 +107,30 @@ module.exports = {
     });
     t.check('the retraction reaches the store, not just the DOM', remaining === 0, 'stored=' + remaining);
 
+    /* ---- a report about an account this page can no longer see ---- */
+    // Reports outlive their subject's account, and since an unmatch records
+    // the ender's pass, a subject who ended the conversation and then paused
+    // is one the rules no longer show the reporter either. The page cannot
+    // tell the two apart (both come back as no face at all), so the name it
+    // gives has to be true of both, and "a deleted account" was not.
+    const unseen = await page.evaluate(function () {
+      const store = window.ZC.store;
+      const me = window.ZC.auth.current.uid;
+      return store.reportUser(me, 'gil-abernathy', 'other', '').then(function () {
+        return store.deleteAccountData('gil-abernathy');
+      });
+    }).then(async function () {
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#reports-list li strong');
+      return page.evaluate(function () { return document.querySelector('#reports-list li strong').textContent; });
+    });
+    t.check('a report about an account it can no longer see names it as that, not as deleted',
+      unseen === 'an account you can no longer see', JSON.stringify(unseen));
+    // Withdrawn again, so the counts below are about the report this spec is following.
+    await page.evaluate(function () {
+      return window.ZC.store.retractReport(window.ZC.auth.current.uid, 'gil-abernathy');
+    });
+
     /* ---- a filing that fails must not also take away the block ---- */
 
     // The catch used to `return`, so the one person whose report did not go through
@@ -232,11 +256,11 @@ module.exports = {
       'matches=' + after.matched.join(','));
 
     // Asked as things stand, the deck cannot show the block doing anything.
-    // Every conversation carries this account's own like on the other person —
-    // a match needs one, and the seed writes it for each — the unmatch leaves
-    // it in place, and somebody already swiped is out of the deck whatever the
-    // block list says. Measured: with both block filters deleted from the
-    // shipped store, this check passed as it was first written. So the like is
+    // Every conversation carries this account's own swipe on the other person —
+    // a match needs a like, the seed writes one for each, and the unmatch turns
+    // it into a pass — and somebody already swiped is out of the deck whatever
+    // the block list says. Measured: with both block filters deleted from the
+    // shipped store, this check passed as it was first written. So the swipe is
     // taken back first, through the undoSwipe a rewind uses, which the store
     // allows now that there is no match to protect; after that the block is
     // the only thing that can keep this person out.
@@ -254,7 +278,7 @@ module.exports = {
     }, target.uid);
     t.check('the block alone keeps the blocked person out of the deck',
       !deck.liked && deck.candidates.indexOf(target.uid) === -1,
-      (deck.liked ? 'the like on them is still stored, so this measured the swipe filter; ' : '') +
+      (deck.liked ? 'a swipe on them is still stored, so this measured the swipe filter; ' : '') +
       (deck.candidates.indexOf(target.uid) !== -1 ? target.name + ' is a candidate again; ' : '') +
       'candidates=' + deck.candidates.length);
     t.check('blocking leaves the report on file', after.reports === 1, 'stored=' + after.reports);
