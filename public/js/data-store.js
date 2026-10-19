@@ -150,6 +150,16 @@
   const LIMIT_FIELDS = { likes: 'likesPerDay', superLikes: 'superLikesPerDay', rewinds: 'rewinds' };
 
   /**
+   * The longest display name firestore.rules accepts, on users/{uid} and on
+   * discovery/{uid} alike. The editors stop at 40, but a provider does not:
+   * Google hands over the account's own name, and a longer one made the
+   * account's create refused on every page load. normalizeUser cuts to this,
+   * so neither adapter can store a name the other could not, and
+   * tests/limits.test.js compares it with both rules.
+   */
+  const DISPLAY_NAME_MAX = 60;
+
+  /**
    * The canonical UserDoc with sane defaults. Treat it as read-only — every
    * writer merges a copy of it so all agents agree on the shape.
    */
@@ -261,6 +271,27 @@
     return out;
   }
 
+  /**
+   * A string cut to at most `max` UTF-16 units, at a character boundary.
+   * UTF-16 units are what firestore.rules' `size()` counts, measured against
+   * the emulator: thirty emoji, sixty units, were accepted under a cap of 60
+   * and thirty-one were refused. slice() alone can keep half of a surrogate
+   * pair, so the cut walks whole characters instead.
+   * @param {*} value text; null and undefined become ''
+   * @param {number} max the most UTF-16 units to keep
+   * @returns {string}
+   */
+  function clampText(value, max) {
+    const text = value === null || value === undefined ? '' : String(value);
+    if (text.length <= max) return text;
+    let out = '';
+    for (const ch of text) {
+      if (out.length + ch.length > max) break;
+      out += ch;
+    }
+    return out;
+  }
+
   function toIso(value) {
     const d = util.toDate ? util.toDate(value) : (value ? new Date(value) : null);
     return d ? d.toISOString() : null;
@@ -278,6 +309,7 @@
   function normalizeUser(doc) {
     const user = deepMerge(DEFAULT_USER, isPlainObject(doc) ? doc : {});
     user.uid = String(user.uid || '');
+    user.displayName = clampText(user.displayName, DISPLAY_NAME_MAX);
     user.plan = user.plan === 'premium' ? 'premium' : 'free';
     user.profileComplete = !!user.profileComplete;
     if (!Array.isArray(user.profile.photos)) user.profile.photos = [];
@@ -350,6 +382,28 @@
     const by = amount === undefined ? 1 : Number(amount) || 0;
     usage[field] = Math.max(0, usage[field] + by);
     return usage;
+  }
+
+  /**
+   * What updateUser merges a patch into when users/{uid} does not exist yet.
+   *
+   * Settings and Plans need a signed-in account, not a stored document, so
+   * they save through updateUser while auth.js holds an in-memory stand-in for
+   * a document its create could not write. Starting from `{ uid }` alone stored
+   * email '' and displayName '', and while firestore.rules froze email that ''
+   * could never be put right: auth.js's correction was refused on every later
+   * page load, and the refusal sent the account back through onboarding. The
+   * rules now accept a correction to the caller's own address, but a document
+   * written with it to begin with never needs one. The signed-in account's
+   * identity is what createUser would have been given; any other uid gets
+   * nothing from it.
+   * @param {string} uid the document being written
+   * @returns {Object} the base for the merge
+   */
+  function missingUserBase(uid) {
+    const current = ZC.auth && ZC.auth.current;
+    if (!current || current.uid !== uid) return { uid: uid };
+    return { uid: uid, email: current.email || '', displayName: current.displayName || '' };
   }
 
   /** A stand-in doc for a match whose other half is missing from storage. */
@@ -1076,7 +1130,7 @@
 
     async updateUser(uid, patch) {
       const users = readUsers();
-      const base = users[uid] || { uid: uid };
+      const base = users[uid] || missingUserBase(uid);
       const user = normalizeUser(deepMerge(base, patch || {}));
       user.uid = String(uid);
       user.updatedAt = nowIso();
@@ -2553,7 +2607,7 @@
       const shadow = db().collection('discovery').doc(String(uid));
       return db().runTransaction(async function (tx) {
         const snap = await tx.get(ref);
-        const base = snap.exists ? snap.data() || {} : { uid: uid };
+        const base = snap.exists ? snap.data() || {} : missingUserBase(uid);
         const merged = normalizeUser(deepMerge(base, patch || {}));
         merged.uid = String(uid);
         if (!merged.createdAt) merged.createdAt = nowIso();

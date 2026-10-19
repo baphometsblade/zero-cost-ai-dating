@@ -590,11 +590,12 @@ module.exports = {
 
       /* ---- the finding ---- */
 
-      // Run last, because it deliberately leaves the account's document
-      // missing.
+      // Run after everything that reads this account's document, because it
+      // deliberately leaves it missing.
       //
       // updateUser's transaction is written to cope with a users document that
-      // is not there — `snap.exists ? snap.data() : { uid: uid }` — and then
+      // is not there — `snap.exists ? snap.data() : missingUserBase(uid)`, the
+      // uid and the signed-in account's email and name — and then
       // normalizeUser fills the gaps, including `lastActiveAt: null`. When this
       // spec was written, firestore.rules accepted that key only as a string,
       // so the write was refused and the branch could never do what it was
@@ -684,7 +685,8 @@ module.exports = {
       // session ending is not mistaken for another tab's doing, and that mark
       // used to outlive a failure. A sign-out in another tab afterwards then
       // changed nothing here, and the page stayed up as the account that had
-      // left. Run last, because it ends the session.
+      // left. Run after everything this account does, because it ends the
+      // session.
       const failed = await page.evaluate(function () {
         const fb = window.ZC.firebase.auth;
         const real = fb.signOut;
@@ -707,6 +709,76 @@ module.exports = {
         failed && failed.ok === false && movedTo.indexOf(base + '/') === 0 &&
           h.pageUrl('auth').test(movedTo) && /[?&]next=/.test(movedTo),
         JSON.stringify(failed) + ' · ' + movedTo);
+
+      /* ---- two accounts whose identity the app did not choose ---- */
+
+      // Both are made in the Auth emulator directly, the way a provider makes
+      // one, and then signed into through the form like any other account.
+      // The first carries the name Google would hand over for somebody called
+      // this: seventy characters, where firestore.rules allow a users/{uid}
+      // sixty. Its create was refused on every page load, so it never got a
+      // document, and onboarding ended at "We could not find your profile
+      // document" however many times it signed out and back in.
+      const longName = 'Maria Fernanda de los Angeles Garcia-Rodriguez Montenegro y Bustamante';
+      const longEmail = 'e2e-long-' + Date.now() + '@example.com';
+      const longMade = await emulator(AUTH, 'POST', '/identitytoolkit.googleapis.com/v1/accounts:signUp?key=emulator-api-key',
+        { email: longEmail, password: password, displayName: longName, returnSecureToken: true });
+      const longUid = longMade.body && longMade.body.localId;
+      await signInThroughForm(longEmail);
+      await page.waitForURL(h.pageUrl('profile'));
+      await page.waitForSelector('#profile-main:not(.hidden), #profile-error:not(.hidden)');
+      const longPage = await page.evaluate(function () {
+        const error = document.getElementById('profile-error');
+        return {
+          editor: !document.getElementById('profile-main').classList.contains('hidden'),
+          error: error.classList.contains('hidden') ? '' : (error.textContent || '').trim()
+        };
+      });
+      const longDoc = await awaitDoc('users/' + longUid);
+      t.check('an account whose provider name is longer than the rules allow still gets users/{uid}',
+        !!longUid && !!longDoc && longDoc.email === longEmail && longDoc.displayName === longName.slice(0, 40),
+        longDoc ? 'displayName=' + JSON.stringify(longDoc.displayName) : 'no document for ' + longUid);
+      t.check('and onboarding opens the editor for it, not a dead end',
+        longPage.editor && !longPage.error, JSON.stringify(longPage));
+      await page.evaluate(function () { return window.ZC.auth.signOut(); });
+
+      // The second has a finished profile whose stored email is not its
+      // account's: what updateUser's upsert used to leave behind (email ''),
+      // and what an address changed outside the app leaves. auth.js corrects
+      // it on every page load; the rules refused every correction, and the
+      // refusal swapped the stored profile for a blank one, so every page
+      // sent this finished account back through onboarding.
+      const staleEmail = 'e2e-stale-' + Date.now() + '@example.com';
+      const staleMade = await emulator(AUTH, 'POST', '/identitytoolkit.googleapis.com/v1/accounts:signUp?key=emulator-api-key',
+        { email: staleEmail, password: password, returnSecureToken: true });
+      const staleUid = staleMade.body && staleMade.body.localId;
+      const staleSeed = Object.assign(userDoc({ uid: staleUid, name: 'Stale Address', age: 31, gender: 'woman' }), { email: '' });
+      await emulator(FIRESTORE, 'PATCH', DOCS + '/users/' + staleUid, { fields: encodeFields(staleSeed) });
+      await signInThroughForm(staleEmail);
+      // The deck renders only once requireProfile has passed, and the profile
+      // editor only once it has not, so whichever appears first is the answer.
+      await page.waitForSelector('#deck-stack .swipe-card, #profile-main:not(.hidden), #profile-error:not(.hidden)');
+      const staleAt = page.url();
+      const staleDoc = await awaitDoc('users/' + staleUid, function (doc) { return doc.email === staleEmail; });
+      t.check('a finished account stored with the wrong email reaches the deck, not onboarding',
+        h.pageUrl('dashboard').test(staleAt), staleAt.replace(base, ''));
+      t.check('and the stored email is corrected to the account\'s own',
+        !!staleDoc && staleDoc.email === staleEmail && staleDoc.profileComplete === true,
+        staleDoc ? 'email=' + JSON.stringify(staleDoc.email) : 'no document');
+
+      /**
+       * Sign in through auth.html as an account made in the Auth emulator.
+       * @param {string} address its email; the password is the spec's own
+       * @returns {Promise<void>}
+       */
+      async function signInThroughForm(address) {
+        await page.goto(base + '/auth.html', { waitUntil: 'domcontentloaded' });
+        await page.waitForSelector('#auth-form');
+        await page.fill('#input-email', address);
+        await page.fill('#input-password', password);
+        await page.click('#submit-btn');
+        await page.waitForURL(function (url) { return !h.pageUrl('auth').test(url.href); });
+      }
     } finally {
       await server.stop();
     }

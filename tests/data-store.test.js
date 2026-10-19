@@ -241,6 +241,75 @@ test('updateUser deep-merges, bumps updatedAt and pins uid/createdAt', async fun
   assert.deepEqual(replaced.profile.interests, ['hiking']);
 });
 
+// The display name is the one identity field somebody else chooses: Google
+// hands over whatever the account is called, and firestore.rules refuses a
+// users/{uid} whose name is over 60 characters. The Firestore adapter's create
+// was refused for such an account on every page load, while this adapter
+// stored the name whole, so demo mode could not show the failure.
+test('a display name longer than firestore.rules allows is cut to fit by every writer', async function () {
+  await resetWorld();
+  const long = 'Maria Fernanda de los Angeles Garcia-Rodriguez Montenegro y Bustamante';
+  assert.equal(long.length, 70);
+
+  const created = await store.createUser('alice', { email: 'alice@example.com', displayName: long });
+  assert.equal(created.displayName, long.slice(0, 60));
+  assert.equal((await store.getUser('alice')).displayName, long.slice(0, 60), 'and it is stored cut');
+
+  const renamed = await store.updateUser('alice', { displayName: long });
+  assert.equal(renamed.displayName, long.slice(0, 60));
+
+  // Counted in UTF-16 units, which is what the rules' size() counts: thirty
+  // emoji are sixty units and were measured as accepted, thirty-one were
+  // refused. The cut never splits a surrogate pair, which would leave half a
+  // character behind: one letter ahead of thirty emoji puts the sixtieth unit
+  // in the middle of the last one, so that one goes whole.
+  const emoji = await store.updateUser('alice', { displayName: '\u{1F600}'.repeat(31) });
+  assert.equal(emoji.displayName, '\u{1F600}'.repeat(30));
+  const straddling = await store.updateUser('alice', { displayName: 'x' + '\u{1F600}'.repeat(30) });
+  assert.equal(straddling.displayName, 'x' + '\u{1F600}'.repeat(29));
+
+  // A name that already fits is left exactly as it was.
+  const fits = await store.updateUser('alice', { displayName: 'x'.repeat(60) });
+  assert.equal(fits.displayName, 'x'.repeat(60));
+});
+
+// updateUser writes a document that is not there yet: Settings and Plans only
+// need a signed-in account, so they save through it while auth.js is holding
+// an in-memory stand-in for a document whose create failed. It used to start
+// from `{ uid }` alone and store email '' — and firestore.rules freezes email
+// on every later update, so auth.js's repair of it was refused for good.
+test('updateUser on a missing document starts from the signed-in account\'s identity', async function () {
+  await resetWorld();
+  const prior = window.ZC.auth;
+  window.ZC.auth = { current: { uid: 'uma', email: 'uma@example.com', displayName: 'Uma' } };
+  try {
+    const made = await store.updateUser('uma', { profileComplete: true });
+    assert.equal(made.email, 'uma@example.com');
+    assert.equal(made.displayName, 'Uma');
+    assert.equal(made.profileComplete, true);
+    assert.equal((await store.getUser('uma')).email, 'uma@example.com', 'and it is stored that way');
+
+    // The patch still wins over the seed, as it does over a stored value.
+    const named = await store.updateUser('val', { displayName: 'Val' });
+    assert.equal(named.displayName, 'Val');
+
+    // Another account's uid takes nothing from the one signed in.
+    assert.equal(named.email, '');
+    const other = await store.updateUser('vic', { profileComplete: true });
+    assert.equal(other.email, '');
+    assert.equal(other.displayName, '');
+
+    // And a document that exists keeps the identity it has.
+    await store.createUser('wes', { email: 'wes@example.com', displayName: 'Wes' });
+    window.ZC.auth = { current: { uid: 'wes', email: 'other@example.com', displayName: 'Other' } };
+    const kept = await store.updateUser('wes', { profileComplete: true });
+    assert.equal(kept.email, 'wes@example.com');
+    assert.equal(kept.displayName, 'Wes');
+  } finally {
+    window.ZC.auth = prior;
+  }
+});
+
 /* ------------------------------------------------------------------------
    3. learning.interestAffinity is atomic (the pruning regression)
    ------------------------------------------------------------------------ */

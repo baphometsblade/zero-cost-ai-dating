@@ -140,5 +140,89 @@ module.exports = {
       await k.ok(k.testing.assertFails(setDoc(doc(pOwner, 'discovery', puid), smuggled))),
       k.show(smuggled.profile.personality)
     );
+
+    /* ---- the account document's identity, written by the shipped calls ---- */
+
+    // Not a replay this time: the store is pointed at the real ruleset as the
+    // account itself, with the email on its token that Firebase Auth puts
+    // there, and makes the calls auth.js makes. Every one of them was refused,
+    // or stored something the next one was refused over, and the demo adapter
+    // accepted all of it: a create carrying the 70-character name Google hands
+    // over, an upsert that stored email '', and the email repair auth.js sends
+    // on every page load after that.
+    const iuid = 'rules-identity';
+    const iemail = iuid + '@example.com';
+    const long = 'Maria Fernanda de los Angeles Garcia-Rodriguez Montenegro y Bustamante';
+    const openDb = k.ctx.ZC.firebase.db;
+    const priorAuth = k.ctx.ZC.auth;
+    const answer = function (err) { return { rejected: (err && err.code) || String(err) }; };
+    const stored = async function () {
+      let data = null;
+      await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+        const snap = await k.fs.getDoc(k.fs.doc(c.firestore(), 'users', iuid));
+        data = snap.exists() ? snap.data() : null;
+      });
+      return data;
+    };
+    let created = null;
+    let upserted = null;
+    let repaired = null;
+    let misdirected = null;
+    let afterUpsert = null;
+    let afterRepair = null;
+    try {
+      k.ctx.ZC.firebase.db = k.rulesEnv.authenticatedContext(iuid, { email: iemail }).firestore();
+
+      created = await k.store.createUser(iuid, { email: iemail, displayName: long }).catch(answer);
+
+      // Settings saving while auth.js holds an in-memory stand-in: the
+      // document is missing, and ZC.auth.current is the account.
+      await k.rulesEnv.withSecurityRulesDisabled(function (c) {
+        return k.fs.deleteDoc(k.fs.doc(c.firestore(), 'users', iuid));
+      });
+      k.ctx.ZC.auth = { current: { uid: iuid, email: iemail, displayName: 'Maria' } };
+      upserted = await k.store.updateUser(iuid, { preferences: { theme: 'dark' } }).catch(answer);
+      afterUpsert = await stored();
+
+      // A document stored with the wrong address, which is what that upsert
+      // used to leave and what an address changed outside the app leaves.
+      await k.rulesEnv.withSecurityRulesDisabled(function (c) {
+        return k.fs.setDoc(k.fs.doc(c.firestore(), 'users', iuid), k.h.userDoc(iuid, { email: '' }));
+      });
+      repaired = await k.store.updateUser(iuid, { email: iemail }).catch(answer);
+      afterRepair = await stored();
+      misdirected = await k.store.updateUser(iuid, { email: 'someone-else@example.com' }).catch(answer);
+    } finally {
+      k.ctx.ZC.firebase.db = openDb;
+      k.ctx.ZC.auth = priorAuth;
+    }
+    k.ctx.drainWarnings();
+
+    t.check(
+      'under the real rules, createUser is accepted for a provider name longer than they allow',
+      !!created && !created.rejected && created.displayName === long.slice(0, 60),
+      k.show(created && (created.rejected ? created : { displayName: created.displayName }))
+    );
+
+    t.check(
+      'updateUser on a missing document stores the signed-in account\'s email, not an empty one',
+      !!upserted && !upserted.rejected && !!afterUpsert && afterUpsert.email === iemail &&
+        afterUpsert.preferences.theme === 'dark',
+      k.show(upserted && upserted.rejected ? upserted : afterUpsert && { email: afterUpsert.email })
+    );
+
+    t.check(
+      'and the email repair auth.js sends is accepted, and stored',
+      !!repaired && !repaired.rejected && !!afterRepair && afterRepair.email === iemail,
+      k.show(repaired && repaired.rejected ? repaired : afterRepair && { email: afterRepair.email })
+    );
+
+    // The counterweight: the repair is accepted because it is the token's
+    // address, not because email stopped being frozen.
+    t.check(
+      'while an address that is not the account\'s own is still refused',
+      !!misdirected && misdirected.rejected === 'permission-denied',
+      k.show(misdirected && (misdirected.rejected ? misdirected : { email: misdirected.email }))
+    );
   }
 };

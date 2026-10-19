@@ -39,6 +39,13 @@
    measured now, on the costliest document the store writes, and the floor
    applies to the lower.
 
+   A third joined them when `identityUnchanged()` stopped freezing email
+   outright and began letting it be corrected to the address on the caller's
+   own token. That correction is an update auth.js sends, and it takes the
+   longer arm of the function, so it is measured as a path of its own:
+   `repair`, the same document stored with an empty email and written back with
+   the token's.
+
    The margin is thin on purpose rather than by neglect: the alternative to
    spending it was leaving `profile.photos`, `profile.interests`, `blocked` and
    `learning.interestAffinity` bounded by element count only, which meant one
@@ -79,9 +86,9 @@
    independent machines, a sandbox and CI, both on firebase-tools 15.26.0 with
    emulator jar v1.22.0, which CI pins; that old spec, run on the old rules
    with firebase-tools 15.32.1, which fetches the same jar, still prints 5. The
-   two figures this spec prints now, for creating and for updating a premium
-   account, have been measured on one machine only, on 15.32.1, and until CI
-   prints the same nothing says they reproduce. A version bump could shift any
+   three figures this spec prints now, for creating, updating and repairing a
+   premium account, have been measured on one machine only, on 15.32.1, and
+   until CI prints the same nothing says they reproduce. A version bump could shift any
    of them without a line of this project changing.
 
    If that happens the check is still telling the truth: there is now less room
@@ -116,8 +123,13 @@ const ANCHOR = "d.plan in ['free', 'premium']";
  */
 const COSTLIEST = { plan: 'premium', planSince: '2026-01-01T00:00:00.000Z' };
 
-/** Both ways the app writes users/{uid}, and the floor holds on each. */
-const WRITES = ['create', 'update'];
+/**
+ * Every way the app writes users/{uid}, and the floor holds on each. `repair` is
+ * an update too, but not the routine one: it is auth.js correcting a stored email
+ * to the account's own, the one write that takes the longer arm of
+ * `identityUnchanged()`, so it is measured on its own.
+ */
+const WRITES = ['create', 'update', 'repair'];
 
 /**
  * How many clauses a cost probe searches up to. The user document has a dozen
@@ -163,8 +175,9 @@ module.exports = {
      * Does the costliest valid user document write succeed under these rules?
      * Its own project each time, because a ruleset is per-project.
      * @param {string} rules the ruleset to install
-     * @param {string} write 'create', or 'update' to seed the document first so
-     *   that the same call is evaluated by `allow update`
+     * @param {string} write 'create'; 'update' to seed the document first so
+     *   that the same call is evaluated by `allow update`; or 'repair' to seed it
+     *   with an empty email, so the call also corrects that to the token's
      * @returns {Promise<boolean>} true when the write was allowed
      */
     async function accepts(rules, write) {
@@ -174,14 +187,17 @@ module.exports = {
         firestore: { rules: rules, host: address.host, port: address.port }
       });
       const doc = h.userDoc('budget-user', COSTLIEST);
-      if (write === 'update') {
+      if (write !== 'create') {
+        const stored = write === 'repair' ? Object.assign({}, doc, { email: '' }) : doc;
         await env.withSecurityRulesDisabled(function (c) {
-          return c.firestore().doc('users/budget-user').set(doc);
+          return c.firestore().doc('users/budget-user').set(stored);
         });
       }
       let allowed = true;
       try {
-        await env.authenticatedContext('budget-user').firestore()
+        // With the email on the token that Firebase Auth puts there, which is
+        // what the repair is checked against.
+        await env.authenticatedContext('budget-user', { email: doc.email }).firestore()
           .doc('users/budget-user').set(doc);
       } catch (err) {
         allowed = false;
@@ -300,7 +316,8 @@ module.exports = {
       // most needs reading.
       const base = await accepts(source, write);
       t.check('the costliest valid user document is accepted by the shipped rules on ' + write,
-        base, base ? 'allowed' : 'DENIED — userDocOk is already over the 1000-expression limit on ' + write);
+        base, base ? 'allowed' : 'DENIED — userDocOk is already over the 1000-expression limit on ' + write +
+          (write === 'repair' ? ', or the rules refuse to correct the email at all' : ''));
       if (!base) continue;
 
       let lo = 0;
@@ -313,19 +330,20 @@ module.exports = {
     }
 
     if (WRITES.every(function (write) { return write in headroom; })) {
-      const least = Math.min(headroom.create, headroom.update);
-      const most = Math.max(headroom.create, headroom.update);
-      const both = 'create ' + headroom.create + ', update ' + headroom.update;
+      const fits = WRITES.map(function (write) { return headroom[write]; });
+      const least = Math.min.apply(null, fits);
+      const most = Math.max.apply(null, fits);
+      const each = WRITES.map(function (write) { return write + ' ' + headroom[write]; }).join(', ');
 
       // Without this the measurement could be vacuous: a harness that allowed
       // every write would report SEARCH_CEILING and sail past the floor below.
       t.check('the ceiling is real — enough padding does break the rules',
         most < SEARCH_CEILING,
-        both + ' clauses fit, searched up to ' + SEARCH_CEILING);
+        each + ' clauses fit, searched up to ' + SEARCH_CEILING);
 
       t.check('and userDocOk keeps at least ' + FLOOR + ' clauses of headroom on every write path',
         least >= FLOOR,
-        least + ' more `' + PAD.trim() + '` clauses fit before a user write fails (' + both + '). ' +
+        least + ' more `' + PAD.trim() + '` clauses fit before a user write fails (' + each + '). ' +
         (least >= FLOOR
           ? 'Spend it knowing ' + (perCall
             ? 'a call such as `stampOk(d.createdAt)` costs about ' + perCall + ' of these, measured above.'

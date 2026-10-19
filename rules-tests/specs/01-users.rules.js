@@ -63,6 +63,42 @@ module.exports = {
     t.check('createdAt cannot be back-dated',
       await ok(assertFails(as(ME).doc('users/' + ME).set(h.userDoc(ME, { createdAt: '2020-01-01T00:00:00.000Z' })))));
 
+    // ...with one way through for email: to the address on the caller's own
+    // sign-in token, and nowhere else. auth.js corrects a stored email that
+    // differs from the account's on every page load, and every one of those
+    // writes was refused, so a document stored with the wrong address (the
+    // empty one updateUser's upsert used to leave, or an address changed
+    // outside the app) could never be put right. `as()` above signs in with no
+    // email on the token at all, which is why that refusal still stands.
+    const STALE = 'stale-email';
+    const SIGNED = STALE + '@token.example.com';
+    const withEmail = function (uid, email) {
+      return ctx.env.authenticatedContext(uid, { email: email }).firestore();
+    };
+    await seed(async function (admin) {
+      await admin.firestore().doc('users/' + STALE).set(h.userDoc(STALE, { email: '' }));
+    });
+
+    t.check('an email can be corrected to the address on the owner\'s own sign-in token',
+      await ok(assertSucceeds(withEmail(STALE, SIGNED).doc('users/' + STALE).set(
+        h.userDoc(STALE, { email: SIGNED })))));
+
+    t.check('and from one address to another, as when it was changed outside the app',
+      await ok(assertSucceeds(withEmail(STALE, 'moved@token.example.com').doc('users/' + STALE).set(
+        h.userDoc(STALE, { email: 'moved@token.example.com' })))));
+
+    t.check('but not to any other address, even with an email on the token',
+      await ok(assertFails(withEmail(STALE, SIGNED).doc('users/' + STALE).set(
+        h.userDoc(STALE, { email: 'someone-else@example.com' })))));
+
+    t.check('and correcting it leaves uid and createdAt as frozen as they were',
+      await ok(assertFails(withEmail(STALE, SIGNED).doc('users/' + STALE).set(
+        h.userDoc(STALE, { email: SIGNED, createdAt: '2020-01-01T00:00:00.000Z' })))));
+
+    t.check('nor does an email on the token open anybody else\'s document',
+      await ok(assertFails(withEmail(OTHER, SIGNED).doc('users/' + STALE).set(
+        h.userDoc(STALE, { email: SIGNED })))));
+
     /* ---- field validation, one field at a time ---- */
     const bad = [
       ['a bio over 500 characters', { profile: prof({ bio: 'x'.repeat(501) }) }],
