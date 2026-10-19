@@ -688,6 +688,185 @@ module.exports = {
       'free: ' + freeReads.list + ' list read(s), ' + freeReads.count + ' count read(s) — "' + freeReads.panel +
       '"; premium (control): ' + premiumReads.list + ' list read(s)');
 
+    // 1e. Who liked you counts everyone waiting on an answer, and the store
+    // applies only block lists to that. The deck applies the engine's hard
+    // filters as well, so a viewer who narrows their own filters has likers
+    // the deck will never show — and Premium was told every one of them "liked
+    // you and is still in your deck", with a link to Discover that led nowhere.
+    // Fifty kilometres leaves five of the nine seeded likers outside the deck.
+    // One of them also pauses Discover, which keeps her out whatever this
+    // account's filters say, so Settings is no answer for her and the panel
+    // may not send her there. Both decks are worked out the way dashboard.js
+    // builds one, the store's candidates ranked by the engine, which drops
+    // whoever fails a filter: once as this account is, and once with its own
+    // filters opened all the way, which is what widening them can reach.
+    const distanceWas = await page.evaluate(function () {
+      const uid = window.ZC.auth.current.uid;
+      return window.ZC.store.getUser(uid).then(function (me) {
+        const was = me.preferences.maxDistanceKm;
+        return window.ZC.store.updateUser('fatima-bennani', { preferences: { discoverable: false } })
+          .then(function () {
+            return window.ZC.store.updateUser(uid, { plan: 'premium', preferences: { maxDistanceKm: 50 } });
+          })
+          .then(function () { return was; });
+      });
+    });
+    const readLikes = function () {
+      return page.evaluate(async function () {
+        const uid = window.ZC.auth.current.uid;
+        const me = await window.ZC.store.getUser(uid);
+        const pool = await window.ZC.store.listCandidates(uid, { limit: 1000 });
+        const deckOf = function (viewer) {
+          return window.ZC.matching.rankCandidates(viewer, pool, {}).map(function (r) { return r.uid; });
+        };
+        const deck = deckOf(me);
+        const wide = deckOf(Object.assign({}, me, {
+          preferences: Object.assign({}, me.preferences, { interestedIn: [], ageMin: null, ageMax: null, maxDistanceKm: null })
+        }));
+        const likers = await window.ZC.store.getLikesReceived(uid);
+        const body = document.getElementById('likes-body');
+        const text = (body.textContent || '').replace(/\s+/g, ' ').trim();
+        const claim = /(\d+|One) (?:people|person) liked you and (?:are|is) still in your deck/.exec(text);
+        const navBadge = document.querySelector('[data-badge="dashboard"]');
+        return {
+          likers: likers.map(function (doc) {
+            return { name: doc.displayName, inDeck: deck.indexOf(doc.uid) !== -1, inWide: wide.indexOf(doc.uid) !== -1 };
+          }),
+          entries: Array.prototype.map.call(body.querySelectorAll('.new-match'), function (node) {
+            return { label: node.getAttribute('aria-label') || node.textContent.trim(), href: node.getAttribute('href') };
+          }),
+          claim: claim ? (claim[1] === 'One' ? 1 : Number(claim[1])) : 0,
+          badge: navBadge ? navBadge.textContent.trim() : null,
+          text: text
+        };
+      });
+    };
+    const namedIn = function (people) {
+      return function (e) { return people.some(function (l) { return e.label.indexOf(l.name + ' ') === 0; }); };
+    };
+    await page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#likes-card:not(.hidden) #likes-body > *', { timeout: 5000 });
+    // The nav badge is painted by its own subscription; it is compared below,
+    // so it has to have spoken. Bounded, so a badge that never does is reported.
+    await page.waitForFunction(function () {
+      const node = document.querySelector('[data-badge="dashboard"]');
+      return !!node && node.textContent.trim() !== '';
+    }, null, { timeout: 5000 }).catch(function () {});
+    const narrowed = await readLikes();
+    const deckLikers = narrowed.likers.filter(function (l) { return l.inDeck; });
+    const outside = narrowed.likers.filter(function (l) { return !l.inDeck; });
+    const widenable = outside.filter(function (l) { return l.inWide; });
+    const sentToDiscover = narrowed.entries.filter(function (e) { return e.href === 'dashboard.html'; });
+    const notInDeck = sentToDiscover.filter(function (e) { return !namedIn(deckLikers)(e); });
+    t.check('on Premium, who liked you sends to Discover only the likers the deck will show',
+      outside.length > 0 && notInDeck.length === 0 && sentToDiscover.length === deckLikers.length &&
+        narrowed.claim === deckLikers.length,
+      deckLikers.length + ' of ' + narrowed.likers.length + ' likers in the deck; ' + sentToDiscover.length +
+      ' sent to Discover' + (notInDeck.length ? ' (' + notInDeck.map(function (e) { return e.label.split(' liked')[0]; }).join(', ') +
+      ' are not in it)' : '') + '; the panel says ' + narrowed.claim + ' are "still in your deck"');
+    const toSettings = narrowed.entries.filter(function (e) { return e.href === 'settings.html'; });
+    const misSent = toSettings.filter(function (e) { return !namedIn(widenable)(e); });
+    const unlinked = narrowed.entries.filter(function (e) { return !e.href; });
+    t.check('and the rest are listed apart, sent to Settings only when widening your filters would bring them back',
+      widenable.length > 0 && widenable.length < outside.length && misSent.length === 0 &&
+        toSettings.length === widenable.length && unlinked.length === outside.length - widenable.length &&
+        /outside your current filters/.test(narrowed.text) && /would not bring them back/.test(narrowed.text),
+      toSettings.length + ' sent to Settings for ' + widenable.length + ' that widening would bring back' +
+      (misSent.length ? ' (' + misSent.map(function (e) { return e.label.split(' liked')[0]; }).join(', ') + ' would not come back)' : '') +
+      '; ' + unlinked.length + ' left unlinked of ' + (outside.length - widenable.length) + ' it would not');
+    t.check('so the panel still counts everyone the nav badge does',
+      narrowed.entries.length === narrowed.likers.length && narrowed.badge === String(narrowed.likers.length),
+      narrowed.entries.length + ' faces for ' + narrowed.likers.length + ' likers; nav badge ' + JSON.stringify(narrowed.badge));
+
+    // Free is told a number and never who, so it cannot be told which of them
+    // the deck will show. It may not promise that all of them are there.
+    await page.evaluate(function () {
+      return window.ZC.store.updateUser(window.ZC.auth.current.uid, { plan: 'free' });
+    });
+    await page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#likes-card:not(.hidden) #likes-body > *', { timeout: 5000 });
+    const freeNarrowed = await readLikes();
+    t.check('and on the free plan the count no longer promises that every one of them is in the deck',
+      new RegExp('(?:^|\\D)' + freeNarrowed.likers.length + ' people have already liked you').test(freeNarrowed.text) &&
+        !/find them in the deck|still in your deck/.test(freeNarrowed.text),
+      JSON.stringify(freeNarrowed.text.replace(/^(Hidden)+/, '').slice(0, 240)));
+    await page.evaluate(function (was) {
+      return window.ZC.store.updateUser(window.ZC.auth.current.uid, { preferences: { maxDistanceKm: was } })
+        .then(function () {
+          return window.ZC.store.updateUser('fatima-bennani', { preferences: { discoverable: true } });
+        });
+    }, distanceWas);
+
+    // 1f. A match's full card ("View profile") is scored as the deck scores,
+    // and the deck's hard filters fail for things only the other person did:
+    // pausing Discover, which Settings promises leaves existing matches where
+    // they are, or narrowing their own age range. The card then lost its score
+    // ring and reasons, printed the engine's "Not shown — …" on a card that is
+    // being shown, and told the viewer "your current filters" were the cause.
+    // Devin is the seeded match; each case changes one side's settings through
+    // the store and is undone before the next.
+    const viewDevin = async function (mine, his) {
+      await page.evaluate(function (patch) {
+        return window.ZC.store.updateUser(window.ZC.auth.current.uid, { preferences: patch.mine })
+          .then(function () { return window.ZC.store.updateUser('devin-alvarez', { preferences: patch.his }); });
+      }, { mine: mine, his: his });
+      await page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
+      await openConversation(page, 'Devin');
+      await page.click('#chat-menu');
+      await h.clickModalAction(page, 'View profile');
+      await page.waitForSelector('.modal-backdrop .swipe-card');
+      const card = await page.evaluate(function () {
+        const body = document.querySelector('.modal-backdrop .modal-body');
+        return {
+          ring: !!body.querySelector('.match-score'),
+          reasons: body.querySelectorAll('.reason').length,
+          notes: Array.prototype.map.call(body.querySelectorAll('p.text-muted, p.field-hint'), function (p) {
+            return p.textContent.trim();
+          }).join(' | ')
+        };
+      });
+      await h.clickModalAction(page, 'Close');
+      await page.waitForSelector('.modal-backdrop', { state: 'detached' });
+      return card;
+    };
+    const settingsWere = await page.evaluate(function () {
+      return Promise.all([
+        window.ZC.store.getUser(window.ZC.auth.current.uid),
+        window.ZC.store.getUser('devin-alvarez')
+      ]).then(function (both) {
+        const pick = function (doc) {
+          return { discoverable: doc.preferences.discoverable, ageMin: doc.preferences.ageMin, ageMax: doc.preferences.ageMax };
+        };
+        const mine = pick(both[0]);
+        mine.maxDistanceKm = both[0].preferences.maxDistanceKm;
+        return { mine: mine, his: pick(both[1]) };
+      });
+    });
+    const asSeeded = await viewDevin(settingsWere.mine, settingsWere.his);
+    const hePaused = await viewDevin(settingsWere.mine, { discoverable: false });
+    const heNarrowed = await viewDevin(settingsWere.mine, { discoverable: true, ageMin: 18, ageMax: 28 });
+    const iNarrowed = await viewDevin({ ageMax: 30 }, settingsWere.his);
+    // Devin is a few kilometres away; a one-kilometre limit fails the one
+    // filter whose limit is also part of the score.
+    const iCloser = await viewDevin({ ageMax: settingsWere.mine.ageMax, maxDistanceKm: 1 }, settingsWere.his);
+    await page.evaluate(function (were) {
+      return window.ZC.store.updateUser(window.ZC.auth.current.uid, { preferences: were.mine })
+        .then(function () { return window.ZC.store.updateUser('devin-alvarez', { preferences: were.his }); });
+    }, settingsWere);
+    const blames = function (card) { return /Not shown|your current filters/.test(card.notes); };
+    t.check('a match\'s card keeps its score and reasons when their own settings would keep them out of your deck, and blames nobody',
+      asSeeded.ring && asSeeded.reasons > 0 &&
+        [hePaused, heNarrowed].every(function (card) {
+          return card.ring && card.reasons === asSeeded.reasons && !blames(card);
+        }),
+      JSON.stringify({ paused: hePaused, narrowed: heNarrowed, seeded: asSeeded }));
+    t.check('and names your filters only when they are what changed, without "Not shown" on a card that is shown',
+      [iNarrowed, iCloser].every(function (card) {
+        return card.ring && card.reasons > 0 &&
+          /your current filters would no longer put them in your deck/.test(card.notes) && !/Not shown/.test(card.notes);
+      }),
+      JSON.stringify({ distance: iCloser, age: iNarrowed }));
+
     // 2. A stream that is merely SLOW — here, a browser that says it is offline, which
     // takes the same path without a twelve-second wait. The subscription is alive and
     // Firestore reconnects on its own, so the handle is KEPT: releasing it would have

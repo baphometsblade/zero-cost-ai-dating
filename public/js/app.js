@@ -337,7 +337,12 @@
 
   /**
    * Update the nav counters. Unread messages land on Matches; likes waiting
-   * for an answer land on Discover, because that is where you act on them.
+   * for an answer land on Discover, because that is where you answer them.
+   * The likes count is everyone waiting, with block lists the only filter: in
+   * firebase mode it is kept without reading any liker's profile, so it has
+   * nothing to apply the deck's filters to, and the demo adapter counts the
+   * same way. So it includes likers the deck will not show; the who-liked-you
+   * panel on the matches page lists the same people and says which they are.
    * @param {{matches?:number, unread?:number, likes?:number, dashboard?:number}} counts
    * @returns {{matches:number, dashboard:number}} the counts now displayed
    */

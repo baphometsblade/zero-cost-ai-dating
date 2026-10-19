@@ -538,6 +538,27 @@ module.exports = {
         inThread.id === 'chat-input', JSON.stringify(inThread.id));
     }
 
+    // The new-matches strip opens the same conversations as the rows, and was a
+    // bare link: Enter on it loaded the whole page again, which then took the
+    // `?m=` it arrived with for a link somebody followed and left focus on
+    // <body>. The marker is set on this document, so it survives only a pane
+    // swap; a reload starts a document without it.
+    await page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#new-matches .new-match');
+    await page.evaluate(function () { window.__zcStripDocument = true; });
+    await page.locator('#new-matches .new-match').first().focus();
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('#chat-input', { state: 'visible' });
+    const fromStrip = await page.evaluate(function () {
+      const node = document.activeElement;
+      return {
+        sameDocument: window.__zcStripDocument === true,
+        focus: !node || node === document.body ? 'body' : (node.id ? '#' + node.id : node.tagName.toLowerCase())
+      };
+    });
+    t.check('opening a new match from the strip swaps the pane in place and puts focus on the composer',
+      fromStrip.sameDocument && fromStrip.focus === '#chat-input', JSON.stringify(fromStrip));
+
     /* ---- focus is never scrolled under the header or the tab bar ---- */
 
     // The header is sticky and the phone's tab bar is fixed, and both are

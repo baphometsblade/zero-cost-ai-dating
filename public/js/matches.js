@@ -274,13 +274,34 @@
      ------------------------------------------------------------------------ */
 
   /**
+   * Make a link to a conversation swap the panes instead of reloading, but
+   * leave its href intact for middle-click, bookmarks and no-JS crawlers.
+   * Shared by the rows and the new-matches strip: the strip was a bare link,
+   * so a tap on it loaded the whole page again — the boot, the list
+   * subscription and the likes panel all over — and the page it loaded took
+   * the `?m=` it arrived with for a link somebody followed, so focus was left
+   * on <body> instead of being handed to the conversation.
+   * @param {HTMLElement} link the <a> to wire
+   * @param {string} matchId the match it opens
+   * @returns {HTMLElement} the same link
+   */
+  function opensInPlace(link, matchId) {
+    link.addEventListener('click', function (event) {
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+      event.preventDefault();
+      openMatch(matchId, true);
+    });
+    return link;
+  }
+
+  /**
    * One entry in the horizontally scrolling "new matches" strip.
    * @param {Object} match a MatchView with no messages yet
    * @returns {HTMLElement}
    */
   function buildNewMatch(match) {
     const name = nameOf(match.other);
-    return el('a', {
+    return opensInPlace(el('a', {
       class: 'new-match',
       dataset: { matchId: match.matchId },
       attrs: {
@@ -293,7 +314,7 @@
         attrs: { src: ZC.util.photoOf(match.other), alt: '', width: '64', height: '64', decoding: 'async' }
       }),
       el('span', { text: shortNameOf(match.other) })
-    ]);
+    ]), match.matchId);
   }
 
   /**
@@ -350,14 +371,7 @@
     ]);
     if (state.active && state.active.matchId === match.matchId) row.setAttribute('aria-current', 'true');
 
-    // Intercept the click so the pane swaps instead of reloading, but leave
-    // the href intact for middle-click, bookmarks and no-JS crawlers.
-    row.addEventListener('click', function (event) {
-      if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
-      event.preventDefault();
-      openMatch(match.matchId, true);
-    });
-    return el('li', {}, [row]);
+    return el('li', {}, [opensInPlace(row, match.matchId)]);
   }
 
   /**
@@ -459,8 +473,74 @@
   }
 
   /**
-   * The Premium view: real faces, real names, and the one action that helps —
-   * going back to the deck, where they are waiting.
+   * A copy of a UserDoc with the Discover filters it sets opened up: shown in
+   * Discover, open to every gender and every age, and — unless `keepDistance`
+   * — with no distance limit. The engine names only the first hard filter that
+   * fails, never whose setting it was, so this is how a caller asks: score
+   * again with one side's filters opened, and see whether it still fails.
+   * @param {Object} doc a UserDoc
+   * @param {boolean} [keepDistance] leave the distance limit as it is
+   * @returns {Object} a shallow copy with its own `preferences`
+   */
+  function withoutFilters(doc, keepDistance) {
+    const opened = { discoverable: true, interestedIn: [], ageMin: null, ageMax: null };
+    if (!keepDistance) opened.maxDistanceKm = null;
+    const copy = Object.assign({}, doc);
+    copy.preferences = Object.assign({}, doc && doc.preferences, opened);
+    return copy;
+  }
+
+  /**
+   * Where a waiting liker stands with this account's deck: 'deck' when the
+   * deck will show them, 'yours' when this account's own filters are all that
+   * keep them out, and 'theirs' when they would stay out whatever those
+   * filters said — their own filters, a paused Discover, an unfinished profile.
+   *
+   * The store lists everyone waiting on an answer and applies only block
+   * lists; the deck also drops whoever fails one of the engine's hard filters.
+   * So this asks the engine the deck ranks with, of the documents the panel
+   * already holds: no read is spent finding out.
+   * @param {Object} doc a liker's UserDoc
+   * @returns {string} 'deck', 'yours' or 'theirs'
+   */
+  function deckStanding(doc) {
+    if (!ZC.matching || typeof ZC.matching.scoreCandidate !== 'function') return 'deck';
+    if (!ZC.matching.scoreCandidate(state.me, doc).hardFail) return 'deck';
+    return ZC.matching.scoreCandidate(withoutFilters(state.me), doc).hardFail ? 'theirs' : 'yours';
+  }
+
+  /**
+   * One strip of likers' faces. Each is a link to where answering them
+   * happens, or not a link at all when nothing this account can do would.
+   * @param {Object[]} likes UserDocs
+   * @param {string|null} href where a tap goes, or null for no link
+   * @param {string} says what follows the name in each link's accessible name
+   * @returns {HTMLElement}
+   */
+  function likerStrip(likes, href, says) {
+    return el('div', { class: 'new-matches' }, likes.map(function (doc) {
+      const face = [
+        el('img', {
+          class: 'new-match-avatar',
+          attrs: { src: ZC.util.photoOf(doc), alt: '', width: '64', height: '64', decoding: 'async' }
+        }),
+        el('span', { text: shortNameOf(doc) })
+      ];
+      return href
+        ? el('a', { class: 'new-match', attrs: { href: href, 'aria-label': nameOf(doc) + says } }, face)
+        : el('span', { class: 'new-match' }, face);
+    }));
+  }
+
+  /**
+   * The Premium view: real faces and real names, sorted by what will answer
+   * them. The ones the deck will show go to Discover. This used to send every
+   * one of them there, beside "liked you and are still in your deck", when the
+   * deck had already dropped whoever its filters failed: at a 50 km limit, five
+   * of the nine seeded likers, who then sat in this panel and the nav badge
+   * with a link to a deck that was never going to show them. The rest are
+   * listed apart, with what would bring them back when there is anything, so
+   * the panel still counts everyone the badge does.
    * @param {Object[]} likes UserDocs who liked me
    * @returns {Node[]}
    */
@@ -468,24 +548,30 @@
     if (!likes.length) {
       return [el('p', { class: 'text-muted', text: 'Nobody is waiting on an answer right now. New likes will show up here.' })];
     }
-    const strip = el('div', { class: 'new-matches' }, likes.map(function (doc) {
-      return el('a', {
-        class: 'new-match',
-        attrs: { href: 'dashboard.html', 'aria-label': nameOf(doc) + ' liked you. Open Discover to answer.' }
-      }, [
-        el('img', {
-          class: 'new-match-avatar',
-          attrs: { src: ZC.util.photoOf(doc), alt: '', width: '64', height: '64', decoding: 'async' }
-        }),
-        el('span', { text: shortNameOf(doc) })
-      ]);
-    }));
-    return [
-      strip,
-      el('p', { class: 'field-hint', text: likes.length === 1
+    const by = { deck: [], yours: [], theirs: [] };
+    likes.forEach(function (doc) { by[deckStanding(doc)].push(doc); });
+    const out = [];
+    if (by.deck.length) {
+      out.push(likerStrip(by.deck, 'dashboard.html', ' liked you. Open Discover to answer.'));
+      out.push(el('p', { class: 'field-hint', text: by.deck.length === 1
         ? 'One person liked you and is still in your deck. Like them back and the conversation opens straight away.'
-        : likes.length + ' people liked you and are still in your deck. Like them back and the conversation opens straight away.' })
-    ];
+        : by.deck.length + ' people liked you and are still in your deck. Like them back and the conversation opens straight away.' }));
+    }
+    if (by.yours.length) {
+      out.push(likerStrip(by.yours, 'settings.html', ' liked you but is outside your current filters. Open Settings to widen them.'));
+      out.push(el('p', { class: 'field-hint', text: (by.yours.length === 1
+        ? 'One person liked you but is'
+        : by.yours.length + ' people liked you but are') +
+        ' outside your current filters, so your deck will not show them. Widen your filters in Settings to answer.' }));
+    }
+    if (by.theirs.length) {
+      out.push(likerStrip(by.theirs, null, ''));
+      out.push(el('p', { class: 'field-hint', text: (by.theirs.length === 1
+        ? 'One person liked you but is'
+        : by.theirs.length + ' people liked you but are') +
+        ' not in your deck right now, and widening your filters alone would not bring them back.' }));
+    }
+    return out;
   }
 
   /**
@@ -499,7 +585,7 @@
     if (!count) {
       return [
         el('p', { class: 'text-muted', text: 'Nobody is waiting on an answer right now.' }),
-        el('p', { class: 'field-hint', text: 'Premium names the people who liked you before you reach them in the deck. The count above is accurate either way.' })
+        el('p', { class: 'field-hint', text: 'Premium names the people who liked you, including any your deck cannot show. The count above is accurate either way.' })
       ];
     }
     const faces = [];
@@ -525,7 +611,7 @@
         }),
         el('p', {
           class: 'field-hint',
-          text: 'Those faces are placeholders, not blurred photos — free accounts never receive the real ones. Premium reveals who they are; you can also just keep swiping and find them in the deck.'
+          text: 'Those faces are placeholders, not blurred photos — free accounts never receive the real ones. Premium reveals who they are. Keep swiping and you may meet some of them in the deck, but only the ones your filters, and theirs, still allow.'
         }),
         el('a', { class: 'btn btn-primary', attrs: { href: 'subscription.html' }, text: 'See what Premium changes' })
       ])
@@ -1286,15 +1372,33 @@
     const name = nameOf(other);
     const age = ageOf(other);
 
+    // Scored as the deck scores. When one of the deck's hard filters fails,
+    // they are matched all the same, so the card is scored again with those
+    // filters set aside: the engine stops at the first that fails and returns
+    // no score or reasons at all. The distance limits are kept unless distance
+    // is what fails, because they also shape the distance term: on the demo
+    // seed, with Devin paused, his card keeps the 58.8% it has unpaused, and
+    // would read 59% with the limits opened too. The viewer's own filters are
+    // named only when they are a cause. This used to print the engine's
+    // "Not shown — …" on a card that is being shown, and blame "your current
+    // filters" for a change only the other person had made: pausing Discover,
+    // which Settings promises leaves existing matches where they are, or
+    // narrowing their own age range.
     let result = null;
+    let yoursToo = false;
     try {
-      result = ZC.matching && typeof ZC.matching.scoreCandidate === 'function'
-        ? ZC.matching.scoreCandidate(state.me, other, {
-          corpus: ensureCorpus(),
-          adaptive: adaptiveRanking(),
-          includeHardFails: true
-        })
-        : null;
+      if (ZC.matching && typeof ZC.matching.scoreCandidate === 'function') {
+        const opts = { corpus: ensureCorpus(), adaptive: adaptiveRanking() };
+        result = ZC.matching.scoreCandidate(state.me, other, opts);
+        if (result.hardFail) {
+          const mine = ZC.matching.scoreCandidate(state.me, withoutFilters(other), opts).hardFail;
+          yoursToo = mine === 'gender' || mine === 'age' || mine === 'distance';
+          result = ZC.matching.scoreCandidate(withoutFilters(state.me, true), withoutFilters(other, true), opts);
+          if (result.hardFail === 'distance') {
+            result = ZC.matching.scoreCandidate(withoutFilters(state.me), withoutFilters(other), opts);
+          }
+        }
+      }
     } catch (err) {
       console.warn('[zc] Could not score this profile:', err);
     }
@@ -1359,10 +1463,10 @@
         ]);
       })));
     }
-    if (result && typeof ZC.matching.explain === 'function') {
+    if (result && !result.hardFail && typeof ZC.matching.explain === 'function') {
       parts.push(el('p', { class: 'text-muted', text: ZC.matching.explain(result) }));
     }
-    if (result && result.hardFail) {
+    if (yoursToo) {
       parts.push(el('p', {
         class: 'field-hint',
         text: 'You are already matched, so this stays open — but your current filters would no longer put them in your deck.'
