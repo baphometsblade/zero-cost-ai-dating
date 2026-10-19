@@ -538,6 +538,93 @@ module.exports = {
         inThread.id === 'chat-input', JSON.stringify(inThread.id));
     }
 
+    /* ---- focus is never scrolled under the header or the tab bar ---- */
+
+    // The header is sticky and the phone's tab bar is fixed, and both are
+    // translucent and blurred. When Tab or Shift+Tab moves focus to a control
+    // off screen, the browser scrolls it flush to the edge of the viewport —
+    // which is where the bar is — unless the page says how much of that edge
+    // is taken. Nothing did, and the focused control landed entirely under a
+    // bar, a smear behind its icons (WCAG 2.2, 2.4.11 Focus Not Obscured).
+    // Measured by this walk: on a phone, 16 of the 184 stops it makes — 7 of
+    // them under the tab bar going forwards, 9 under the header going
+    // backwards — and on a desktop, 7 of the profile's under the header going
+    // backwards.
+    //
+    // Under reduced motion, so each scroll lands before the press returns and
+    // is read without waiting for it: html's smooth scrolling ends where the
+    // instant one does, but only later. Both pages are walked both ways,
+    // because the header hides what Shift+Tab reaches and the tab bar what
+    // Tab reaches.
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    const buried = [];
+    let walked = 0;
+    for (const name of ['settings.html', 'profile.html']) {
+      for (const key of ['Tab', 'Shift+Tab']) {
+        await page.goto(ctx.base + '/' + name, { waitUntil: 'domcontentloaded' });
+        await page.waitForSelector(name === 'profile.html' ? '#profile-main:not(.hidden) #interest-groups input' : '#theme-group');
+        await page.waitForSelector('[data-zc-nav] .nav-links', { state: 'attached' });
+        // Forwards starts from the top of the page; backwards from the last
+        // control in <main>, with the page scrolled to its end.
+        await page.evaluate(function (backwards) {
+          if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+          if (!backwards) {
+            window.scrollTo(0, 0);
+            return;
+          }
+          window.scrollTo(0, document.scrollingElement.scrollHeight);
+          const controls = Array.prototype.filter.call(
+            document.querySelectorAll('main a[href], main button:not([disabled]), main input:not([disabled]), main select, main textarea'),
+            function (node) { return node.getClientRects().length > 0; });
+          controls[controls.length - 1].focus();
+        }, key === 'Shift+Tab');
+        let stops = 0;
+        for (let i = 0; i < 160; i += 1) {
+          await page.keyboard.press(key);
+          const stop = await page.evaluate(function () {
+            const node = document.activeElement;
+            const main = document.querySelector('main');
+            if (!node || !main || !main.contains(node)) return null;
+            // A chip's or a switch's input is hidden inside its label, and
+            // the label is what a person sees take focus.
+            const box = (node.tagName === 'INPUT' && node.closest('label')) || node;
+            const rect = box.getBoundingClientRect();
+            const under = [['header', '[data-zc-nav]'], ['tab bar', '[data-zc-tabbar]']].filter(function (bar) {
+              const element = document.querySelector(bar[1]);
+              if (!element || getComputedStyle(element).display === 'none') return false;
+              const edge = element.getBoundingClientRect();
+              return rect.top >= edge.top - 0.5 && rect.bottom <= edge.bottom + 0.5;
+            }).map(function (bar) { return bar[0]; });
+            return {
+              label: (node.getAttribute('aria-label') || (box.textContent || '').trim() || node.name || node.id || node.tagName)
+                .replace(/\s+/g, ' ').slice(0, 30),
+              top: Math.round(rect.top),
+              bottom: Math.round(rect.bottom),
+              under: under[0] || ''
+            };
+          });
+          // Out of <main>: through the header or the tab bar on the way in,
+          // or past the last control on the way out.
+          if (!stop) {
+            if (stops > 0) break;
+            continue;
+          }
+          stops += 1;
+          if (stop.under) {
+            buried.push(name + ' ' + key + ': "' + stop.label + '" at y ' + stop.top + '..' + stop.bottom + ' under the ' + stop.under);
+          }
+        }
+        walked += stops;
+      }
+    }
+    await page.emulateMedia({ reducedMotion: null });
+    // Walked both ways, settings and the profile make 184 stops in <main>; a
+    // walk that found far fewer stopped early and would pass by looking at
+    // nothing.
+    t.check('no control the keyboard reaches is scrolled to where the header or the tab bar covers it',
+      walked >= 150 && buried.length === 0,
+      walked + ' stops walked, ' + buried.length + ' covered' + (buried.length ? ': ' + buried.slice(0, 3).join('; ') : ''));
+
     /* ---- the daily-limit banner: said once, not once a second ---- */
 
     // Last, because it moves the clock, and the clock stays moved for the

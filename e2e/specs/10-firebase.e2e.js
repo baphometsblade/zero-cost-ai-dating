@@ -187,6 +187,34 @@ function drain(errors, resource, status) {
   return removed;
 }
 
+/**
+ * Record every shape the shared header takes while a page loads, as an init
+ * script: it runs before any page script, so it sees the header app.js mounts
+ * first and every one that replaces it. A shape is whether the header offers
+ * the guest's "Sign in", whether it carries the signed-in links, and whether
+ * the tab bar is on the page. The observer reads the header after every
+ * batch of changes, and a batch always ends before the next frame is drawn,
+ * so every header that is painted is recorded, and some that never are:
+ * stricter than what a person could see, never looser.
+ * @returns {void}
+ */
+function recordHeaders() {
+  window.__zcHeaders = [];
+  let last = '';
+  new MutationObserver(function () {
+    const nav = document.querySelector('[data-zc-nav]');
+    if (!nav) return;
+    const shape = [
+      nav.querySelector('a[href$="auth.html"]') ? 'sign-in' : '',
+      nav.querySelector('.nav-links') ? 'links' : '',
+      document.querySelector('[data-zc-tabbar]') ? 'tab bar' : ''
+    ].filter(Boolean).join(' + ') || 'brand only';
+    if (shape === last) return;
+    last = shape;
+    window.__zcHeaders.push(shape);
+  }).observe(document, { childList: true, subtree: true });
+}
+
 /* --------------------------------------------------------------------------
    3. Fixtures
    -------------------------------------------------------------------------- */
@@ -466,7 +494,38 @@ module.exports = {
         swipeAgain ? swipeAgain.from + ' -> ' + swipeAgain.to : 'top card was ' + alsoTop);
 
       /* ---- out, and back in ---- */
-      await page.goto(base + '/settings.html', { waitUntil: 'domcontentloaded' });
+      // Every header this page shows on the way in is recorded, for the check
+      // after the auth gate below. The recorder stays for this page's later
+      // loads too, and is passive, so it changes nothing it watches.
+      await page.addInitScript(recordHeaders);
+      // And Firestore is held at the network until the first header is
+      // recorded. A restored session is only known once users/{uid} has been
+      // read, and app.js mounts the header when the document is parsed, which
+      // is usually before that read is back, but not always: a read that wins
+      // the race leaves nothing to see, and the check would pass on a page
+      // that shows the guest's header every time the read loses it. Held, the
+      // read cannot win, so the first mount is always made with the session
+      // still unknown. These are the two paths the proxy above sends to
+      // Firestore. A held request is let go with fallback(), not continue():
+      // unroute() below sends on any request it finds still held by itself,
+      // and a continue() that arrives after that throws "Route is already
+      // handled!" out of the handler, which stopped the whole run; the
+      // continue a fallback ends in is Playwright's own, which expects that.
+      const FIRESTORE_CALL = function (url) {
+        return url.pathname.indexOf('/v1/') === 0 || url.pathname.indexOf('/google.firestore.') === 0;
+      };
+      let releaseFirestore = null;
+      const firestoreHeld = new Promise(function (resolve) { releaseFirestore = resolve; });
+      await page.route(FIRESTORE_CALL, async function (route) { await firestoreHeld; await route.fallback(); });
+      try {
+        await page.goto(base + '/settings.html', { waitUntil: 'domcontentloaded' });
+        await page.waitForFunction(function () {
+          return !!window.__zcHeaders && window.__zcHeaders.length > 0;
+        }, null, { timeout: 10000 }).catch(function () {});
+      } finally {
+        releaseFirestore();
+        await page.unroute(FIRESTORE_CALL);
+      }
 
       // `main [data-signout]`, scoped, and the scope is the whole point. There are TWO
       // sign-out controls on this page: the one in the settings card, and the one
@@ -493,6 +552,26 @@ module.exports = {
         settled ? 'the sign-out hint is the one firebase mode writes'
           : 'the hint was never rewritten — requireAuth had not settled, or the page ' +
             'redirected out from under the click');
+
+      // Firebase restores a session asynchronously — the persisted credential,
+      // then users/{uid} — and app.js mounts the header as soon as the
+      // document is parsed, usually before the restore is over and, with
+      // Firestore held above, always. It drew the guest's header then: a "Sign
+      // in" button and no tab bar on a signed-in visitor's Settings page, for
+      // as long as the restore took, and a click on it went to the sign-in
+      // page, which sends a signed-in visitor on to the deck. Demo mode never
+      // showed it, because its session is known before the header is built.
+      // Nothing of the guest's may show until the auth state is known, and
+      // the signed-in header has to arrive.
+      await page.waitForFunction(function () {
+        return !!document.querySelector('[data-zc-tabbar]');
+      }, null, { timeout: 10000 }).catch(function () {});
+      const shapes = await page.evaluate(function () { return window.__zcHeaders || []; });
+      t.check('a signed-in visitor is never shown the guest header while the session is restored',
+        shapes.length > 0 &&
+          shapes.every(function (shape) { return shape.indexOf('sign-in') === -1; }) &&
+          shapes[shapes.length - 1] === 'links + tab bar',
+        shapes.join(' → ') || 'no header was ever mounted');
 
       await page.click('main [data-signout]');
       await page.waitForURL(h.pageUrl('index'));

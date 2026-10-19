@@ -1,5 +1,8 @@
 /* The deck has to fit the phone it was designed for. It stopped fitting once
-   already, and nothing in the unit suites can see a layout. */
+   already, and nothing in the unit suites can see a layout. The signed-in
+   pages are measured too: none may scroll sideways, jump when the header
+   mounts or shift by 0.1 or more as it loads, and the first paint has to be
+   in the theme chosen in Settings. */
 'use strict';
 
 /**
@@ -181,7 +184,7 @@ async function mainShifts(page, base, names) {
 }
 
 module.exports = {
-  title: 'Deck fits the viewport',
+  title: 'Layout: the deck fits, pages hold still, and the first paint is in the chosen theme',
   viewports: ['mobile', 'desktop'],
 
   async run(t, page, ctx) {
@@ -251,5 +254,68 @@ module.exports = {
     // is held to the viewport's width now, at both sizes.
     t.check('no signed-in page scrolls sideways', pages.wide.length === 0,
       pages.wide.length ? 'wider than the viewport: ' + pages.wide.join(', ') : 'all within the viewport');
+
+    // A theme chosen in Settings has to be the one the first paint shows. It
+    // was applied by app.js, the last of the shared scripts at the end of the
+    // body, and the browser paints the parsed body as soon as the stylesheets
+    // are in, so every load first showed the OS theme. Measured on settings,
+    // with dark chosen on a light OS: a first paint in light at 52ms, dark at
+    // 123ms, and with each script a 100ms round trip away, light until 882ms.
+    // Here app.js is held until that first paint has happened, which makes
+    // the slow script certain instead of likely, and the page is read at that
+    // moment. A context of its own, with the service worker kept out, so the
+    // hold is what the page gets.
+    const solo = await h.openSession(ctx.session.context.browser(), ctx.viewport, { serviceWorkers: 'block' });
+    try {
+      await h.signIn(solo.page, ctx.base);
+      const painted = [];
+      for (const pair of [['dark', 'light'], ['light', 'dark']]) {
+        const chosen = pair[0];
+        await solo.page.emulateMedia({ colorScheme: pair[1] });
+        await solo.page.goto(ctx.base + '/settings.html', { waitUntil: 'domcontentloaded' });
+        await solo.page.click('label.chip[for="theme-' + chosen + '"]');
+        await solo.page.waitForFunction(function (value) {
+          return document.documentElement.getAttribute('data-theme') === value;
+        }, chosen, { timeout: 5000 });
+
+        const held = [];
+        const hold = function (route) { held.push(route); };
+        await solo.context.route('**/js/app.js', hold);
+        let seen = null;
+        try {
+          await solo.page.goto(ctx.base + '/settings.html', { waitUntil: 'commit' });
+          const paintedFirst = await solo.page.waitForFunction(function () {
+            return performance.getEntriesByName('first-contentful-paint').length > 0;
+          }, null, { timeout: 10000 }).then(function () { return true; }, function () { return false; });
+          seen = await solo.page.evaluate(function () {
+            const rgb = (getComputedStyle(document.body).backgroundColor.match(/\d+/g) || []).map(Number);
+            return {
+              appRan: !!(window.ZC && window.ZC.app),
+              theme: document.documentElement.getAttribute('data-theme'),
+              dark: rgb.length >= 3 && (rgb[0] + rgb[1] + rgb[2]) / 3 < 128
+            };
+          });
+          seen.paintedFirst = paintedFirst;
+        } finally {
+          await solo.context.unroute('**/js/app.js', hold);
+          await Promise.all(held.map(function (route) { return route.continue(); }));
+        }
+        await solo.page.waitForFunction(function () { return !!(window.ZC && window.ZC.app); });
+        // Painted before app.js ran, or this read a page app.js had already
+        // themed and proved nothing.
+        painted.push({
+          ok: seen.paintedFirst && !seen.appRan && seen.dark === (chosen === 'dark'),
+          said: chosen + ' chosen on a ' + pair[1] + ' OS: first paint ' + (seen.dark ? 'dark' : 'light') +
+            ' (data-theme=' + seen.theme + (seen.paintedFirst ? '' : ', no paint seen') +
+            (seen.appRan ? ', app.js had run' : '') + ')'
+        });
+      }
+      t.check('the first paint is already in the theme chosen in Settings, whichever the OS prefers',
+        painted.every(function (one) { return one.ok; }),
+        painted.map(function (one) { return one.said; }).join('; '));
+      t.check('and the pages that showed it log no errors', solo.errors.length === 0, solo.errors.slice(0, 3).join(' | '));
+    } finally {
+      await solo.context.close();
+    }
   }
 };

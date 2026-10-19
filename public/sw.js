@@ -47,6 +47,7 @@ const CORE = [
   'manifest.webmanifest',
   'css/style.css',
   'css/components.css',
+  'js/theme-boot.js',
   'js/firebase-config.js',
   'js/utils.js',
   'js/seed-data.js',

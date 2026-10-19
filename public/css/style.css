@@ -750,6 +750,25 @@ h3 {
   padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px) + var(--space-4));
 }
 
+/* And keyboard focus is kept out from under both bars. When Tab moves focus
+   to a control off screen, the browser scrolls it flush to the viewport's
+   edge unless the scroller says how much of that edge is covered, and nothing
+   did: of the 184 stops e2e/specs/12-accessibility.e2e.js walks on settings
+   and the profile, 16 landed entirely under the tab bar or the header on a
+   phone, and 7 under the header on a desktop. Each padding is its bar plus a
+   gap. The tab bar is only on screen at phone widths and only once someone is
+   signed in; a browser without :has() drops that half and keeps the old
+   behaviour. */
+html {
+  scroll-padding-top: calc(var(--nav-h) + 1px + var(--space-3));
+}
+
+@media (max-width: 720px) {
+  html:has(> body.has-tabbar) {
+    scroll-padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px) + var(--space-3));
+  }
+}
+
 /* --------------------------------------------------------------------------
    6. Buttons
    -------------------------------------------------------------------------- */
