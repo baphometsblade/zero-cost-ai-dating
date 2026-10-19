@@ -16,11 +16,13 @@ module.exports = {
     const OTHER = 'other';
     const THIRD = 'third';
     const FOURTH = 'fourth';   // never seeded, so writes to it are creates
+    const PASSER = 'passer';   // passed on ME
 
     await seed(async function (admin) {
       const db = admin.firestore();
       await db.doc('swipes/' + OTHER + '_' + ME).set(h.swipeDoc(OTHER, ME, 'like'));
       await db.doc('swipes/' + OTHER + '_' + THIRD).set(h.swipeDoc(OTHER, THIRD, 'like'));
+      await db.doc('swipes/' + PASSER + '_' + ME).set(h.swipeDoc(PASSER, ME, 'pass'));
     });
 
     /* ---- create ---- */
@@ -81,30 +83,46 @@ module.exports = {
       await ok(assertFails(anon().collection('swipes').get())));
 
     t.check('nor scrape it with the same constraint a signed-in user may use',
-      await ok(assertFails(anon().collection('swipes').where('to', '==', ME).get())));
+      await ok(assertFails(anon().collection('swipes').where('to', '==', ME)
+        .where('action', 'in', ['like', 'super']).get())));
 
     /* ---- read: your own, in either direction ---- */
     t.check('you can read a swipe you made',
       await ok(assertSucceeds(as(ME).doc('swipes/' + ME + '_' + THIRD).get())));
 
-    t.check('you can read a swipe aimed at you (match detection needs this)',
+    t.check('you can read a like aimed at you (match detection needs this)',
       await ok(assertSucceeds(as(ME).doc('swipes/' + OTHER + '_' + ME).get())));
+
+    // Neither reason for reading inbound swipes needs a pass: match detection
+    // asks whether the other person LIKED you, and the who-liked-you list is
+    // likes. A pass is the one decision somebody makes about you that the app
+    // never shows you, and one query used to list every person who had passed
+    // on you, with the time they did it.
+    t.check('but not a pass aimed at you',
+      await ok(assertFails(as(ME).doc('swipes/' + PASSER + '_' + ME).get())));
 
     t.check('you cannot read a swipe between two other people',
       await ok(assertFails(as(ME).doc('swipes/' + OTHER + '_' + THIRD).get())));
 
-    // The absent case, which two shipped paths depend on and neither can work
-    // around. Every first swipe reads its own not-yet-written document and the
-    // usually-absent reciprocal one; and `getLikesReceived` asks, once per person
-    // who liked you, whether `swipes/{me}_{them}` exists — as does the live
-    // `listenLikesReceived` behind the badge, on every sender it has not seen
-    // before. (This comment said "on a timer, every twenty seconds" until the
-    // timer was replaced by a snapshot listener and the sentence was not.)
-    // Dropping `resource == null` from the read rule
-    // looks like tightening it and would deny a read of a document that holds
-    // nothing, breaking match detection and the who-liked-you badge together.
+    // The absent case, which shipped paths depend on and cannot work around.
+    // Every first swipe reads its own not-yet-written document; and
+    // `getLikesReceived` asks, once per person who liked you, whether
+    // `swipes/{me}_{them}` exists — as does the live `listenLikesReceived` behind
+    // the badge, on every sender it has not seen before. (This comment said "on a
+    // timer, every twenty seconds" until the timer was replaced by a snapshot
+    // listener and the sentence was not.) Dropping `resource == null` from the
+    // read rule looks like tightening it and would deny a read of a document that
+    // holds nothing, breaking the deck and the who-liked-you badge together.
     t.check('a signed-in user can probe their own swipe document before it exists',
       await ok(assertSucceeds(as(ME).doc('swipes/' + ME + '_unswiped-so-far').get())));
+
+    // The reciprocal read is the one miss that is refused, and it has to be. With a
+    // pass refused and a miss answered, the two answers would differ and the
+    // refusal would BE the pass. So a swipe aimed at you that is a pass and one
+    // that does not exist are refused alike, and the store reads either refusal
+    // as what both mean to it: they have not liked you.
+    t.check('nor a missing swipe aimed at you, so a refusal does not single out a pass',
+      await ok(assertFails(as(ME).doc('swipes/' + FOURTH + '_' + ME).get())));
 
     // The other half of that, and the reason the miss is allowed by the id
     // rather than unconditionally. `resource == null` on its own answers every
@@ -112,16 +130,27 @@ module.exports = {
     // the document is not there, a denial means it is there and is not yours.
     // Probing `other_fourth` and `other_third` in turn therefore reports which
     // of them `other` has swiped on — without reading a byte of either — and
-    // uids are enumerable, because discovery/{uid} is world-readable to signed-in
-    // users and its document id is the uid.
+    // uids are enumerable, because any signed-in user can list every discoverable
+    // projection in discovery/{uid}, and its document id is the uid.
     t.check('but not a missing swipe between two other people, which would tell them it is missing',
       await ok(assertFails(as(ME).doc('swipes/' + OTHER + '_' + FOURTH).get())));
 
     t.check('a query constrained to your own swipes is allowed',
       await ok(assertSucceeds(as(ME).collection('swipes').where('from', '==', ME).get())));
 
+    // The query `likeSenders` and the live badge make. It names the actions, so
+    // every document it can return is one the read rule allows.
     t.check('a query for likes aimed at you is allowed ("who liked you")',
-      await ok(assertSucceeds(as(ME).collection('swipes').where('to', '==', ME).get())));
+      await ok(assertSucceeds(as(ME).collection('swipes').where('to', '==', ME)
+        .where('action', 'in', ['like', 'super']).get())));
+
+    t.check('a query for the passes aimed at you is refused',
+      await ok(assertFails(as(ME).collection('swipes').where('to', '==', ME)
+        .where('action', '==', 'pass').get())));
+
+    // Without the action it could return a pass, and the rules are not a filter.
+    t.check('and so is one for everything aimed at you',
+      await ok(assertFails(as(ME).collection('swipes').where('to', '==', ME).get())));
 
     t.check('an unconstrained scan of everyone\'s swipes is refused',
       await ok(assertFails(as(ME).collection('swipes').get())));
@@ -152,8 +181,9 @@ module.exports = {
     t.check('you can delete your own swipe again once it is gone (a second rewind)',
       await ok(assertSucceeds(as(ME).doc('swipes/' + ME + '_' + THIRD).delete())));
 
-    // ...allowed by the id, exactly as the read of a miss is, so a stranger gets the
-    // same refusal whether or not the document is there and learns nothing from it.
+    // ...allowed by the id: either half of the pair may delete a miss, as either may
+    // delete the swipe while it is there, so a stranger gets the same refusal whether
+    // or not the document is there and learns nothing from it.
     t.check('but you cannot delete a missing swipe between two other people',
       await ok(assertFails(as(ME).doc('swipes/' + OTHER + '_' + FOURTH).delete())));
 

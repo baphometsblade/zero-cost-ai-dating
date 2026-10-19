@@ -281,6 +281,19 @@
     near(I.activityScore('2026-02-22T12:00:00.000Z', NOW), 0.5, 1e-12);
   });
 
+  test('a lastActiveAt more than a day in the future scores as unknown, not as active this instant', function () {
+    // Age was clamped at zero, so a stamp of 9999-12-31 scored 1.000 for as long
+    // as it stood, where a real year of silence scores 0.019. firestore.rules
+    // refuses such a stamp now; this is for the ones already stored, and for any
+    // client that is not the shipped one.
+    assert.equal(I.activityScore('9999-12-31T23:59:59.999Z', NOW), 0.3);
+    assert.equal(I.activityScore('2026-03-02T12:00:01.000Z', NOW), 0.3, 'a day and a second ahead');
+    // A device clock running fast is not an attack, and the rules allow it the
+    // same day of slack, so a stamp inside it still reads as active now.
+    assert.equal(I.activityScore('2026-03-01T18:00:00.000Z', NOW), 1, 'six hours ahead');
+    assert.equal(I.activityScore('2026-03-02T12:00:00.000Z', NOW), 1, 'exactly a day ahead');
+  });
+
   /* ----------------------------------------------------------------------
      Determinism and bounds
      ---------------------------------------------------------------------- */
@@ -996,6 +1009,46 @@
     assert.ok(capped.interestAffinity['tag-69'] > 0.7, 'strongest opinions survive and keep learning');
   });
 
+  test('updateLearning learns only tags its table knows, and forgets any it was holding', function () {
+    // Every card's interests are copied into the swiper's own learning map, and
+    // those interests are another account's to write. A tag named `__x__` made
+    // every later save of that map in the page's session an invalid-argument
+    // (Firestore will not store a field name that begins and ends with two
+    // underscores); five tags of 239 characters filled 1195 of the 1200 key
+    // characters firestore.rules allows the map, and from then on a save that
+    // learned any slug longer than five characters (42 of the 48), or two new tags
+    // at once, was permission-denied, on every page load after. Either way the
+    // deck swallows the failure with a console line.
+    const index = { hiking: { slug: 'hiking' }, cooking: { slug: 'cooking' } };
+    const junk = ['__x__', 'a' + 'y'.repeat(238), 'not-a-tag',
+      // A plain object's prototype answers to this name, so a table read as
+      // `index[slug]` would call it a tag.
+      'constructor'];
+    const card = mkUser('junk', { profile: { interests: ['hiking'].concat(junk) } });
+
+    const learned = M.updateLearning(null, card, 'pass', { tagIndex: index });
+    assert.deepEqual(Object.keys(learned.interestAffinity), ['hiking'], 'only the known tag is learned');
+    assert.equal(learned.passCount, 1, 'and the swipe still counts');
+
+    // A map poisoned before this existed has to heal on its next save rather than
+    // stay stuck: the save replaces the stored map whole, so whatever this returns
+    // is what is kept.
+    const poisoned = { interestAffinity: { hiking: 0.3 }, likeCount: 2, passCount: 5 };
+    junk.forEach(function (tag) { poisoned.interestAffinity[tag] = -0.0525; });
+    const healed = M.updateLearning(poisoned, mkUser('n', { profile: { interests: ['cooking'] } }), 'like',
+      { tagIndex: index });
+    assert.deepEqual(Object.keys(healed.interestAffinity).sort(), ['cooking', 'hiking']);
+    assert.equal(healed.interestAffinity.hiking, 0.3, 'what it already knew is kept as it was');
+    assert.equal(healed.likeCount, 3);
+
+    // A table that holds nothing vouches for nothing, and must not be read as
+    // "nothing is a tag": that would erase the whole map on the next swipe.
+    const kept = M.updateLearning({ interestAffinity: { hiking: 0.3, cooking: -0.2 } },
+      mkUser('e', { profile: { interests: ['coffee'] } }), 'like', { tagIndex: {} });
+    assert.deepEqual(Object.keys(kept.interestAffinity).sort(), ['coffee', 'cooking', 'hiking'],
+      'an empty table erased what the account had learned');
+  });
+
   /* ----------------------------------------------------------------------
      Icebreakers, labels, explanations — §5.6
      ---------------------------------------------------------------------- */
@@ -1133,9 +1186,11 @@
      The bonus itself is tested, in isolation, with tags passed explicitly. What
      nothing tested is the fallback: had `resolveTagIndex` stopped reaching for
      the global table, every real deck would have lost the bonus and this whole
-     suite would have stayed green. LAST in the file on purpose — it publishes
-     `globalThis.ZC`, and `node --test` gives each file its own process, so
-     nothing after it here and nothing in another file can see that.
+     suite would have stayed green. LAST in the file on purpose — these tests
+     publish `globalThis.ZC`, and `node --test` gives each file its own process,
+     so nothing outside this section and nothing in another file can see that.
+     Each one loads seed-data.js itself rather than relying on the one before it
+     to have done so.
      ---------------------------------------------------------------------- */
 
   test('with seed-data.js loaded, as on every page, the engine scores with its tag table unasked', function () {
@@ -1153,5 +1208,30 @@
       'and that table must change the score: ' + ambient.breakdown.interests + ' vs bare ' + bare.breakdown.interests);
     assert.ok(ambient.score >= bare.score, 'a bonus cannot lower the score');
     assert.ok(ambient.breakdown.interests <= 1, 'and the component stays a 0..1 fraction');
+  });
+
+  test('with seed-data.js loaded, the learning map holds vocabulary slugs only, unasked', function () {
+    // The same table, reached the same way, deciding what updateLearning keeps.
+    // This is the deck's own sequence from the report: pass on five cards that
+    // each carry one 239-character tag, then like ordinary profiles. Before, the
+    // map ended at 1195 key characters, and from then on a like that brought any
+    // slug longer than five characters, or two new tags at once, was refused by
+    // `listCharsOk(m.keys(), 1200)` in firestore.rules.
+    require('../public/js/seed-data.js');
+    const table = globalThis.ZC.INTEREST_BY_SLUG;
+    let learning = { interestAffinity: {}, likeCount: 0, passCount: 0 };
+    ['a2', 'a3', 'a4', 'a5', 'a6'].forEach(function (uid) {
+      learning = M.updateLearning(learning,
+        mkUser(uid, { profile: { interests: [uid + '-' + 'y'.repeat(236)] } }), 'pass');
+    });
+    learning = M.updateLearning(learning, mkUser('n1', { profile: { interests: ['yoga', 'cooking'] } }), 'like');
+
+    const keys = Object.keys(learning.interestAffinity);
+    assert.deepEqual(keys.filter(function (slug) { return !Object.prototype.hasOwnProperty.call(table, slug); }), [],
+      'every key must be a slug the editor offers');
+    assert.deepEqual(keys.sort(), ['cooking', 'yoga']);
+    assert.ok(keys.join('').length <= 1200, 'and the map stays inside the bound the rules hold it to');
+    assert.equal(learning.passCount, 5, 'the five passes still count');
+    assert.equal(learning.likeCount, 1);
   });
 })();

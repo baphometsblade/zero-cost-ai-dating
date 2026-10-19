@@ -366,5 +366,151 @@ module.exports = {
       after.reads + ' read(s) against ' + expected + ' when nothing was swiped: the batch ' +
       'carrying all ' + taken.length + ' now bills ' + taken.length + ' rather than its floor ' +
       'of 1, and one more for the empty second page the unfilled deck asked for');
+
+    /* ---- 8. the deck the real rules allow, fallback included ----------- */
+
+    // Everything above runs on this suite's open rules. firestore.rules now lets a
+    // paused projection — "Show me in other people's decks" turned off — be read
+    // only by the accounts that know the person, and the rules are not a filter: a
+    // query that could return one is refused whole. The deck's indexed query names
+    // `discoverable == true` and is allowed. Its fallback, for a project whose
+    // composite index is missing, used to name nothing at all, in two tiers, and
+    // under these rules both would only ever be refused: the deck would fail
+    // exactly when it was meant to degrade. Both paths, as a signed-in account,
+    // against the real ruleset.
+    const viewer = 'deck-real-me';
+    const shown = ['deck-real-a', 'deck-real-b', 'deck-real-c'];
+    const paused = 'deck-real-paused';
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      const db = c.firestore();
+      await k.fs.setDoc(k.fs.doc(db, 'users', viewer), k.h.userDoc(viewer));
+      for (const uid of shown) await k.fs.setDoc(k.fs.doc(db, 'discovery', uid), k.h.discoveryDoc(uid));
+      await k.fs.setDoc(k.fs.doc(db, 'discovery', paused), k.h.discoveryDoc(paused, {
+        preferences: Object.assign({}, k.h.discoveryDoc(paused).preferences, { discoverable: false })
+      }));
+    });
+    // The indexed query refused the way a missing index refuses it, so the
+    // fallback is executed rather than assumed: every attempt, or from the
+    // `from`-th attempt on, for a walk that loses the index part-way.
+    let indexAttempts = 0;
+    let indexRefusals = 0;
+    function withoutIndex(db, from) {
+      indexAttempts = 0;
+      return new Proxy(db, {
+        get: function (obj, prop) {
+          const value = obj[prop];
+          if (prop !== 'collection') return typeof value === 'function' ? value.bind(obj) : value;
+          return function (name) {
+            const col = obj.collection.apply(obj, arguments);
+            if (name !== 'discovery') return col;
+            return new Proxy(col, {
+              get: function (c, p) {
+                const member = c[p];
+                if (p !== 'where') return typeof member === 'function' ? member.bind(c) : member;
+                return function (field) {
+                  if (field === 'profileComplete' && (indexAttempts += 1) >= (from || 1)) {
+                    indexRefusals += 1;
+                    const err = new Error('The query requires an index.');
+                    err.code = 'failed-precondition';
+                    throw err;
+                  }
+                  return member.apply(c, arguments);
+                };
+              }
+            });
+          };
+        }
+      });
+    }
+    const rejected = function (err) { return { rejected: (err && err.code) || String(err) }; };
+    let indexed = null;
+    let degraded = null;
+    try {
+      const signedIn = k.rulesEnv.authenticatedContext(viewer).firestore();
+      k.ctx.ZC.firebase.db = signedIn;
+      indexed = await k.store.listCandidates(viewer, { limit: LIMIT }).catch(rejected);
+      k.ctx.ZC.firebase.db = withoutIndex(signedIn);
+      degraded = await k.store.listCandidates(viewer, { limit: LIMIT }).catch(rejected);
+    } finally {
+      k.ctx.ZC.firebase.db = real;
+    }
+    k.ctx.drainWarnings();
+
+    t.check('under the real rules, the deck loads and leaves out the person who paused',
+      Array.isArray(indexed) && k.same(uidsOf(indexed), shown.slice().sort()),
+      Array.isArray(indexed) ? k.show(uidsOf(indexed)) : k.show(indexed));
+
+    t.check('and so does its fallback when the composite index is missing',
+      indexRefusals > 0 && Array.isArray(degraded) && k.same(uidsOf(degraded), shown.slice().sort()),
+      indexRefusals + ' indexed attempt(s) refused; ' +
+        (Array.isArray(degraded) ? k.show(uidsOf(degraded)) : k.show(degraded)));
+
+    /* ---- 9. the fallback walks the collection, as the indexed deck does - */
+
+    // The fallback above is given one page, and a deck asks for sixty profiles a
+    // page and drops everybody already swiped on. So an account that has swiped
+    // through the first sixty in the fallback's order needs the page after them,
+    // as it does in the indexed walk; a fallback that read only one page handed
+    // it an empty deck while unswiped people were a page further on.
+    //
+    // Seventy more, all newer than the three above and in the reverse of their id
+    // order, so the two walks meet them in different orders: newest first, the
+    // index sees deck-page-069 first; by document, the fallback sees deck-page-000.
+    const walk = [];
+    for (let i = 0; i < 70; i += 1) walk.push('deck-page-' + String(i).padStart(3, '0'));
+    const pager = 'deck-page-me';
+    const switcher = 'deck-switch-me';
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      const db = c.firestore();
+      const batch = k.fs.writeBatch(db);
+      batch.set(k.fs.doc(db, 'users', pager), k.h.userDoc(pager));
+      batch.set(k.fs.doc(db, 'users', switcher), k.h.userDoc(switcher));
+      walk.forEach(function (uid, i) {
+        batch.set(k.fs.doc(db, 'discovery', uid), k.h.discoveryDoc(uid, {
+          lastActiveAt: new Date(Date.UTC(2026, 1, 1) + i * 60000).toISOString()
+        }));
+        // The pager has passed on the fallback's whole first page, 000 to 059.
+        if (i < PAGE) batch.set(k.fs.doc(db, 'swipes', pager + '_' + uid), k.h.swipeDoc(pager, uid, 'pass'));
+        // The switcher has passed on 010 to 064. The index's first page, newest
+        // first, is 069 down to 010, so it leaves the switcher five.
+        if (i >= 10 && i < 65) {
+          batch.set(k.fs.doc(db, 'swipes', switcher + '_' + uid), k.h.swipeDoc(switcher, uid, 'pass'));
+        }
+      });
+      await batch.commit();
+    });
+
+    let paged = null;
+    let switched = null;
+    let switchedAfter = 0;
+    try {
+      k.ctx.ZC.firebase.db = withoutIndex(k.rulesEnv.authenticatedContext(pager).firestore());
+      paged = await k.store.listCandidates(pager, { limit: LIMIT }).catch(rejected);
+      // The index answers the first page and is gone for the second.
+      k.ctx.ZC.firebase.db = withoutIndex(k.rulesEnv.authenticatedContext(switcher).firestore(), 2);
+      switched = await k.store.listCandidates(switcher, { limit: LIMIT }).catch(rejected);
+      switchedAfter = indexAttempts;
+    } finally {
+      k.ctx.ZC.firebase.db = real;
+    }
+    k.ctx.drainWarnings();
+
+    const listed = function (list) {
+      return Array.isArray(list) ? list.length + ': ' + k.show(uidsOf(list)) : k.show(list);
+    };
+
+    t.check('and the fallback pages past a page of people already swiped on',
+      Array.isArray(paged) && k.same(uidsOf(paged), walk.slice(PAGE).concat(shown).sort()),
+      listed(paged));
+
+    // The index's five, the ten its first page never reached, and the three at the
+    // end: each once. Restarting by document is what reaches the ten — a cursor
+    // from the index's order would place the fallback after deck-page-010 and skip
+    // them — and remembering what the index already showed is what keeps its five
+    // from coming round again.
+    t.check('and a walk that loses the index part-way finishes in the fallback, missing and repeating nobody',
+      switchedAfter >= 2 && Array.isArray(switched)
+        && k.same(uidsOf(switched), walk.slice(0, 10).concat(walk.slice(65), shown).sort()),
+      switchedAfter + ' indexed attempt(s); ' + listed(switched));
   }
 };

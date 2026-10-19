@@ -224,5 +224,174 @@ module.exports = {
       !!misdirected && misdirected.rejected === 'permission-denied',
       k.show(misdirected && (misdirected.rejected ? misdirected : { email: misdirected.email }))
     );
+
+    /* ---- two more values the public half is held to more tightly ---------- */
+
+    // firestore.rules holds the projection's interests to the vocabulary and its
+    // lastActiveAt to a toISOString() stamp no later than a day past the server's
+    // clock. The private document is held only to a count, a character total and a
+    // short string, so it can carry values the projection's rules refuse — and the
+    // projection is written in the same transaction as the profile save, so either
+    // one fails the save.
+    const vuid = 'rules-vocab';
+    await k.store.updateUser(vuid, {
+      uid: vuid,
+      email: vuid + '@example.com',
+      displayName: 'Vocabulary',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      lastActiveAt: '9999-12-31T23:59:59.999Z',
+      profile: { age: 31, gender: 'woman', interests: ['hiking', '__x__', 'coffee'] }
+    });
+    k.ctx.drainWarnings();
+    const vProjected = await k.admin.get('discovery', vuid);
+
+    t.check(
+      'the shipped code publishes only the interests the vocabulary holds',
+      !!vProjected && k.same(vProjected.profile.interests, ['hiking', 'coffee']),
+      k.show(vProjected && vProjected.profile.interests)
+    );
+
+    t.check(
+      'and an activity stamp no later than now',
+      !!vProjected && Date.parse(vProjected.lastActiveAt) <= Date.now(),
+      k.show(vProjected && vProjected.lastActiveAt)
+    );
+
+    const vOwner = k.rulesEnv.authenticatedContext(vuid).firestore();
+    t.check(
+      'and firestore.rules accepts exactly that',
+      !!vProjected && await k.ok(k.testing.assertSucceeds(setDoc(doc(vOwner, 'discovery', vuid), vProjected))),
+      k.show(vProjected && { interests: vProjected.profile.interests, lastActiveAt: vProjected.lastActiveAt })
+    );
+
+    const verbatim = JSON.parse(JSON.stringify(vProjected || {}));
+    if (verbatim.profile) verbatim.profile.interests = ['hiking', '__x__', 'coffee'];
+    t.check(
+      'while the private interests copied across verbatim are refused',
+      !!vProjected && await k.ok(k.testing.assertFails(setDoc(doc(vOwner, 'discovery', vuid), verbatim))),
+      k.show(verbatim.profile && verbatim.profile.interests)
+    );
+
+    /* ---- the learning map, after a stranger's cards have filled it -------- */
+
+    // Every card's interests go into the swiper's own learning map, and the rules
+    // cap that map at 1200 key characters. Five strangers with one 239-character tag
+    // each — accepted, before the vocabulary — left 1195 of them used, and from then
+    // on a save that learned any slug longer than five characters (42 of the 48), or
+    // two new tags at once, came back permission-denied, page load after page load.
+    // The rules now refuse those tags, but maps filled before they did are
+    // still stored, and they have to heal on their next save rather than stay stuck.
+    // Run the deck's own sequence against the real ruleset as the account itself:
+    // read the stored map, fold one ordinary like into it, save it.
+    const learner = 'rules-learner';
+    const filled = { interestAffinity: {}, likeCount: 0, passCount: 5 };
+    ['a2', 'a3', 'a4', 'a5', 'a6'].forEach(function (u) {
+      filled.interestAffinity[u + '-' + 'y'.repeat(236)] = -0.0525;
+    });
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      await setDoc(doc(c.firestore(), 'users', learner), k.h.userDoc(learner, { learning: filled }));
+    });
+    const engine = require(require('path').join(k.h.ROOT, 'public', 'js', 'matching-engine.js'));
+    const dbBefore = k.ctx.ZC.firebase.db;
+    let saved = null;
+    try {
+      k.ctx.ZC.firebase.db = k.rulesEnv.authenticatedContext(learner).firestore();
+      const me = await k.store.getUser(learner);
+      const ordinary = { uid: 'ordinary', profile: { interests: ['yoga', 'cooking'] } };
+      const next = engine.updateLearning(me.learning, ordinary, 'like');
+      saved = await k.store.saveLearning(learner, next).then(function () { return 'saved'; },
+        function (err) { return (err && err.code) || String(err); });
+    } finally {
+      k.ctx.ZC.firebase.db = dbBefore;
+    }
+    k.ctx.drainWarnings();
+    let kept = null;
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      kept = ((await k.fs.getDoc(doc(c.firestore(), 'users', learner))).data() || {}).learning || null;
+    });
+
+    t.check(
+      'a learning map strangers\' tags had filled saves again on the next swipe, under the real rules',
+      saved === 'saved',
+      String(saved)
+    );
+
+    t.check(
+      'and what it saved is the vocabulary part, with the counts carried on',
+      !!kept && k.same(Object.keys(kept.interestAffinity || {}).sort(), ['cooking', 'yoga']) &&
+        kept.likeCount === 1 && kept.passCount === 5,
+      k.show(kept && { keys: Object.keys(kept.interestAffinity || {}).map(function (key) {
+        return key.length > 12 ? key.slice(0, 6) + '…(' + key.length + ')' : key;
+      }), likeCount: kept.likeCount, passCount: kept.passCount })
+    );
+
+    /* ---- a device clock more than a day fast, saving a block -------------- */
+
+    // The projection's lastActiveAt is held to a day past the server's clock and the
+    // private one is not, so a touch from a device running further ahead than that
+    // stores its stamp privately and has the public half refused. projectStamp clamps
+    // to the device's own clock, which is the one that is wrong, so the stamp every
+    // save then publishes is refused too — and the projection is written in the same
+    // transaction as the account, so the block, the bio, the Pause switch and the plan
+    // went with it. The shipped calls, as the account, against the real ruleset.
+    const fuid = 'rules-fast-clock';
+    const hourAgo = new Date(Date.now() - 3600000).toISOString();
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      await setDoc(doc(c.firestore(), 'users', fuid), k.h.userDoc(fuid, { lastActiveAt: hourAgo }));
+      await setDoc(doc(c.firestore(), 'discovery', fuid), k.h.discoveryDoc(fuid, { lastActiveAt: hourAgo }));
+    });
+    const RealDate = Date;
+    class FastDate extends RealDate {
+      constructor(...args) {
+        if (args.length) super(...args);
+        else super(RealDate.now() + 25 * 3600000);
+      }
+      static now() { return RealDate.now() + 25 * 3600000; }
+    }
+    const fastAnswer = function (p) {
+      return p.then(function () { return 'saved'; }, function (err) { return (err && err.code) || String(err); });
+    };
+    let fastTouch = null;
+    let fastBlock = null;
+    let fastBio = null;
+    const dbFast = k.ctx.ZC.firebase.db;
+    try {
+      k.ctx.ZC.firebase.db = k.rulesEnv.authenticatedContext(fuid, { email: fuid + '@example.com' }).firestore();
+      globalThis.Date = FastDate;
+      fastTouch = await k.store.touchActive(fuid).catch(function (err) { return (err && err.code) || String(err); });
+      fastBlock = await fastAnswer(k.store.updateUser(fuid, { blocked: ['rules-fast-harasser'] }));
+      fastBio = await fastAnswer(k.store.updateUser(fuid, { profile: { bio: 'Written on a fast clock.' } }));
+    } finally {
+      globalThis.Date = RealDate;
+      k.ctx.ZC.firebase.db = dbFast;
+    }
+    k.ctx.drainWarnings();
+    let fastUser = null;
+    let fastShadow = null;
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      fastUser = (await k.fs.getDoc(doc(c.firestore(), 'users', fuid))).data() || null;
+      fastShadow = (await k.fs.getDoc(doc(c.firestore(), 'discovery', fuid))).data() || null;
+    });
+
+    t.check(
+      'with the device clock more than a day fast, a block still saves',
+      fastBlock === 'saved' && !!fastUser && k.same(fastUser.blocked, ['rules-fast-harasser']),
+      k.show({ touch: fastTouch, block: fastBlock, stored: fastUser && fastUser.blocked })
+    );
+
+    t.check(
+      'and so does a profile edit, on the public profile as well as the private one',
+      fastBio === 'saved' && !!fastUser && fastUser.profile.bio === 'Written on a fast clock.' &&
+        !!fastShadow && fastShadow.profile.bio === 'Written on a fast clock.',
+      k.show({ save: fastBio, own: fastUser && fastUser.profile.bio, shown: fastShadow && fastShadow.profile.bio })
+    );
+
+    // What the save gives up to get through, and nothing more: the public activity
+    // stamp stays the one the rules last accepted rather than the clock's.
+    t.check(
+      'while the public activity stamp stays the one the rules last accepted',
+      !!fastShadow && fastShadow.lastActiveAt === hourAgo,
+      k.show({ shown: fastShadow && fastShadow.lastActiveAt, accepted: hourAgo, own: fastUser && fastUser.lastActiveAt })
+    );
   }
 };

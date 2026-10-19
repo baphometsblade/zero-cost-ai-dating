@@ -218,5 +218,43 @@ module.exports = {
 
     t.check('and asking again once it is gone answers ok, as the demo adapter does, rather than being refused',
       !!second && second.ok === true, k.show(second));
+
+    /* ---- 5. a match who pauses keeps their face in the conversation ---- */
+
+    // settings.html says of "Show me in other people's decks": "Turn this off to
+    // disappear from discovery. Your existing matches and conversations stay
+    // exactly where they are." firestore.rules now hides a paused projection from
+    // everybody who does not already know the person, so this is the read that
+    // promise rests on: the list and the open conversation draw the other side
+    // from `discovery/{uid}`, and a refusal there is a nameless placeholder.
+    const viewer = 'conv-real-viewer';
+    const pausedMatch = 'conv-real-paused';
+    const pausedPair = [viewer, pausedMatch].sort().join('_');
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      const db = c.firestore();
+      await k.fs.setDoc(k.fs.doc(db, 'discovery', pausedMatch), k.h.discoveryDoc(pausedMatch, {
+        preferences: Object.assign({}, k.h.discoveryDoc(pausedMatch).preferences, { discoverable: false })
+      }));
+      await k.fs.setDoc(k.fs.doc(db, 'matches', pausedPair), k.h.matchDoc(viewer, pausedMatch));
+    });
+    let listed = null;
+    let opened = null;
+    try {
+      k.ctx.ZC.firebase.db = k.rulesEnv.authenticatedContext(viewer).firestore();
+      listed = await k.store.getMatches(viewer).catch(answer);
+      opened = await k.store.getMatch(pausedPair, viewer).catch(answer);
+    } finally {
+      k.ctx.ZC.firebase.db = openDb;
+    }
+    k.ctx.drainWarnings();
+    const named = 'Test ' + pausedMatch;
+
+    t.check('under the real rules, the conversation list still names a match who paused',
+      Array.isArray(listed) && listed.length === 1 && listed[0].other.displayName === named,
+      Array.isArray(listed) ? k.show(listed.map(function (m) { return m.other.displayName; })) : k.show(listed));
+
+    t.check('and so does the open conversation',
+      !!opened && !!opened.other && opened.other.displayName === named,
+      k.show(opened && opened.other ? opened.other.displayName : opened));
   }
 };

@@ -33,6 +33,26 @@ function tick() {
   return new Promise(function (resolve) { setTimeout(resolve, TICK_MS); });
 }
 
+/** Wait until `test()` is true, or give up. Deliveries cross a network. */
+function until(test, ms) {
+  return new Promise(function (resolve) {
+    const started = Date.now();
+    const timer = setInterval(function () {
+      let ok = false;
+      try { ok = !!test(); } catch (err) { ok = false; }
+      if (ok || Date.now() - started > ms) {
+        clearInterval(timer);
+        resolve(ok);
+      }
+    }, 20);
+  });
+}
+
+/** The message carrying `text` in one listener delivery, or null. */
+function carrying(list, text) {
+  return (list || []).filter(function (m) { return m.text === text; })[0] || null;
+}
+
 module.exports = {
   title: 'The messaging path stores what firestore.rules accepts',
 
@@ -218,5 +238,173 @@ module.exports = {
     t.check('three messages sent at once are three the other side is owed',
       (raced.unread || {})[B] === beforeRace + 3,
       (raced.unread || {})[B] + ' after ' + beforeRace + ' + 3 concurrent sends');
+
+    /* ---- a message the server has not taken yet --------------------------- */
+
+    // With no connection, `set()` neither resolves nor rejects: the SDK keeps
+    // the write in memory until the server acknowledges it, and with offline
+    // persistence off, leaving the page throws it away. The live thread shows
+    // it at once all the same — the SDK delivers its own writes before the
+    // server has them — and that delivery used to be indistinguishable from a
+    // stored message, so the chat drew a message that was about to be lost as
+    // sent. The demo adapter delivers only what it has already stored.
+    //
+    // A conversation of its own, so nothing above is counted twice.
+    // `disableNetwork()` is the SDK's own offline switch, and for a plain
+    // `set()` it holds the write for real: the check below reads the server
+    // while it is off and finds nothing. (It does not for a transaction — see
+    // `03-writes`.)
+    const C = 'msg-c';
+    const quiet = k.h.pairId(A, C);
+    await k.admin.set('users', C, k.h.userDoc(C));
+    await k.admin.set('matches', quiet, k.h.matchDoc(A, C));
+    const deliveries = [];
+    const stop = k.store.listenMessages(quiet, function (list) { deliveries.push(list); });
+    const TEXT = 'Running late, see you at eight?';
+    let settled = 'pending';
+    let heldAt = -1;
+    let settledWhileHeld = null;
+    let storedWhileHeld = null;
+    try {
+      await until(function () { return deliveries.length > 0; }, 5000);
+      await k.ctx.db.disableNetwork();
+      try {
+        k.store.sendMessage(quiet, A, TEXT).then(function () { settled = 'resolved'; },
+          function (err) { settled = 'rejected: ' + ((err && (err.code || err.message)) || err); });
+        await until(function () { return !!carrying(deliveries[deliveries.length - 1], TEXT); }, 5000);
+        heldAt = deliveries.length - 1;
+        settledWhileHeld = settled;
+        storedWhileHeld = (await k.admin.list('matches/' + quiet + '/messages')).length;
+      } finally {
+        await k.ctx.db.enableNetwork();
+      }
+      await until(function () { return settled !== 'pending'; }, 10000);
+      await until(function () {
+        const now = carrying(deliveries[deliveries.length - 1], TEXT);
+        return !!now && !now.pending;
+      }, 10000);
+    } finally {
+      stop();
+    }
+    k.ctx.drainWarnings();
+    const held = heldAt === -1 ? null : carrying(deliveries[heldAt], TEXT);
+    t.check('a message the server has not acknowledged is delivered marked pending, while the send waits',
+      !!held && held.pending === true && settledWhileHeld === 'pending' && storedWhileHeld === 0,
+      held ? k.show({ pending: held.pending, send: settledWhileHeld, onServer: storedWhileHeld })
+        : 'never delivered while offline');
+
+    // Without a later delivery the mark would outlive the acknowledgement:
+    // the server taking the write changes no data, only the snapshot's
+    // metadata, and a listener hears about that only when it asks to.
+    const later = heldAt === -1 ? [] : deliveries.slice(heldAt + 1).map(function (list) { return carrying(list, TEXT); })
+      .filter(function (m) { return !!m && !m.pending; });
+    const landed = (await k.admin.list('matches/' + quiet + '/messages')).filter(function (row) {
+      return row.data.text === TEXT;
+    });
+    const acked = later[later.length - 1] || null;
+    t.check('and once the server has it, it is delivered again unmarked, in the shape the demo adapter stores',
+      settled === 'resolved' && landed.length === 1 && !!acked &&
+        k.same(Object.keys(acked).sort(), ['createdAt', 'from', 'id', 'text']),
+      k.show({ send: settled, stored: landed.length, after: acked && Object.keys(acked).sort() }));
+
+    /* ---- a connection that drops and comes back, and nothing else -------- */
+
+    // Asking the SDK for the acknowledgement above means asking for every
+    // snapshot whose metadata changes, and the connection changing is one:
+    // each query's `fromCache` flips when it goes and again when it comes
+    // back, with no document changed. Passed on, that was the same list
+    // delivered again, and matches.js repainted an empty conversation's
+    // openers each time, taking a keyboard user's focus with them. The demo
+    // adapter's `deliver()` drops a list it has already delivered.
+    //
+    // The witness is the adapter's own query (newest first, the live window
+    // of 200), so the two share one watch target and hear each flip together.
+    // The SDK calls each listener back on its own `setTimeout(0)`, queued in
+    // the order the listeners were added, so by the time the witness, added
+    // second, has heard a flip, the adapter has already had its chance to
+    // pass it on.
+    const D = 'msg-d';
+    const still = k.h.pairId(A, D);
+    await k.admin.set('users', D, k.h.userDoc(D));
+    await k.admin.set('matches', still, k.h.matchDoc(A, D));
+    const heard = [];
+    const flips = [];
+    const unhear = k.store.listenMessages(still, function (list) { heard.push(list.length); });
+    let unwitness = function () {};
+    const flipped = { away: false, back: false };
+    try {
+      await until(function () { return heard.length > 0; }, 5000);
+      unwitness = k.ctx.db.collection('matches').doc(still).collection('messages')
+        .orderBy('createdAt', 'desc').limit(200)
+        .onSnapshot({ includeMetadataChanges: true }, function (snap) { flips.push(snap.metadata.fromCache); });
+      await until(function () { return flips[flips.length - 1] === false; }, 5000);
+      await k.ctx.db.disableNetwork();
+      try {
+        flipped.away = await until(function () { return flips[flips.length - 1] === true; }, 5000);
+      } finally {
+        await k.ctx.db.enableNetwork();
+      }
+      flipped.back = await until(function () { return flips[flips.length - 1] === false; }, 10000);
+    } finally {
+      unwitness();
+      unhear();
+    }
+    k.ctx.drainWarnings();
+    t.check('a connection that drops and comes back delivers the conversation again only if it changed',
+      flipped.away && flipped.back && k.same(heard, [0]),
+      k.show({ deliveries: heard, witnessFromCache: flips }));
+
+    /* ---- a count the other side parked, under the real rules -------------- */
+
+    // Each participant may write either count, and firestore.rules bounds the value
+    // a count may hold. A bound on the value alone made `increment(1)` a tripwire:
+    // the other person parked their own count at the ceiling, and from then on every
+    // message sent to them was stored with its preview update refused — no
+    // `lastMessage`, no new count, a warning on every send. The shipped send, signed
+    // in as its author, against the real ruleset.
+    const E = 'msg-e';
+    const parkedId = k.h.pairId(A, E);
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      await setDoc(doc(c.firestore(), 'matches', parkedId), k.h.matchDoc(A, E));
+    });
+    const park = {};
+    park['unread.' + E] = 1000000;
+    const parkedOk = await k.ok(k.testing.assertSucceeds(
+      k.fs.updateDoc(doc(k.rulesEnv.authenticatedContext(E).firestore(), 'matches', parkedId), park)));
+    // The rules context's Firestore is the testing library's copy of the SDK, and
+    // the store builds its `increment(1)` from the global `firebase`. Under
+    // ZC_STORE_SDK that global is the pages' version, and a FieldValue from one
+    // copy is "invalid data" to the other, so for this one send the global is
+    // the testing library's too. A page has one copy of each and never meets this.
+    const openDb = k.ctx.ZC.firebase.db;
+    const openFirebase = globalThis.firebase;
+    const testingFirebase = (function () {
+      const app = require('firebase/compat/app');
+      require('firebase/compat/firestore');
+      return app.default || app;
+    })();
+    let sentParked = null;
+    k.ctx.drainWarnings();
+    try {
+      k.ctx.ZC.firebase.db = k.rulesEnv.authenticatedContext(A).firestore();
+      globalThis.firebase = testingFirebase;
+      sentParked = await k.store.sendMessage(parkedId, A, 'Are you there?')
+        .catch(function (err) { return { rejected: (err && err.code) || String(err) }; });
+    } finally {
+      k.ctx.ZC.firebase.db = openDb;
+      globalThis.firebase = openFirebase;
+    }
+    const parkedWarnings = k.ctx.drainWarnings();
+    let parkedMatch = null;
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      parkedMatch = (await k.fs.getDoc(doc(c.firestore(), 'matches', parkedId))).data() || null;
+    });
+    t.check('a count the other side parked at the ceiling does not stop a message updating the preview',
+      parkedOk && !!sentParked && !sentParked.rejected && !!parkedMatch &&
+        parkedMatch.lastMessage === 'Are you there?' && (parkedMatch.unread || {})[E] === 1000001 &&
+        parkedWarnings.length === 0,
+      k.show({ parked: parkedOk, sent: sentParked && (sentParked.rejected || 'stored'),
+        lastMessage: parkedMatch && parkedMatch.lastMessage, unread: parkedMatch && parkedMatch.unread,
+        warnings: parkedWarnings.map(function (w) { return w.slice(0, 90); }) }));
   }
 };

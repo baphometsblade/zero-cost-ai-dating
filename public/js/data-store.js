@@ -52,6 +52,11 @@
     profiles: 'zc.profiles'
   };
 
+  // auth.js's demo credential vault, `{ [email]: { uid, salt, hash } }`. Not in
+  // KEYS because the store does not own it: resetDemo reads it to learn which
+  // accounts were made in this browser, and nothing here writes it.
+  const CREDENTIALS_KEY = 'zc.demo.credentials';
+
   const SEED_VERSION = 1;
   const MESSAGE_MAX = 1000;
   const REPORT_DETAILS_MAX = 500;
@@ -905,6 +910,40 @@
   }
 
   /**
+   * Whether the demo adapter shows `viewer` the face of `uid`: the paused-profile
+   * half of the discovery read rule in firestore.rules, restated for the store
+   * that has no rules.
+   *
+   * A paused profile — "Show me in other people's decks" turned off — is
+   * readable in firebase mode only by its owner, a match and somebody it liked,
+   * and `getPublicProfile(s)` there answer null for anybody else: a reporter
+   * too, because anybody can file a report. This adapter answered with the
+   * profile whoever asked. The pages ask as one of those three — the report
+   * menu is in a conversation, so a reporter is a match, and unmatching leaves
+   * the like that made it — so nothing on screen differed; the facade did, and
+   * two adapters diverging quietly is the failure this file keeps finding in
+   * itself. A missing account is "shown" so that it comes back missing, as a
+   * miss does there.
+   *
+   * The rule's other half, that a signed-out caller reads nothing at all, is not
+   * restated: this adapter has always answered a discoverable profile without a
+   * session, and nothing here changes what a signed-out page sees.
+   * @param {Object} users the stored accounts
+   * @param {string|null} viewer the signed-in account, or null
+   * @param {string} uid the account whose face is asked for
+   * @returns {boolean} true when the profile is discoverable or missing, or when
+   *   `viewer` is its owner, a match, or somebody it liked
+   */
+  function faceShown(users, viewer, uid) {
+    if (!isPlainObject(users[uid])) return true;
+    if (normalizeUser(users[uid]).preferences.discoverable !== false) return true;
+    if (!viewer) return false;
+    if (viewer === uid || isPlainObject(readMatches()[pairId(viewer, uid)])) return true;
+    const liked = readSwipes()[swipeId(uid, viewer)];
+    return isPlainObject(liked) && isPositive(liked.action);
+  }
+
+  /**
    * The match rows this account is in, newest conversation first.
    * @param {Object} matches the stored matches map
    * @param {string} uid the viewer
@@ -1092,6 +1131,33 @@
     seedRelationships(users, stamp, !!force);
     writeJson(KEYS.seeded, { version: SEED_VERSION, at: new Date(stamp).toISOString(), count: seeds.length });
     return true;
+  }
+
+  /**
+   * The documents of the accounts made in this browser, ready to survive a
+   * demo reset. The seed rebuilds every account it has a record of, and
+   * resetDemo puts these back only where it has none. auth.js's credential
+   * vault is what says which they are; this only ever reads it.
+   *
+   * Each keeps its name, profile, preferences, plan and blocks. Its learned
+   * weights and today's usage start again, because they count swipes, and the
+   * reset deletes every swipe — the seed starts the demo account's the same way.
+   * @returns {Object} uid → UserDoc
+   */
+  function createdAccounts() {
+    const vault = readJson(CREDENTIALS_KEY, {});
+    const users = readUsers();
+    const kept = {};
+    if (!isPlainObject(vault) || !isPlainObject(users)) return kept;
+    Object.keys(vault).forEach(function (email) {
+      const uid = isPlainObject(vault[email]) ? vault[email].uid : null;
+      if (typeof uid !== 'string' || !isPlainObject(users[uid])) return;
+      const doc = cloneDeep(users[uid]);
+      doc.learning = cloneDeep(DEFAULT_USER.learning);
+      doc.usage = normalizeUsage({ date: todayKey() });
+      kept[uid] = doc;
+    });
+    return kept;
   }
 
   const demoAdapter = {
@@ -1518,7 +1584,9 @@
     },
 
     async getPublicProfile(uid) {
-      // Demo mode has no separate projection — the stored doc is the profile.
+      // Demo mode has no separate projection — the stored doc is the profile —
+      // shown on the terms the rules show a projection (see `faceShown`).
+      if (!faceShown(readUsers(), currentUid(), uid)) return null;
       return demoAdapter.getUser(uid);
     },
 
@@ -1529,9 +1597,10 @@
       // Firestore adapter's version takes an option about its face cache, and
       // there is no cache here to file in.
       const users = readUsers();
+      const viewer = currentUid();
       const out = {};
       (uids || []).forEach(function (uid) {
-        if (uid && users[uid]) out[uid] = normalizeUser(users[uid]);
+        if (uid && users[uid] && faceShown(users, viewer, uid)) out[uid] = normalizeUser(users[uid]);
       });
       return out;
     },
@@ -1539,10 +1608,13 @@
     async deleteAccountData(uid) {
       // Swipes in both directions, matches (and their messages) either way,
       // then the account document itself — mirroring the Firestore adapter.
+      // Inbound, that means likes: the Firestore adapter cannot find a pass aimed
+      // at the account, because the rules keep a pass private to its author, so
+      // a pass stays with whoever made it there and stays here too.
       const swipes = readSwipes();
       Object.keys(swipes).forEach(function (id) {
         const swipe = swipes[id];
-        if (swipe && (swipe.from === uid || swipe.to === uid)) delete swipes[id];
+        if (swipe && (swipe.from === uid || (swipe.to === uid && isPositive(swipe.action)))) delete swipes[id];
       });
       writeSwipes(swipes);
 
@@ -1578,8 +1650,20 @@
     },
 
     async resetDemo() {
+      // Taken before `users` goes. They used to go with it, and Settings'
+      // "Accounts you created stay signed up" was untrue: the seed has no
+      // document for them, so the next load dropped the session as pointing at
+      // a deleted account, and signing in again made a blank one, with no name.
+      const kept = createdAccounts();
       [KEYS.users, KEYS.swipes, KEYS.matches, KEYS.messages, KEYS.reports, KEYS.seeded].forEach(removeKey);
       await demoSeed(true);
+      // Only into places the seed left empty. auth.js vaults no uid the seed
+      // uses, but the vault is only localStorage, and an entry naming a seeded
+      // account must not put back the document the reset was asked to rebuild.
+      const users = readUsers();
+      const added = Object.keys(kept).filter(function (uid) { return !users[uid]; });
+      added.forEach(function (uid) { users[uid] = kept[uid]; });
+      if (added.length) writeUsers(users);
       pollAll();
       return true;
     },
@@ -1890,6 +1974,47 @@
     return out;
   }
 
+  /**
+   * The interests the projection may publish: slugs from the vocabulary
+   * seed-data.js publishes, which is the list firestore.rules holds
+   * `discovery/{uid}` to. The private document is held only to a count and a
+   * character total, so without this a profile the rules accept privately
+   * could hold a tag they refuse publicly, and updateUser — which writes both in
+   * one transaction — would fail the whole save for it. With no table loaded,
+   * or an empty one (the profile editor's own failure case), the list goes
+   * across as it is, since nothing here could tell a real slug from any other.
+   * @param {*} raw the private profile's interests
+   * @returns {Array} at most twelve of them
+   */
+  function projectInterests(raw) {
+    const known = ZC.INTEREST_BY_SLUG;
+    const list = Array.isArray(raw) ? raw : [];
+    const kept = isPlainObject(known) && Object.keys(known).length > 0
+      ? list.filter(function (slug) {
+        return typeof slug === 'string' && Object.prototype.hasOwnProperty.call(known, slug);
+      })
+      : list;
+    return kept.slice(0, 12);
+  }
+
+  /**
+   * The activity stamp the projection may publish: the private one, in
+   * toISOString()'s shape, unless it is later than now — then now. A missing
+   * or unreadable one is now as well. firestore.rules holds the projection's
+   * copy to a day past the server's clock and the private one only to a size,
+   * so a stamp stored while this device's clock ran more than a day fast would
+   * otherwise be refused in every save's projection until real time caught it
+   * up. While the clock is still that fast, clamping to it cannot help, and
+   * updateUser's second attempt is what lets the save through.
+   * @param {*} raw the private document's lastActiveAt
+   * @returns {string} an ISO timestamp
+   */
+  function projectStamp(raw) {
+    const iso = toIso(raw);
+    const now = nowIso();
+    return iso && Date.parse(iso) <= Date.parse(now) ? iso : now;
+  }
+
   function projectDiscovery(user) {
     const p = isPlainObject(user.profile) ? user.profile : {};
     const f = isPlainObject(user.preferences) ? user.preferences : {};
@@ -1902,14 +2027,14 @@
       uid: String(user.uid),
       displayName: String(user.displayName || ''),
       profileComplete: !!user.profileComplete,
-      lastActiveAt: user.lastActiveAt || nowIso(),
+      lastActiveAt: projectStamp(user.lastActiveAt),
       profile: {
         age: num(p.age),
         gender: p.gender || 'other',
         pronouns: String(p.pronouns || ''),
         bio: String(p.bio || ''),
         photos: Array.isArray(p.photos) ? p.photos.slice(0, 6) : [],
-        interests: Array.isArray(p.interests) ? p.interests.slice(0, 12) : [],
+        interests: projectInterests(p.interests),
         // Only the five axes, never whatever else the private map happens to hold.
         // `firestore.rules` closes the key list on both sides of this projection, so
         // copying it across verbatim would let a private document the rules accept
@@ -1944,6 +2069,56 @@
     } catch (err) {
       console.warn('[zc.store] Could not update the discovery profile.', err);
     }
+  }
+
+  /**
+   * Each account's birthdate and the age stored beside it, as this page last
+   * read or saved its own document.
+   *
+   * Only the private document holds a birthdate; `discovery/{uid}` holds the
+   * age the last save derived from it, and nothing else rewrote that. So a
+   * birthday since the last save reached nobody else's deck: a 29-year-old
+   * went on being served as 28, and passed a 28-and-under filter, until
+   * something next saved their document through `updateUser` (Profile,
+   * Settings, Plans, a block). The demo deck reads the private documents,
+   * re-derived, so there they were 29 on the day. `setLastActive` is the
+   * write path every visit takes (at most once every five minutes, see
+   * `touchActive`), and its `discovery/{uid}` update is the one write to the
+   * projection that a visit makes when nothing is saved; this is how it
+   * knows the age without a read. auth.js loads the account's document
+   * through `getUser` (then `createUser` or `updateUser` when it must) before
+   * either caller of `touchActive` runs. If that read does not get through,
+   * auth.js goes on with an in-memory copy and nothing is noted here: the
+   * touch then carries no age, and the projection keeps the one it had.
+   */
+  const ageOnRecord = {};
+
+  /**
+   * Remember what a read or a save of `users/{uid}` said about the age.
+   * @param {string} uid the account
+   * @param {Object|null} data the document as stored, before normalizeUser
+   * @returns {void}
+   */
+  function noteAge(uid, data) {
+    const p = data && isPlainObject(data.profile) ? data.profile : null;
+    if (!uid || !p) return;
+    ageOnRecord[uid] = { birthdate: p.birthdate || '', age: num(p.age) };
+  }
+
+  /**
+   * The age a birthday has brought the account to since its profile was last
+   * saved, or null when the stored age is still right or nothing is known.
+   * @param {string} uid the account
+   * @returns {number|null}
+   */
+  function ageSinceSave(uid) {
+    const known = ageOnRecord[uid];
+    if (!known || !known.birthdate || !util.ageFromBirthdate) return null;
+    const age = util.ageFromBirthdate(known.birthdate);
+    // Inside the bounds discovery's rules put on `age`, or the refusal would
+    // take the timestamp down with it.
+    if (age === null || age === known.age || age < 18 || age > 120) return null;
+    return age;
   }
 
   /**
@@ -2024,12 +2199,14 @@
    *
    * Two things it deliberately does not do. It does not survive sign-out any
    * differently from `zc.lastTouch` and `zc.pendingMatch`, which also outlive a
-   * session on a shared browser; what it holds is the world-readable projection
-   * any signed-in account may fetch for itself, so the only thing it discloses
-   * is which uids this device looked up — the same class those two already
-   * accept. And two overlapping fetches each read, merge and write the whole
-   * blob, so the loser's entries can be dropped; that costs a read next time and
-   * cannot corrupt anything, which is the right way for a cache to lose a race.
+   * session on a shared browser; what it holds is only projections any
+   * signed-in account may fetch for itself — `fetchProfiles` does not file a
+   * paused one, which the rules show only to the accounts that know the
+   * person — so the only thing it discloses is which uids this device looked
+   * up, the same class those two already accept. And two overlapping fetches
+   * each read, merge and write the whole blob, so the loser's entries can be
+   * dropped; that costs a read next time and cannot corrupt anything, which is
+   * the right way for a cache to lose a race.
    */
   function readFaceCache() {
     const stored = readJson(KEYS.profiles, null);
@@ -2187,7 +2364,20 @@
     wanted.forEach(function (uid, index) {
       if (results[index]) {
         map[uid] = results[index];
-        fresh[uid] = results[index];
+        // A paused profile is served and not filed. firestore.rules lets only the
+        // accounts that know the person read one — a match, somebody they liked —
+        // and the cache is one blob per browser that outlives a sign-out, so
+        // filing it would hand the face to whoever signs in next, for the TTL.
+        // Not filing it costs every page that shows a paused face the read of it
+        // and the lookups the rule spends allowing that read: one more for a
+        // match, two for somebody they liked. Before the cache, a face cost the
+        // read alone, because the rule spent nothing on anybody.
+        //
+        // An entry already filed is not taken back when its person pauses: the
+        // cache cannot see that happen, so the face they had while discoverable
+        // stays in it, for whoever signs in on this browser, until its TTL runs
+        // out. That includes entries filed before this check existed.
+        if (results[index].preferences.discoverable !== false) fresh[uid] = results[index];
       }
     });
     rememberFaces(fresh, Date.now(), !!(options && options.conversation));
@@ -2338,13 +2528,14 @@
    * @returns {Promise<string[]>} sender uids
    */
   async function likeSenders(uid) {
-    let snap;
-    try {
-      snap = await db().collection('swipes').where('to', '==', uid).where('action', 'in', ['like', 'super']).get();
-    } catch (err) {
-      console.warn('[zc.store] "in" query unavailable, filtering client-side.', err);
-      snap = await db().collection('swipes').where('to', '==', uid).get();
-    }
+    // No unfiltered fallback any more. There was one, `where('to', '==', uid)`
+    // filtered here, for an SDK without `in`; but that query can return a pass,
+    // and firestore.rules refuses any query that could, because a pass is private
+    // to its author. The fallback could only ever be refused, so a failure here
+    // now arrives as itself rather than as that refusal. Both the SDK the pages
+    // load and the emulator take `in`, and the live count below has never had a
+    // fallback at all.
+    const snap = await db().collection('swipes').where('to', '==', uid).where('action', 'in', ['like', 'super']).get();
     return positiveSenders(snap);
   }
 
@@ -2452,9 +2643,11 @@
    * and only once, and answered as "no match" when the rules refuse it.
    * @param {string} fromUid the swiper
    * @param {string} toUid the swiped
+   * @param {string|null} likedAt when the other person liked the swiper, as their
+   *   swipe records it: the date a match this device's clock cannot date gets
    * @returns {Promise<{matched:boolean, matchId:string|null, created:boolean}>}
    */
-  async function matchDocumentFor(fromUid, toUid) {
+  async function matchDocumentFor(fromUid, toUid, likedAt) {
     // Mutual like — create the match doc only when it is not already there.
     const matchId = pairId(fromUid, toUid);
     const matchRef = db().collection('matches').doc(matchId);
@@ -2464,15 +2657,17 @@
       const unread = {};
       unread[fromUid] = 0;
       unread[toUid] = 0;
+      const match = {
+        id: matchId,
+        users: [String(fromUid), String(toUid)].sort(),
+        createdAt: nowIso(),
+        lastMessage: null,
+        lastMessageAt: null,
+        unread: unread
+      };
+      let refused = false;
       try {
-        await matchRef.set({
-          id: matchId,
-          users: [String(fromUid), String(toUid)].sort(),
-          createdAt: nowIso(),
-          lastMessage: null,
-          lastMessageAt: null,
-          unread: unread
-        });
+        await matchRef.set(match);
       } catch (err) {
         // Only a rules refusal becomes a quiet no-match, and the expected reason for
         // one is the block rule: the other person has blocked this account, and the
@@ -2487,7 +2682,29 @@
         // since the pair may well be mutual and the document may land on a retry.
         // Those are the caller's to see, exactly as they were before any of this.
         if (!isPermissionDenied(err)) throw err;
+        refused = true;
+      }
 
+      // The block is not the only refusal, though: the rules also refuse a match
+      // dated more than a day past the server's clock, and a device running further
+      // ahead than that dates every match so. That refusal got the block's quiet
+      // no-match, the note that would have retried it was spent, and both people had
+      // already swiped, so neither deck would offer the other again: a mutual like,
+      // lost. This client cannot tell the two refusals apart, so it tries once more
+      // dated by the like it answers. That stamp is earlier, written by the other
+      // person's device, and accepted unless that device's clock ran fast as well. A
+      // block refuses both, and the blocked account still gets the same plain no-match.
+      if (refused && likedAt && Date.parse(likedAt) < Date.parse(match.createdAt)) {
+        match.createdAt = likedAt;
+        try {
+          await matchRef.set(match);
+          refused = false;
+        } catch (err) {
+          if (!isPermissionDenied(err)) throw err;
+        }
+      }
+
+      if (refused) {
         // The rejection is deliberately *not* logged with it. The whole point of this
         // path is not telling a blocked account that it was blocked, and a console
         // line carrying `permission-denied` does precisely that. This is not a seal —
@@ -2569,11 +2786,27 @@
   async function recordMatchFor(fromUid, toUid, effective) {
     if (!isPositive(effective)) return { matched: false, matchId: null, created: false };
 
-    const reverseSnap = await db().collection('swipes').doc(swipeId(toUid, fromUid)).get();
-    if (!reverseSnap.exists || !isPositive((reverseSnap.data() || {}).action)) {
+    // A refusal here is the ordinary answer, not a failure. firestore.rules lets
+    // this account read a swipe aimed at it only when that swipe is a like or a
+    // super like, and refuses a pass and a missing swipe alike — answering the
+    // miss would make the refusal itself mean "they passed". Both mean the same
+    // thing here: they have not liked you, so there is no match. It is not
+    // logged, because every like of somebody who has not liked you gets it,
+    // and it says nothing that is wrong. Any other failure still propagates,
+    // for the reason matchDocumentFor gives: this function cannot claim "no
+    // match" for an outage.
+    let reverseSnap;
+    try {
+      reverseSnap = await db().collection('swipes').doc(swipeId(toUid, fromUid)).get();
+    } catch (err) {
+      if (isPermissionDenied(err)) return { matched: false, matchId: null, created: false };
+      throw err;
+    }
+    const reverse = reverseSnap.data() || {};
+    if (!reverseSnap.exists || !isPositive(reverse.action)) {
       return { matched: false, matchId: null, created: false };
     }
-    return matchDocumentFor(fromUid, toUid);
+    return matchDocumentFor(fromUid, toUid, toIso(reverse.createdAt));
   }
 
   /** The `from` uids of a snapshot of inbound swipes, positives only, deduped. */
@@ -2596,7 +2829,9 @@
 
     async getUser(uid) {
       if (!uid) return null;
-      const user = docToUser(await db().collection('users').doc(uid).get());
+      const snap = await db().collection('users').doc(uid).get();
+      if (snap && snap.exists) noteAge(uid, snap.data());
+      const user = docToUser(snap);
       if (user) noteUsage(uid, user.usage);
       return user;
     },
@@ -2616,6 +2851,7 @@
       user.lastActiveAt = stamp;
       user.usage = normalizeUsage({ date: todayKey() });
       await db().collection('users').doc(user.uid).set(user);
+      noteAge(user.uid, user);
       await writeDiscovery(user);
       return user;
     },
@@ -2644,20 +2880,53 @@
       // are buffered until commit, so a replayed attempt does not republish
       // anything — the reason this used to sit outside does not hold.)
       // The cost is that a rejected projection now fails the whole save
-      // instead of warning: both documents are validated by the same rules
-      // from the same values, so that means a real bug, and stopping is better
-      // than a public profile that silently drifts from the private one.
+      // instead of warning. Both documents are validated from the same values,
+      // by rules that agree on every one of them but `lastActiveAt`, so any
+      // other refusal means a real bug, and stopping is better than a public
+      // profile that silently drifts from the private one.
+      //
+      // `lastActiveAt` is the exception: the projection's copy is held to a
+      // day past the server's clock and the private one only to a size, and
+      // projectStamp can clamp it to nothing better than this device's clock.
+      // On a device running more than a day fast, that is the clock that is
+      // wrong, and every save was refused: the block, the bio, the Pause
+      // switch, the plan. So a refused save is tried once more with the
+      // projection's stamp left as it is stored, which these rules held to the
+      // clock when it went in. A projection not written yet goes out without
+      // one, and stays out of the deck's newest-first walk until a touch the
+      // rules accept stamps it. The second attempt costs its read only after a
+      // refusal, and a refusal that was not about the stamp is refused again.
       const ref = db().collection('users').doc(uid);
       const shadow = db().collection('discovery').doc(String(uid));
-      return db().runTransaction(async function (tx) {
-        const snap = await tx.get(ref);
-        const base = snap.exists ? snap.data() || {} : missingUserBase(uid);
-        const merged = normalizeUser(deepMerge(base, patch || {}));
-        merged.uid = String(uid);
-        if (!merged.createdAt) merged.createdAt = nowIso();
-        merged.updatedAt = nowIso();
-        tx.set(ref, merged);
-        tx.set(shadow, projectDiscovery(merged));
+      const save = function (stamped) {
+        return db().runTransaction(async function (tx) {
+          const snap = await tx.get(ref);
+          const base = snap.exists ? snap.data() || {} : missingUserBase(uid);
+          const merged = normalizeUser(deepMerge(base, patch || {}));
+          merged.uid = String(uid);
+          if (!merged.createdAt) merged.createdAt = nowIso();
+          merged.updatedAt = nowIso();
+          tx.set(ref, merged);
+          const projection = projectDiscovery(merged);
+          if (stamped) {
+            tx.set(shadow, projection);
+          } else {
+            // Each field it names is replaced whole, exactly as the plain set
+            // replaces it, and the one it leaves out keeps its stored value.
+            tx.set(shadow, projection, {
+              mergeFields: Object.keys(projection).filter(function (key) { return key !== 'lastActiveAt'; })
+            });
+          }
+          return merged;
+        });
+      };
+      return save(true).catch(function (err) {
+        if (!isPermissionDenied(err)) throw err;
+        return save(false);
+      }).then(function (merged) {
+        // After the commit, not inside the callback: an attempt Firestore
+        // replays was never stored.
+        noteAge(uid, merged);
         return merged;
       });
     },
@@ -2673,7 +2942,17 @@
         // to the person themselves — meanwhile every other deck keeps scoring
         // them on a stale timestamp and quietly ranking them lower. An empty
         // catch made that indistinguishable from success.
-        await db().collection('discovery').doc(uid).update({ lastActiveAt: iso })
+        //
+        // After a birthday it carries the new age as well (see `ageOnRecord`),
+        // in the same write, so it costs nothing extra. Only the projection's
+        // copy is rewritten: the private one is re-derived on every read, and
+        // leaving it as the last save stored it means every touch until that
+        // next save carries the age again, so one that fails is retried by the
+        // next rather than lost.
+        const shadow = { lastActiveAt: iso };
+        const age = ageSinceSave(uid);
+        if (age !== null) shadow['profile.age'] = age;
+        await db().collection('discovery').doc(uid).update(shadow)
           .catch(function (err) {
             console.warn('[zc.store] Could not refresh lastActiveAt on the public projection.', err);
           });
@@ -2718,31 +2997,52 @@
       // the collection with a cursor until the deck is full, the collection is
       // exhausted, or a hard scan cap is hit.
       const out = [];
+      const seen = {};
       let cursor = null;
       let scanned = 0;
-      let ordered = true;
+      let indexed = true;
       while (out.length < limit && scanned < 1500) {
-        let snap;
-        try {
-          // Matches the composite index shipped in firestore.indexes.json.
-          let query = discovery
-            .where('profileComplete', '==', true)
-            .where('preferences.discoverable', '==', true)
-            .orderBy('lastActiveAt', 'desc')
-            .limit(pageSize);
-          if (cursor) query = query.startAfter(cursor);
-          snap = await query.get();
-        } catch (err) {
-          console.warn('[zc.store] Indexed candidate query unavailable, falling back.', err);
+        let snap = null;
+        if (indexed) {
           try {
-            let query = discovery.orderBy('lastActiveAt', 'desc').limit(pageSize);
+            // Matches the composite index shipped in firestore.indexes.json.
+            let query = discovery
+              .where('profileComplete', '==', true)
+              .where('preferences.discoverable', '==', true)
+              .orderBy('lastActiveAt', 'desc')
+              .limit(pageSize);
             if (cursor) query = query.startAfter(cursor);
             snap = await query.get();
-          } catch (innerErr) {
-            console.warn('[zc.store] Ordered candidate query unavailable, falling back again.', innerErr);
-            snap = await discovery.limit(pageSize).get();
-            ordered = false;
+          } catch (err) {
+            // The rest of the walk is the fallback below, from its first page.
+            // It runs in document order, where a cursor from this query's
+            // newest-first order would skip whoever sorts before that document
+            // and was not on the pages already read; `seen` keeps anybody those
+            // pages showed from being asked about twice.
+            console.warn('[zc.store] Indexed candidate query unavailable, falling back.', err);
+            indexed = false;
+            cursor = null;
           }
+        }
+        if (!indexed) {
+          // Discoverable profiles, unordered and paged by document: an equality
+          // on one field, which Firestore serves from its automatic single-field
+          // index, so it works while the composite index above is missing or
+          // building.
+          //
+          // It keeps `discoverable == true` because firestore.rules requires it.
+          // A paused projection is readable only by the accounts that know the
+          // person, and the rules are not a filter, so a query that does not say
+          // `discoverable == true` is refused whole. There used to be two fallbacks
+          // here, newest-first and then unordered, and neither said it; both would
+          // now only ever be refused. Newest-first with the filter does not replace
+          // the first of them: Firestore's index documentation lists an equality on
+          // one field ordered by another as a query that needs a composite index of
+          // its own, and a missing index is the reason this branch runs. (The
+          // emulator builds indexes on demand, so nothing here can measure that.)
+          let query = discovery.where('preferences.discoverable', '==', true).limit(pageSize);
+          if (cursor) query = query.startAfter(cursor);
+          snap = await query.get();
         }
         if (snap.empty) break;
         cursor = snap.docs[snap.docs.length - 1];
@@ -2755,7 +3055,8 @@
         // gender filter is never looked up at all.
         const shortlist = [];
         snap.forEach(function (doc) {
-          if (doc.id === uid) return;
+          if (doc.id === uid || seen[doc.id]) return;
+          seen[doc.id] = true;
           if (myBlocks.indexOf(doc.id) !== -1) return;
           // People I blocked are filtered above, from my own private document. People
           // who blocked *me* are not, and cannot be: their block list is private, and
@@ -2786,8 +3087,7 @@
           });
         }
 
-        // The unordered fallback cannot paginate; take the one page it gives.
-        if (!ordered || snap.size < pageSize) break;
+        if (snap.size < pageSize) break;
       }
       return out;
     },
@@ -2923,8 +3223,9 @@
         // Whether the swipe is still there is not asked: another tab may have rewound
         // it first, or this may be a retry, and the delete goes ahead either way.
         // firestore.rules allows deleting a missing swipe to either person its id
-        // names, as it allows reading one, so a second undo answers `{ ok: true }`
-        // exactly as the demo adapter's does, and no read is spent finding out.
+        // names (wider than reading one, which only its author may), so a second
+        // undo answers `{ ok: true }` exactly as the demo adapter's does, and no
+        // read is spent finding out.
         tx.delete(swipeRef);
         return { ok: true };
       });
@@ -3201,11 +3502,13 @@
               watcher.settle(true);
             });
           }, function (err) {
-            // No client-side fallback for the `in` query, unlike getLikesReceived:
-            // a listener's error arrives asynchronously, so "try the other query"
-            // would mean holding two subscriptions and reconciling them. The
-            // emulator and production both support `in`; a failure here means the
-            // badge stops updating, not that anything is lost.
+            // No client-side fallback for the `in` query, and getLikesReceived no
+            // longer has one either: the only other query, everything aimed at
+            // this account, can return a pass, which firestore.rules refuses. A
+            // listener's error arrives asynchronously besides, so "try the other
+            // query" would mean holding two subscriptions and reconciling them.
+            // The emulator and production both support `in`; a failure here means
+            // the badge stops updating, not that anything is lost.
             //
             // Stops updating — and used to stop SILENTLY, with no way back. This
             // listener took no error handler, so `app.js` kept holding the dead
@@ -3240,14 +3543,39 @@
         // delivered to this listener. The chat simply stops updating, with no
         // error anywhere, for as long as the conversation lives. The demo
         // adapter delivers every message and so never had the ceiling.
+        //
+        // `pending` marks a message this client has written and the server
+        // has not taken yet. The SDK delivers its own writes at once, before
+        // any acknowledgement, and with no connection it holds them in memory
+        // only: offline persistence is off, so leaving the page throws them
+        // away. Unmarked, that delivery looked exactly like a stored message,
+        // and the chat drew a message about to be lost as sent. The demo
+        // adapter delivers only what it has already stored, so it never sets
+        // the flag, and an acknowledged message here carries no `pending` key
+        // at all. `includeMetadataChanges` is what makes the acknowledgement
+        // arrive: it changes no data, only the snapshot's metadata, and
+        // without it the mark would outlive the write it describes.
+        //
+        // It also brings a snapshot every time the connection drops or comes
+        // back, with no message changed, and those are not passed on. Passed
+        // on, they were the same list again, and matches.js repainted an empty
+        // conversation's openers on each one, taking a keyboard user's focus
+        // with them. The demo adapter drops a list it has already delivered
+        // too. A message's own pending state changing is a document change
+        // here, so the acknowledgement still gets through.
+        let delivered = false;
         return db().collection('matches').doc(matchId).collection('messages')
           .orderBy('createdAt', 'desc')
           .limit(LIVE_MESSAGE_WINDOW)
-          .onSnapshot(function (snap) {
+          .onSnapshot({ includeMetadataChanges: true }, function (snap) {
+            if (delivered && !snap.docChanges({ includeMetadataChanges: true }).length) return;
+            delivered = true;
             const out = [];
             snap.forEach(function (doc) {
               const data = doc.data() || {};
-              out.push({ id: doc.id, from: data.from, text: String(data.text || ''), createdAt: toIso(data.createdAt) });
+              const message = { id: doc.id, from: data.from, text: String(data.text || ''), createdAt: toIso(data.createdAt) };
+              if (doc.metadata && doc.metadata.hasPendingWrites) message.pending = true;
+              out.push(message);
             });
             cb(out.reverse());
           }, function (err) {
@@ -3430,13 +3758,25 @@
       const reports = await db().collection('reports').where('from', '==', uid).get();
       await batchDelete(reports.docs.map(function (doc) { return doc.ref; }));
 
-      // Swipes in both directions: the ones this account made, and the ones
+      // Swipes in both directions: the ones this account made, and the likes
       // aimed at it — an inbound like is data about this account and must not
       // outlive it.
+      //
+      // Likes, not every inbound swipe, because a pass is no longer this
+      // account's to see. firestore.rules lets it read a swipe aimed at it only
+      // when that swipe is a like or a super like, and refuses a query that could
+      // return anything else, so asking for everything aimed at it would fail this
+      // whole deletion. A pass aimed at it stays with the account that made it,
+      // as that account's own record of a decision, readable by nobody else; the
+      // demo adapter leaves it the same way. settings.html promises to remove
+      // "every swipe you have made", which this still does.
       const swipes = db().collection('swipes');
-      const directions = ['from', 'to'];
-      for (let d = 0; d < directions.length; d += 1) {
-        const snap = await swipes.where(directions[d], '==', uid).get();
+      const queries = [
+        swipes.where('from', '==', uid),
+        swipes.where('to', '==', uid).where('action', 'in', ['like', 'super'])
+      ];
+      for (let q = 0; q < queries.length; q += 1) {
+        const snap = await queries[q].get();
         await batchDelete(snap.docs.map(function (doc) { return doc.ref; }));
       }
 
@@ -3450,7 +3790,7 @@
       // The public projection, then the private document — and in that order,
       // with nothing swallowed between them.
       //
-      // discovery/{uid} is the world-readable half of an account: display
+      // discovery/{uid} is the half of an account other people read: display
       // name, photo, the profile fields the deck needs. It used to be deleted
       // inside a .catch that warned and carried on, so a rejected delete still
       // reached the line below, removed the private document, and returned
@@ -4589,7 +4929,9 @@
     },
 
     /**
-     * The public face of an account: what any signed-in user may see of it.
+     * The public face of an account: what any signed-in user may see of it
+     * while it is discoverable, and, once it is paused, what its owner, its
+     * matches and the people it liked still may.
      * Demo mode serves the stored document itself; firebase mode reads the
      * discovery projection. Null when the account is gone or unreadable —
      * callers should treat that as "a deleted account", not as an error.
@@ -4625,10 +4967,13 @@
     },
 
     /**
-     * Remove everything stored about an account: swipes in both directions,
-     * matches with their messages, the public discovery projection (firebase
-     * mode) and the account document itself. Deleting the sign-in credential
-     * is the caller's job — this only clears the data.
+     * Remove everything stored about an account: the swipes it made and the
+     * likes aimed at it, matches with their messages, the public discovery
+     * projection (firebase mode) and the account document itself. A pass aimed
+     * at it stays, in both modes, as the record of the account that made it:
+     * firestore.rules keeps a pass private to its author, so firebase mode
+     * cannot find one to delete. Deleting the sign-in credential is the
+     * caller's job — this only clears the data.
      * @param {string} uid the account being deleted
      * @returns {Promise<boolean>}
      */
@@ -4653,7 +4998,8 @@
     },
 
     /**
-     * Wipe and re-seed the demo database. Throws in firebase mode.
+     * Wipe and re-seed the demo database, keeping the accounts made in this
+     * browser (see createdAccounts). Throws in firebase mode.
      * @returns {Promise<boolean>}
      */
     async resetDemo() {

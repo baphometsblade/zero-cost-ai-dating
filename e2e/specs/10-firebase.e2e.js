@@ -22,7 +22,9 @@
    checks at all; it never passes quietly. */
 'use strict';
 
+const fs = require('node:fs');
 const http = require('node:http');
+const path = require('node:path');
 
 /* --------------------------------------------------------------------------
    1. Where the emulators are
@@ -667,6 +669,173 @@ module.exports = {
       t.check('neither swiped candidate comes back after signing in again',
         !!again && returned.length === 0, 'top card: ' + again);
 
+      /* ---- a connection that drops and comes back, in an empty conversation ---- */
+
+      // The live thread asks the SDK for snapshots whose metadata changes, so
+      // that a message the server has acknowledged stops saying 'Sending…'
+      // (see below). The connection changing is such a snapshot too, with no
+      // message changed, and it used to be delivered as the same list again:
+      // an empty conversation repainted its openers on each drop and each
+      // return, and a keyboard user's focus on one fell to the page. The
+      // witness is the store's own query (newest first, the live window of
+      // 200), so it shares the page's watch target and hears each flip in the
+      // same pass; the SDK calls listeners back on `setTimeout(0)` in the
+      // order they were added, and one more turn of the queue after the
+      // witness has heard a flip is past the page's own callback for it.
+      const quiet = CANDIDATES[1];
+      const quietId = [uid, quiet.uid].sort().join('_');
+      await emulator(FIRESTORE, 'PATCH', DOCS + '/matches/' + quietId, { fields: encodeFields({
+        id: quietId, users: [uid, quiet.uid].sort(), createdAt: '2026-08-02T00:00:00.000Z',
+        lastMessage: null, lastMessageAt: null, unread: { [uid]: 0, [quiet.uid]: 0 }
+      }) });
+      await page.goto(base + '/matches.html?m=' + encodeURIComponent(quietId), { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#chat-log .icebreaker');
+      await page.evaluate(function (id) {
+        const log = document.getElementById('chat-log');
+        const probe = { opener: log.querySelector('.icebreaker'), changes: 0, flips: [] };
+        probe.opener.focus();
+        probe.observer = new MutationObserver(function (records) { probe.changes += records.length; });
+        probe.observer.observe(log, { childList: true, subtree: true, characterData: true });
+        probe.stop = window.ZC.firebase.db.collection('matches').doc(id).collection('messages')
+          .orderBy('createdAt', 'desc').limit(200)
+          .onSnapshot({ includeMetadataChanges: true }, function (snap) { probe.flips.push(snap.metadata.fromCache); });
+        window.__zcConnectionProbe = probe;
+      }, quietId);
+      const settleOn = async function (fromCache) {
+        await page.waitForFunction(function (want) {
+          const flips = window.__zcConnectionProbe.flips;
+          return flips.length > 0 && flips[flips.length - 1] === want;
+        }, fromCache);
+        return page.evaluate(function () {
+          return new Promise(function (resolve) { setTimeout(resolve, 0); }).then(function () {
+            const probe = window.__zcConnectionProbe;
+            const opener = document.querySelector('#chat-log .icebreaker');
+            return {
+              changes: probe.changes,
+              sameOpener: opener === probe.opener,
+              focus: document.activeElement === probe.opener ? 'the opener' : (document.activeElement || {}).className || null
+            };
+          });
+        });
+      };
+      await settleOn(false);
+      await page.evaluate(function () { return window.ZC.firebase.db.disableNetwork(); });
+      const whileAway = await settleOn(true);
+      await page.evaluate(function () { return window.ZC.firebase.db.enableNetwork(); });
+      const onReturn = await settleOn(false);
+      const probeFlips = await page.evaluate(function () {
+        const probe = window.__zcConnectionProbe;
+        probe.stop();
+        probe.observer.disconnect();
+        return probe.flips;
+      });
+      t.check('a connection that drops and comes back leaves an empty conversation\'s openers, and the focus on one, where they were',
+        [whileAway, onReturn].every(function (seen) {
+          return seen.changes === 0 && seen.sameOpener && seen.focus === 'the opener';
+        }),
+        JSON.stringify({ away: whileAway, back: onReturn, witnessFromCache: probeFlips }));
+
+      /* ---- a message sent with no connection ---- */
+
+      // Offline, the SDK holds a write in memory until the server takes it,
+      // and its listener shows the message straight away. The chat drew that
+      // as sent, the composer was already empty, and with offline persistence
+      // off, leaving the page threw the message away: it never reached the
+      // server or the other person, and nothing on screen had said so.
+      // `disableNetwork()` is the SDK's own offline switch, so the write is
+      // held from here until `enableNetwork()` below and no longer.
+      const peer = CANDIDATES[CANDIDATES.length - 1];
+      const chatId = [uid, peer.uid].sort().join('_');
+      await emulator(FIRESTORE, 'PATCH', DOCS + '/matches/' + chatId, { fields: encodeFields({
+        id: chatId, users: [uid, peer.uid].sort(), createdAt: '2026-08-02T00:00:00.000Z',
+        lastMessage: 'Dinner tonight?', lastMessageAt: '2026-08-02T00:00:01.000Z', unread: { [uid]: 0, [peer.uid]: 0 }
+      }) });
+      await emulator(FIRESTORE, 'PATCH', DOCS + '/matches/' + chatId + '/messages/m1', { fields: encodeFields({
+        id: 'm1', from: peer.uid, text: 'Dinner tonight?', createdAt: '2026-08-02T00:00:01.000Z'
+      }) });
+      const stored = async function () {
+        const answer = await emulator(FIRESTORE, 'GET', DOCS + '/matches/' + chatId + '/messages');
+        return ((answer.body && answer.body.documents) || []).map(function (d) { return decodeFields(d.fields).text; });
+      };
+      const stampOf = function (text) {
+        const bubble = Array.prototype.filter.call(document.querySelectorAll('#chat-log .msg'), function (node) {
+          const body = node.querySelector('.msg-text');
+          return !!body && body.textContent === text;
+        })[0];
+        const stamp = bubble && bubble.querySelector('.msg-time');
+        return stamp ? stamp.textContent : null;
+      };
+      const thread = base + '/matches.html?m=' + encodeURIComponent(chatId);
+      await page.goto(thread, { waitUntil: 'domcontentloaded' });
+      await page.waitForFunction(function () {
+        return /Dinner tonight\?/.test((document.getElementById('chat-log') || {}).textContent || '');
+      });
+
+      const LATE = 'Running ten minutes late, see you at eight?';
+      await page.evaluate(function () { return window.ZC.firebase.db.disableNetwork(); });
+      await page.fill('#chat-input', LATE);
+      await page.click('#chat-send');
+      const drawn = await page.waitForFunction(stampOf, LATE).then(function (handle) { return handle.jsonValue(); });
+      const whileHeld = await stored();
+      t.check('a message the server does not have yet is drawn as sending, not as sent',
+        /Sending/.test(drawn || '') && whileHeld.indexOf(LATE) === -1,
+        JSON.stringify({ stamp: drawn, onServer: whileHeld.indexOf(LATE) !== -1 }));
+
+      await page.evaluate(function () { return window.ZC.firebase.db.enableNetwork(); });
+      const sentStamp = await page.waitForFunction(function (text) {
+        const bubble = Array.prototype.filter.call(document.querySelectorAll('#chat-log .msg'), function (node) {
+          const body = node.querySelector('.msg-text');
+          return !!body && body.textContent === text;
+        })[0];
+        const stamp = bubble && bubble.querySelector('.msg-time');
+        return stamp && !/Sending/.test(stamp.textContent) ? stamp.textContent : null;
+      }, LATE, { timeout: 15000 }).then(function (handle) { return handle.jsonValue(); }, function () { return null; });
+      const afterAck = await stored();
+      t.check('and once the server has it, the same bubble is drawn as sent',
+        !!sentStamp && afterAck.indexOf(LATE) !== -1,
+        JSON.stringify({ stamp: sentStamp, onServer: afterAck.indexOf(LATE) !== -1 }));
+
+      // Leaving. Once the send has finished, a reload must not ask; then a
+      // second message is held and leaving must. "Finished" is the button
+      // dropping `aria-busy`, not the stamp turning: the send goes on to write
+      // the conversation's preview and the other side's unread count after
+      // the message itself is stored, and leaving inside that is worth a
+      // question too. The session accepts every native dialog (see
+      // harness.openSession), so the page goes either way and this only
+      // records whether it was asked.
+      await page.waitForFunction(function () {
+        const send = document.getElementById('chat-send');
+        return !!send && !send.hasAttribute('aria-busy');
+      });
+      const asked = [];
+      const recordDialog = function (dialog) { asked.push(dialog.type()); };
+      page.on('dialog', recordDialog);
+      try {
+        await page.goto(thread, { waitUntil: 'domcontentloaded' });
+        await page.waitForFunction(function (text) {
+          return ((document.getElementById('chat-log') || {}).textContent || '').indexOf(text) !== -1;
+        }, LATE);
+        const askedWhenSent = asked.slice();
+        const LOST = 'Actually, make it nine.';
+        await page.evaluate(function () { return window.ZC.firebase.db.disableNetwork(); });
+        await page.fill('#chat-input', LOST);
+        await page.click('#chat-send');
+        await page.waitForFunction(stampOf, LOST);
+        await page.goto(base + '/dashboard.html', { waitUntil: 'domcontentloaded' });
+        // A card, not just the stack: the stack is in the page's own markup, so
+        // it is there before the account has loaded, and the probe below
+        // deletes that account's document and recreates it with no finished
+        // profile. A page still loading the account then finds it missing or
+        // unfinished and goes to onboarding, and the sign-out checks at the end
+        // would start from there instead of from this page.
+        await page.waitForSelector('#deck-stack .swipe-card');
+        t.check('leaving with a message still sending asks first, and leaving with none pending does not',
+          askedWhenSent.length === 0 && asked.length === 1 && asked[0] === 'beforeunload',
+          JSON.stringify({ nothingPending: askedWhenSent, oneHeld: asked.slice(askedWhenSent.length) }));
+      } finally {
+        page.off('dialog', recordDialog);
+      }
+
       /* ---- the finding ---- */
 
       // Run after everything that reads this account's document, because it
@@ -798,6 +967,103 @@ module.exports = {
       // 403, 409 and 400 — and their own checks require there to be none: nothing
       // in this spec may lose a transaction to a write the same page made.
 
+      /* ---- a saved config Firebase refuses still has a way back ---- */
+
+      // Settings checks that a pasted config has its four keys and no
+      // placeholder in it, and can check no more: an apiKey with one character
+      // wrong looks like any other. Saved, it reloads the app in firebase mode,
+      // where every sign-in and sign-up is refused. "Reset to demo mode" lived
+      // only on settings.html, which sends anyone signed out to the sign-in
+      // page, and the sign-in page said "Something went wrong" and offered no
+      // way back: the browser was stuck until its site data was cleared by hand.
+      //
+      // A session of its own, because the main one is wired to the emulators on
+      // every load and the reset has to be seen to stick. It runs the real SDK,
+      // and the answer Google gives a key that is not valid is served for its
+      // API hosts, so nothing leaves the machine. The service worker is kept
+      // out, so it cannot answer any of these requests itself.
+      const refused = await h.openSession(ctx.session.context.browser(), ctx.viewport, { serviceWorkers: 'block' });
+      try {
+        const rp = refused.page;
+        // openSession aborts the CDN for a demo session. A route added later
+        // answers first, and this one serves the SDK the main session loads.
+        await refused.context.route('**://www.gstatic.com/**', function (route) {
+          const mirror = process.env.E2E_FIREBASE_SDK || '';
+          const file = mirror ? path.join(mirror, path.basename(new URL(route.request().url()).pathname)) : '';
+          if (!file || !fs.existsSync(file)) return route.continue();
+          return route.fulfill({ status: 200, contentType: 'text/javascript; charset=utf-8', body: fs.readFileSync(file) });
+        });
+        const keyNotValid = 'API key not valid. Please pass a valid API key.';
+        await refused.context.route(/^https:\/\/([a-z0-9-]+\.)*googleapis\.com\//, function (route) {
+          return route.fulfill({
+            status: 400,
+            contentType: 'application/json',
+            body: JSON.stringify({ error: {
+              code: 400, message: keyNotValid, status: 'INVALID_ARGUMENT',
+              errors: [{ message: keyNotValid, domain: 'global', reason: 'badRequest' }]
+            } })
+          });
+        });
+
+        // The way a person gets there: the demo account, Settings, a config
+        // with one wrong character in its key, Save and reload.
+        await h.signIn(rp, base);
+        await rp.goto(base + '/settings.html', { waitUntil: 'domcontentloaded' });
+        await rp.waitForSelector('#firebase-config');
+        await rp.fill('#firebase-config', JSON.stringify({
+          apiKey: 'AIzaSyB-typo-in-this-key-0000000000000',
+          authDomain: 'e2e-typo.firebaseapp.com',
+          projectId: 'e2e-typo',
+          appId: '1:123456789012:web:abcdef0123456789'
+        }));
+        await rp.click('#save-firebase');
+        await rp.waitForURL(h.pageUrl('auth'));
+        await rp.waitForSelector('#auth-form');
+        const stuckMode = await rp.evaluate(function () { return window.ZC.config.mode; });
+
+        await rp.fill('#input-email', 'locked-out@example.com');
+        await rp.fill('#input-password', 'a-long-enough-passphrase');
+        await rp.click('#submit-btn');
+        await rp.waitForFunction(function () {
+          return !document.getElementById('auth-alert').classList.contains('hidden');
+        });
+        const said = (await rp.textContent('#auth-alert')).trim();
+        t.check('a saved config Firebase refuses is named as the problem, not "Something went wrong"',
+          stuckMode === 'firebase' && /config/i.test(said) && !/something went wrong/i.test(said),
+          'mode ' + stuckMode + ', said ' + JSON.stringify(said));
+
+        // The way back, from the page every signed-out visit ends on. The demo
+        // session is still in this browser, so demo mode signs straight back
+        // into it and the page goes on to the Settings page it was asked for.
+        const offered = await rp.locator('#config-reset:visible').count();
+        let back = { url: rp.url(), mode: stuckMode, stored: 'not reset' };
+        if (offered) {
+          await rp.click('#config-reset');
+          await h.clickModalAction(rp, 'Reset and reload');
+          // Bounded, and its answer is part of the check below rather than a
+          // throw: a reset that never reaches Settings reports where it stopped.
+          await rp.waitForURL(h.pageUrl('settings'), { timeout: 10000 }).then(null, function () { /* reported below */ });
+          back = await rp.evaluate(function () {
+            return {
+              url: window.location.href,
+              mode: window.ZC.config.mode,
+              stored: window.localStorage.getItem('zc.firebaseConfig')
+            };
+          });
+        }
+        t.check('and the sign-in page it lands on resets it, back into the demo account it left',
+          offered === 1 && back.mode === 'demo' && back.stored === null && h.pageUrl('settings').test(back.url),
+          (offered ? '' : 'no reset on the sign-in page; ') + JSON.stringify(back));
+
+        // Google's refusals are what this provoked, and the browser logs each
+        // one as a failed resource. Anything else is a defect.
+        const refusals = drain(refused.errors, 'googleapis.com', 400);
+        t.check('and the whole round trip logs nothing else', refused.errors.length === 0,
+          refusals.length + ' refusal(s) set aside; ' + (refused.errors.slice(0, 3).join(' | ') || 'nothing else'));
+      } finally {
+        await refused.context.close();
+      }
+
       // A sign-out that fails leaves the page where it is, and must not leave
       // it deaf to the next change: a page marks its own sign-out so that the
       // session ending is not mistaken for another tab's doing, and that mark
@@ -827,6 +1093,99 @@ module.exports = {
         failed && failed.ok === false && movedTo.indexOf(base + '/') === 0 &&
           h.pageUrl('auth').test(movedTo) && /[?&]next=/.test(movedTo),
         JSON.stringify(failed) + ' · ' + movedTo);
+
+      /* ---- a sign-out while a message is still sending ---- */
+
+      // The question asked above while a message is held lasted until the send
+      // finished, and a held write belongs to the account that made it: once
+      // that account had signed out, the send did not finish even with the
+      // connection back, so the question outlived the account. A sign-out in
+      // another tab sends this page to the sign-in page, and the question
+      // stopped it; the page's own Sign out ends the session and then goes to
+      // the landing page, and the question stopped that too. Whoever chose to
+      // stay was left signed out with the other person's messages on screen,
+      // and was asked again on every way off the page. The session accepts
+      // every native dialog, so the page leaves either way; what is checked is
+      // that nothing asked, and where it went.
+      //
+      // An account of its own, seeded whole beside its conversation, so that
+      // nothing above decides whether it reaches one. Signed out, the
+      // conversation's address goes to the sign-in page, and signing in there
+      // comes back to it, so this never passes through the deck: a draft that
+      // did, signing the account before it out on the deck and then going
+      // straight from the deck to the conversation, logged Firestore console
+      // errors on four runs out of six.
+      const heldEmail = 'e2e-held-' + Date.now() + '@example.com';
+      const heldMade = await emulator(AUTH, 'POST', '/identitytoolkit.googleapis.com/v1/accounts:signUp?key=emulator-api-key',
+        { email: heldEmail, password: password, returnSecureToken: true });
+      const heldUid = heldMade.body && heldMade.body.localId;
+      const heldWho = { uid: heldUid, name: 'Held Sender', age: 29, gender: 'man' };
+      await emulator(FIRESTORE, 'PATCH', DOCS + '/discovery/' + heldUid, { fields: encodeFields(discoveryDoc(heldWho)) });
+      await emulator(FIRESTORE, 'PATCH', DOCS + '/users/' + heldUid,
+        { fields: encodeFields(Object.assign(userDoc(heldWho), { email: heldEmail })) });
+      const heldPeer = CANDIDATES[0];
+      const heldId = [heldUid, heldPeer.uid].sort().join('_');
+      const ASKED = 'Are you still coming?';
+      await emulator(FIRESTORE, 'PATCH', DOCS + '/matches/' + heldId, { fields: encodeFields({
+        id: heldId, users: [heldUid, heldPeer.uid].sort(), createdAt: '2026-08-02T00:00:00.000Z',
+        lastMessage: ASKED, lastMessageAt: '2026-08-02T00:00:01.000Z', unread: { [heldUid]: 0, [heldPeer.uid]: 0 }
+      }) });
+      await emulator(FIRESTORE, 'PATCH', DOCS + '/matches/' + heldId + '/messages/h1', { fields: encodeFields({
+        id: 'h1', from: heldPeer.uid, text: ASKED, createdAt: '2026-08-02T00:00:01.000Z'
+      }) });
+      // From the sign-in page the conversation sent this page to: sign in,
+      // land back in the conversation, take the connection away and send
+      // `text`, which is then held and drawn 'Sending…'.
+      const holdOne = async function (text) {
+        await page.waitForURL(h.pageUrl('auth'));
+        await page.waitForSelector('#auth-form');
+        await page.fill('#input-email', heldEmail);
+        await page.fill('#input-password', password);
+        await page.click('#submit-btn');
+        await page.waitForURL(h.pageUrl('matches'));
+        await page.waitForFunction(function (want) {
+          return ((document.getElementById('chat-log') || {}).textContent || '').indexOf(want) !== -1;
+        }, ASKED);
+        await page.evaluate(function () { return window.ZC.firebase.db.disableNetwork(); });
+        await page.fill('#chat-input', text);
+        await page.click('#chat-send');
+        return page.waitForFunction(stampOf, text).then(function (handle) { return handle.jsonValue(); });
+      };
+      const leaving = [];
+      const recordLeaving = function (dialog) { leaving.push(dialog.type()); };
+      page.on('dialog', recordLeaving);
+      try {
+        await page.goto(base + '/matches.html?m=' + encodeURIComponent(heldId), { waitUntil: 'domcontentloaded' });
+        const heldThere = await holdOne('Held while another tab signs out.');
+        const other = await ctx.session.context.newPage();
+        await other.goto(base + '/index.html', { waitUntil: 'domcontentloaded' });
+        await other.waitForFunction(function () { return !!(window.ZC && window.ZC.auth && window.ZC.auth.current); });
+        await other.evaluate(function () { return window.ZC.auth.signOut(); });
+        await page.waitForURL(h.pageUrl('auth'), { timeout: 10000 }).catch(function () {});
+        const guardedTo = page.url();
+        await other.close();
+        const askedThere = leaving.splice(0);
+        const backTo = new URL(guardedTo).searchParams.get('next') || '';
+        t.check('a sign-out in another tab while a message is still sending sends the page to sign in, without asking',
+          /Sending/.test(heldThere || '') && askedThere.length === 0 && h.pageUrl('auth').test(guardedTo) &&
+            h.pageUrl('matches').test(backTo) && backTo.indexOf(heldId) !== -1,
+          JSON.stringify({ stamp: heldThere, asked: askedThere, at: guardedTo.replace(base, '') }));
+
+        const heldHere = await holdOne('Held while this page signs out.');
+        // The nav's Sign out. CSS hides the nav's links at this width, where
+        // Settings carries the control, so the click is dispatched to the
+        // button rather than made with a pointer: app.js handles it the same
+        // way at every width.
+        await page.locator('[data-zc-nav] [data-signout]').dispatchEvent('click');
+        await page.waitForURL(h.pageUrl('index'), { timeout: 10000 }).catch(function () {});
+        const signedOutTo = page.url();
+        const askedHere = leaving.splice(0);
+        t.check('and the page\'s own Sign out goes on to the landing page without asking',
+          /Sending/.test(heldHere || '') && askedHere.length === 0 && h.pageUrl('index').test(signedOutTo),
+          JSON.stringify({ stamp: heldHere, asked: askedHere, at: signedOutTo.replace(base, '') }));
+      } finally {
+        page.off('dialog', recordLeaving);
+      }
 
       /* ---- two accounts whose identity the app did not choose ---- */
 

@@ -2,10 +2,10 @@
    Zero Cost AI Dating — what is public about an account, agreed in one place
 
    An account is split in two. `users/{uid}` is readable only by its owner;
-   `discovery/{uid}` is readable by every signed-in user, because that is the
-   surface the deck ranks. Deciding which fields cross that line is the single
-   most consequential judgement in this codebase, and it was written down three
-   times independently:
+   `discovery/{uid}` is readable by every signed-in user while it is
+   discoverable, because that is the surface the deck ranks. Deciding which
+   fields cross that line is the single most consequential judgement in this
+   codebase, and it was written down three times independently:
 
      - `projectDiscovery()` in public/js/data-store.js decides what is copied;
      - three `keys().hasOnly([...])` lists in firestore.rules decide what is
@@ -292,6 +292,46 @@ test('an empty account projects the same shape as a full one', function () {
     'a sparse account projects a different profile shape than a complete one');
   assert.deepEqual(Object.keys(sparse.preferences).sort(), Object.keys(full.preferences).sort(),
     'a sparse account projects a different preferences shape than a complete one');
+});
+
+test('the projection holds interests and its activity stamp to what its own rules accept', function () {
+  // Two places where firestore.rules holds the world-readable copy tighter than the
+  // private one: interests must be slugs from the vocabulary seed-data.js publishes,
+  // where the private document is held only to a count and a character total, and
+  // lastActiveAt must be a toISOString() stamp no more than a day past the server's
+  // clock, where the private document takes any short string. A value the private
+  // rules accept and the projection's refuse is a profile save that fails — the
+  // projection is written in the same transaction — naming no field.
+  const user = fullPrivateUser();
+  user.profile.interests = ['hiking', '__x__', 'not-a-tag', 'constructor', 'coffee'];
+  user.lastActiveAt = '9999-12-31T23:59:59.999Z';
+  const before = Date.now();
+  const projected = projectDiscovery(user);
+  const after = Date.now();
+
+  assert.deepEqual(projected.profile.interests, ['hiking', 'coffee'],
+    'a tag outside the vocabulary was published, and the rules refuse the whole projection for it');
+  const at = Date.parse(projected.lastActiveAt);
+  assert.ok(at >= before && at <= after && projected.lastActiveAt === new Date(at).toISOString(),
+    'a stamp later than now was published as ' + projected.lastActiveAt);
+
+  // ...and an ordinary account is published as it was.
+  const plain = projectDiscovery(fullPrivateUser());
+  assert.deepEqual(plain.profile.interests, ['hiking']);
+  assert.equal(plain.lastActiveAt, '2026-01-02T03:04:05.000Z');
+
+  // A table that holds nothing cannot tell a slug from anything else, so it is
+  // treated as no table: read as "nothing is a tag", it would publish a profile
+  // with every interest gone.
+  const table = window.ZC.INTEREST_BY_SLUG;
+  let bare;
+  try {
+    window.ZC.INTEREST_BY_SLUG = {};
+    bare = projectDiscovery(fullPrivateUser());
+  } finally {
+    window.ZC.INTEREST_BY_SLUG = table;
+  }
+  assert.deepEqual(bare.profile.interests, ['hiking'], 'an empty table published no interests at all');
 });
 
 test('the rules accept exactly the keys the store puts in a private user document', async function () {

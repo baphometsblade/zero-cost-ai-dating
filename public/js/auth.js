@@ -64,6 +64,9 @@
     ? 'firebase'
     : 'demo';
 
+  /** Where Settings saves a Firebase config, mirroring firebase-config.js. */
+  const OVERRIDE_KEY = (ZC.config && ZC.config.overrideKey) || 'zc.firebaseConfig';
+
   /* ------------------------------------------------------------------------
      2. Guarded storage
      ------------------------------------------------------------------------ */
@@ -141,8 +144,24 @@
     'auth/cancelled-popup-request': 'Only one Google window at a time. Try again.',
     'auth/unauthorized-domain': 'This address is not on the Firebase project list of authorised domains.',
     'auth/requires-recent-login': 'Please sign in again to finish that.',
-    'auth/internal-error': 'Sign-in failed unexpectedly. Please try again.'
+    'auth/internal-error': 'Sign-in failed unexpectedly. Please try again.',
+    // The two below are the config's fault, not the person's: no email and
+    // password gets past either, and both used to read "Something went wrong".
+    // Settings can check that a pasted config has its keys, not that they are
+    // right. The first is keyed by its start; see API_KEY_NOT_VALID. The second
+    // is the SDK's lowercased, hyphenated form of Google's
+    // CONFIGURATION_NOT_FOUND, its answer for a project with no Authentication
+    // set up.
+    'auth/api-key-not-valid': 'Firebase refused the apiKey in this app’s Firebase config, so no one can sign in until the config is corrected.',
+    'auth/configuration-not-found': 'Authentication is not set up for the Firebase project in this app’s config, so no one can sign in to it yet.'
   };
+
+  // Google answers a key it does not know with "API key not valid. Please pass
+  // a valid API key.", and the SDK, which has no code of its own for that,
+  // makes one out of the sentence: auth/api-key-not-valid.-please-pass-a-valid-api-key.
+  // Matched on its start, so a change to the rest of Google's wording cannot
+  // unmap it.
+  const API_KEY_NOT_VALID = 'auth/api-key-not-valid';
 
   const GENERIC_ERROR = 'Something went wrong. Please try again.';
 
@@ -156,6 +175,7 @@
     if (!err) return GENERIC_ERROR;
     const code = typeof err.code === 'string' ? err.code : '';
     if (ERROR_TEXT[code]) return ERROR_TEXT[code];
+    if (code.indexOf(API_KEY_NOT_VALID) === 0) return ERROR_TEXT[API_KEY_NOT_VALID];
     console.warn('[zc.auth] Unmapped auth failure.', err);
     if (!code && typeof err.message === 'string' && err.message && err.message.indexOf('auth/') === -1) {
       return err.message;
@@ -839,10 +859,20 @@
 
   /**
    * Leave the page. Uses replace() so guards never build up history entries.
+   *
+   * Every call is the app moving on because of the session — a guard, or the
+   * sign-in page once someone has signed in — never the person choosing to
+   * go, so the page is told first with a `zc:leaving` event on window. A page
+   * that asks before it is left asks for the person: matches.js does while a
+   * message is sending, and a guard leaving because the account had signed
+   * out in another tab was stopped by that question, with the account it was
+   * asked for already gone. app.js says the same before its own Sign out
+   * leaves.
    * @param {string} url relative destination
    * @returns {void}
    */
   function leaveTo(url) {
+    window.dispatchEvent(new Event('zc:leaving'));
     window.location.replace(url);
   }
 
@@ -1327,6 +1357,9 @@
       googleBtn: document.getElementById('google-btn'),
       demoBlock: document.getElementById('demo-block'),
       demoBtn: document.getElementById('demo-btn'),
+      configBlock: document.getElementById('config-block'),
+      configNotice: document.getElementById('config-notice'),
+      configReset: document.getElementById('config-reset'),
       resetForm: document.getElementById('reset-form'),
       resetField: document.getElementById('field-reset-email'),
       resetInput: document.getElementById('input-reset-email'),
@@ -1770,10 +1803,42 @@
       }
     });
 
+    // Away from a config saved in Settings (firebase mode only — the block
+    // stays hidden otherwise). Settings' own reset, which a signed-out visitor
+    // cannot reach, done the same way: confirm, remove the saved config,
+    // reload. What the reload lands on is BAKED_CONFIG in firebase-config.js:
+    // demo mode while it holds the shipped placeholders, its own project once a
+    // deployment has filled it in. ZC.config does not say which, so the
+    // sentence below names both.
+    dom.configReset.addEventListener('click', async function () {
+      const ok = typeof ui.confirm === 'function'
+        ? await ui.confirm(
+          'This removes the Firebase config saved in this browser and reloads the app without it: in demo mode, unless this site was built with a Firebase project of its own.\nYour Firebase project is untouched — nothing is deleted from it.',
+          { title: 'Remove the saved config?', confirmLabel: 'Reset and reload', variant: 'danger' }
+        )
+        : true;
+      if (!ok) return;
+      removeKey(OVERRIDE_KEY);
+      busy(dom.configReset, true, 'Reloading…');
+      window.location.reload();
+    });
+
     /* --- first paint ------------------------------------------------------ */
 
     // Demo-mode affordances: the notice, the demo button, no Google.
     toggle(dom.demoNotice, MODE === 'demo');
+
+    // A config saved in Settings can lock this browser out: a key with one
+    // character wrong passes Settings' checks, every sign-in and sign-up here
+    // is then refused, and Settings, where the other reset is, needs an
+    // account. Say which config this page is on, and offer the way back.
+    const savedConfig = MODE === 'firebase' && !!(ZC.config && ZC.config.fromSettings);
+    if (savedConfig) {
+      const projectId = (ZC.config.firebase && ZC.config.firebase.projectId) || '';
+      dom.configNotice.textContent = 'Signing in to the Firebase project “' + projectId +
+        '”, from a config saved in this browser in Settings. If no one can sign in to it, remove it here.';
+    }
+    toggle(dom.configBlock, savedConfig);
 
     const requested = String(readQuery('mode') || '').toLowerCase();
     setView(requested === 'signup' || requested === 'register' ? 'signup' : 'signin', false);

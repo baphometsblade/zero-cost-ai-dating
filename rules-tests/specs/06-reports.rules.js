@@ -18,6 +18,10 @@ module.exports = {
     const SUBJECT = 'subject';
     const OTHER = 'other';
     const GHOST = 'ghost';   // deliberately absent from discovery
+    // Both absent from discovery too, each with a match and nothing else: the
+    // first with ME, the second with OTHER only.
+    const MATCHED = 'matched-unpublished';
+    const LONER = 'loner-unpublished';
 
     await seed(async function (admin) {
       const db = admin.firestore();
@@ -26,6 +30,8 @@ module.exports = {
       await db.doc('discovery/' + ME).set(h.discoveryDoc(ME));
       // A report filed by somebody else, for the visibility checks.
       await db.doc('reports/' + OTHER + '_' + SUBJECT).set(h.reportDoc(OTHER, SUBJECT));
+      await db.doc('matches/' + h.pairId(ME, MATCHED)).set(h.matchDoc(ME, MATCHED));
+      await db.doc('matches/' + h.pairId(OTHER, LONER)).set(h.matchDoc(OTHER, LONER));
     });
 
     /* ---- create ---- */
@@ -44,6 +50,21 @@ module.exports = {
 
     t.check('you cannot report a uid that does not exist',
       await ok(assertFails(as(ME).doc('reports/' + ME + '_' + GHOST).set(h.reportDoc(ME, GHOST)))));
+
+    // The subject's projection is theirs to delete, at any moment, and nothing a
+    // conversation needs depends on it: message writes ask only whether the caller
+    // is in the match. So "exists in discovery" let a matched harasser delete one
+    // document, keep messaging, and turn every report about them into a refusal.
+    // Somebody who can still write to you can be reported, and the match is the
+    // proof of that the subject cannot take back without also losing the thread.
+    t.check('you can report somebody you are matched with after they delete their projection',
+      await ok(assertSucceeds(as(ME).doc('reports/' + ME + '_' + MATCHED).set(h.reportDoc(ME, MATCHED)))));
+
+    // The match is looked up by the pair id built from the report's own two uids,
+    // so a match the subject has with somebody else proves nothing about the
+    // reporter and still leaves an unpublished uid unreportable.
+    t.check('but another pair\'s match does not make an unpublished uid reportable',
+      await ok(assertFails(as(ME).doc('reports/' + ME + '_' + LONER).set(h.reportDoc(ME, LONER)))));
 
     t.check('you cannot report yourself',
       await ok(assertFails(as(ME).doc('reports/' + ME + '_' + ME).set(h.reportDoc(ME, ME)))));

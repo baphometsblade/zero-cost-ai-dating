@@ -644,6 +644,18 @@ test('every closed vocabulary the rules pin is the one the client offers', funct
     });
   });
 
+  // The interest slugs, which the world-readable projection is held to because every
+  // card's interests are copied into the learning map of whoever swipes it — another
+  // account's private document, with bounds of its own that a stranger's tags could
+  // exhaust. The editor offers exactly `ZC.INTEREST_TAGS` from seed-data.js, a
+  // generated file, so the list is read from the module itself rather than its text.
+  const vocabulary = require(path.join(ROOT, 'public/js/seed-data.js')).INTEREST_TAGS
+    .map(function (tag) { return tag.slug; });
+  assert.ok(vocabulary.length > 0, 'seed-data.js published no INTEREST_TAGS — this test is comparing nothing');
+  ruleLists('interest', /p\.interests\.hasOnly\(\[([^\]]*)\]/g, 1).forEach(function (rule) {
+    pairs.push({ what: 'interests (seed-data.js INTEREST_TAGS)', client: vocabulary, rule: rule.words, line: rule.line });
+  });
+
   const wrong = pairs.filter(function (p) {
     return JSON.stringify(p.client.slice().sort()) !== JSON.stringify(p.rule.slice().sort());
   });

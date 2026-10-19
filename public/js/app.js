@@ -383,6 +383,17 @@
     const me = signedInDoc();
     if (!me || !me.uid || !ZC.store || typeof ZC.store.listenMatches !== 'function') return;
 
+    // Settings' "In-app notifications" switch, and these counts are what it
+    // turns off. It used to be stored and read by nothing, so off changed
+    // nothing. Off holds no subscription either, rather than paying reads for
+    // counts nobody is shown. Turning it back on subscribes again: Settings
+    // saves through ZC.auth.refresh(), whose change event calls back in here.
+    if (me.preferences && me.preferences.notifications === false) {
+      stopBadgePolling();
+      badge({ matches: 0, likes: 0 });
+      return;
+    }
+
     // A subscription belongs to one account. Signing out always tears these
     // down, so a different uid here means something changed the session without
     // that — and a live subscription to the previous account's matches would
@@ -498,6 +509,11 @@
         return;
       }
       stopBadgePolling();
+      // Said the way auth.js's guards say it (see `leaveTo` there): a page
+      // asking before it is left — matches.js, with a message still sending —
+      // asks for the person, and the account it would be asking for has just
+      // signed out, so the question would only stop the way out.
+      window.dispatchEvent(new Event('zc:leaving'));
       window.location.href = url('index.html');
     } catch (err) {
       if (button && ZC.ui) ZC.ui.setBusy(button, false);

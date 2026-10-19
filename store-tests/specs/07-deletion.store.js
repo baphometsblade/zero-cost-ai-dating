@@ -24,7 +24,10 @@
    The one thing deliberately expected to survive is a report *about* the
    account. That is somebody else's document in an abuse queue, it is what the
    queue is for, and DEPLOY.md says so. A test that demanded its removal would
-   be encoding a bug as a requirement.
+   be encoding a bug as a requirement. The other is a pass aimed at the
+   account: firestore.rules keeps a pass private to its author, so the account
+   can neither read nor find one, and it stays with the account that made it.
+   The sweep seeds none; the last section, run under the real rules, does.
    ========================================================================== */
 'use strict';
 
@@ -98,11 +101,11 @@ module.exports = {
     t.check('no document anywhere still mentions the deleted account',
       survivors.length === 0, survivors.slice(0, 4).join(' | ') || 'checked ' + COLLECTIONS.join(', ') + ' and the match messages');
 
-    // Named separately from the sweep above, because this is the one that is
-    // world-readable: every signed-in user can read discovery/{uid}, so a
-    // projection that outlives its account is a profile still on display for
-    // somebody who asked to be gone.
-    t.check('the world-readable projection is gone',
+    // Named separately from the sweep above, because this is the one other people
+    // read: every signed-in user can read a discoverable discovery/{uid}, and a
+    // match can read it whatever it says, so a projection that outlives its
+    // account is a profile still on display for somebody who asked to be gone.
+    t.check('the public projection is gone',
       (await k.admin.get('discovery', me)) === null,
       k.show(await k.admin.get('discovery', me)));
 
@@ -186,5 +189,59 @@ module.exports = {
       survived.user && survived.discovery && survived.swipe && survived.match,
       k.show(survived) + ' — with the purge last, the swipe and the match would ' +
       'already be gone and no retry could bring them back');
+
+    /* ---- and under the real rules, as the account itself ---------------- */
+
+    // Everything above runs on this suite's open rules. The purge is the one
+    // thing the account does for itself that reads the most of other people's
+    // documents, and firestore.rules now keeps a pass private to its author:
+    // the account a pass is aimed at may not read it, and a query that could
+    // return one — `swipes where to == me`, which the purge used to ask — is
+    // refused whole. So the shipped purge is run here as its own account
+    // against the real ruleset, where the open rules above could never refuse it.
+    const leaving = 'purge-real';
+    const liker = 'purge-real-liker';
+    const passer = 'purge-real-passer';
+    const rdb = function (c) { return c.firestore(); };
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      const db = rdb(c);
+      await k.fs.setDoc(k.fs.doc(db, 'users', leaving), k.h.userDoc(leaving));
+      await k.fs.setDoc(k.fs.doc(db, 'discovery', leaving), k.h.discoveryDoc(leaving));
+      await k.fs.setDoc(k.fs.doc(db, 'swipes', leaving + '_' + liker), k.h.swipeDoc(leaving, liker, 'like'));
+      await k.fs.setDoc(k.fs.doc(db, 'swipes', liker + '_' + leaving), k.h.swipeDoc(liker, leaving, 'like'));
+      await k.fs.setDoc(k.fs.doc(db, 'swipes', passer + '_' + leaving), k.h.swipeDoc(passer, leaving, 'pass'));
+    });
+    let realOutcome;
+    try {
+      k.ctx.ZC.firebase.db = k.rulesEnv.authenticatedContext(leaving).firestore();
+      realOutcome = await k.store.deleteAccountData(leaving).catch(function (err) {
+        return { rejected: (err && err.code) || String(err) };
+      });
+    } finally {
+      k.ctx.ZC.firebase.db = real;
+    }
+    k.ctx.drainWarnings();
+    const left = {};
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      const db = rdb(c);
+      for (const path of ['users/' + leaving, 'discovery/' + leaving, 'swipes/' + leaving + '_' + liker,
+                          'swipes/' + liker + '_' + leaving, 'swipes/' + passer + '_' + leaving]) {
+        left[path] = (await k.fs.getDoc(k.fs.doc(db, path))).exists();
+      }
+    });
+
+    t.check('under the real rules, the account can delete itself',
+      realOutcome === true, k.show(realOutcome));
+
+    t.check('taking its own swipes, the likes aimed at it, and both of its documents',
+      !left['users/' + leaving] && !left['discovery/' + leaving] &&
+        !left['swipes/' + leaving + '_' + liker] && !left['swipes/' + liker + '_' + leaving],
+      k.show(left));
+
+    // The one inbound swipe it cannot find. It is the passer's own record of a
+    // decision, readable by nobody else, and the account it names is gone; the
+    // demo adapter leaves it the same way, and tests/data-store.test.js says so.
+    t.check('while a pass aimed at it stays with the account that made it',
+      left['swipes/' + passer + '_' + leaving] === true, k.show(left));
   }
 };

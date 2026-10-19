@@ -21,6 +21,7 @@ module.exports = {
     const FOURTH = 'fourth';
     const BLOCKER = 'blocker';    // has liked me, and has blocked me
     const OPENER = 'opener';      // has liked me, has a user document, blocks nobody
+    const ANSWERED = 'answered';  // has liked me, and the match is dated by that like
 
     await seed(async function (admin) {
       const db = admin.firestore();
@@ -42,6 +43,7 @@ module.exports = {
       await db.doc('users/' + BLOCKER).set(h.userDoc(BLOCKER, { blocked: [ME] }));
       await db.doc('swipes/' + OPENER + '_' + ME).set(h.swipeDoc(OPENER, ME, 'like'));
       await db.doc('users/' + OPENER).set(h.userDoc(OPENER, { blocked: [] }));
+      await db.doc('swipes/' + ANSWERED + '_' + ME).set(h.swipeDoc(ANSWERED, ME, 'like'));
     });
 
     /* ---- the attack the rule exists to stop ---- */
@@ -50,6 +52,26 @@ module.exports = {
 
     t.check('a pass does not count as a like either',
       await ok(assertFails(as(ME).doc('matches/' + h.pairId(ME, 'nobody')).set(h.matchDoc(ME, 'nobody')))));
+
+    // A match with no messages sorts by when it was made, so a stamp from the future
+    // pins it above every real conversation in the other person's list.
+    t.check('but not with a createdAt from the future, even once they have',
+      await ok(assertFails(as(ME).doc('matches/' + h.pairId(ME, LIKER)).set(
+        h.matchDoc(ME, LIKER, { createdAt: '9999-12-31T23:59:59.999Z' })
+      ))));
+
+    // Nor with one a little over a day ahead, which is what a device whose clock runs
+    // that fast stamps as now. The store answers that refusal by dating the match by the
+    // like it answers (see matchDocumentFor), so the next check writes exactly that.
+    t.check('nor with one a little over a day ahead, which a fast device clock writes as now',
+      await ok(assertFails(as(ME).doc('matches/' + h.pairId(ME, LIKER)).set(
+        h.matchDoc(ME, LIKER, { createdAt: new Date(Date.now() + 25 * 3600000).toISOString() })
+      ))));
+
+    t.check('you CAN create the match once they have liked you, dated by that like',
+      await ok(assertSucceeds(as(ME).doc('matches/' + h.pairId(ME, ANSWERED)).set(
+        h.matchDoc(ME, ANSWERED, { createdAt: h.swipeDoc(ANSWERED, ME, 'like').createdAt })
+      ))));
 
     t.check('you CAN create the match once they have liked you',
       await ok(assertSucceeds(as(ME).doc('matches/' + h.pairId(ME, LIKER)).set(h.matchDoc(ME, LIKER)))));
@@ -153,6 +175,54 @@ module.exports = {
       await ok(assertSucceeds(as(ME).doc('matches/' + h.pairId(ME, LIKER)).update({
         lastMessage: 'hello', lastMessageAt: '2026-01-05T00:00:00.000Z'
       }))));
+
+    // Both people's conversation lists order by these two stamps, and nothing else
+    // about a match update stops a participant rewriting either.
+    t.check('a preview stamped in the future is refused',
+      await ok(assertFails(as(ME).doc('matches/' + h.pairId(ME, LIKER)).update({
+        lastMessage: 'pinned', lastMessageAt: '9999-12-31T23:59:59.999Z'
+      }))));
+
+    t.check('and so is moving when the match was made into the future',
+      await ok(assertFails(as(ME).doc('matches/' + h.pairId(ME, LIKER)).update({
+        createdAt: '9999-12-31T23:59:59.999Z'
+      }))));
+
+    // `is number && >= 0` let Infinity through, and the other side's badge printed
+    // "Infinity unread". A count is a whole number, and one no conversation reaches.
+    const countOf = function (value) {
+      const patch = {};
+      patch['unread.' + LIKER] = value;
+      return as(ME).doc('matches/' + h.pairId(ME, LIKER)).update(patch);
+    };
+    t.check('an unread count of Infinity is refused', await ok(assertFails(countOf(Infinity))));
+    t.check('as is a fractional one', await ok(assertFails(countOf(1.5))));
+    t.check('and one past a million', await ok(assertFails(countOf(1000001))));
+    t.check('while an ordinary count still saves', await ok(assertSucceeds(countOf(3))));
+
+    // A count is also the other person's to raise, one message at a time, with
+    // `FieldValue.increment(1)`. Bounding the value it lands on made that a tripwire:
+    // a participant who parked their own count at the ceiling turned every message the
+    // other person sent into a refused preview update, from then on.
+    const fsdk = h.loadOutside('firebase/firestore');
+    const mine = function (value) {
+      const patch = {};
+      patch['unread.' + ME] = value;
+      return as(ME).doc('matches/' + h.pairId(ME, LIKER)).update(patch);
+    };
+    const theirMessage = function () {
+      const patch = { lastMessage: 'still there?', lastMessageAt: new Date().toISOString() };
+      patch['unread.' + ME] = fsdk.increment(1);
+      return fsdk.updateDoc(fsdk.doc(as(LIKER), 'matches', h.pairId(ME, LIKER)), patch);
+    };
+    t.check('a participant may park their own count at the ceiling', await ok(assertSucceeds(mine(1000000))));
+    t.check('and the other side\'s next message still raises it, preview and all',
+      await ok(assertSucceeds(theirMessage())));
+    t.check('and the one after that', await ok(assertSucceeds(theirMessage())));
+    t.check('while a count written past the ceiling directly is still refused, even from there',
+      await ok(assertFails(mine(1000010))));
+    t.check('as is Infinity', await ok(assertFails(mine(Infinity))));
+    t.check('and reading the thread still clears it', await ok(assertSucceeds(mine(0))));
 
     t.check('the participant list itself is frozen',
       await ok(assertFails(as(ME).doc('matches/' + h.pairId(ME, LIKER)).update({ users: [ME, 'someone-else'].sort() }))));

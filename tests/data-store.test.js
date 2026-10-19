@@ -933,6 +933,27 @@ test('deleteAccountData purges the account\'s footprint but keeps reports about 
   assert.ok(await store.getUser(YOU));
 });
 
+test('deleteAccountData leaves a pass aimed at the account with whoever made it, as firebase mode must', async function () {
+  // firestore.rules keeps a pass private to its author: the account it is aimed
+  // at can neither read it nor list it, so the Firestore adapter's purge cannot
+  // find one and takes only the likes aimed at the account. Both adapters
+  // leave the pass where it is, as its author's own record.
+  await resetWorld();
+  await store.createUser('gone', {});
+  await store.createUser('liker', {});
+  await store.createUser('passer', {});
+  await store.recordSwipe('liker', 'gone', 'like');
+  await store.recordSwipe('passer', 'gone', 'pass');
+
+  await store.deleteAccountData('gone');
+
+  const swipes = raw(KEYS.swipes);
+  assert.equal(swipes.liker_gone, undefined, 'the like aimed at the account went with it');
+  assert.equal(swipes.passer_gone && swipes.passer_gone.action, 'pass', 'the pass stayed with its author');
+  assert.deepEqual((await store.getSwipes('passer')).map(function (s) { return s.to; }), ['gone'],
+    'and is still in its author\'s history');
+});
+
 /* ------------------------------------------------------------------------
    10. Export, import, reset
    ------------------------------------------------------------------------ */
@@ -975,6 +996,49 @@ test('resetDemo wipes every demo key and restores the pristine seed', async func
   assert.equal(Object.keys(raw(KEYS.swipes)).length, 13, 'only the seeded relationships');
   assert.deepEqual(Object.keys(raw(KEYS.matches)).sort(), [DEVIN_MATCH, SAM_MATCH]);
   assert.equal(raw(KEYS.seeded).version, 1);
+});
+
+test('resetDemo keeps the accounts made in this browser, and only what counted their swipes starts again', async function () {
+  // Settings promises "Accounts you created stay signed up". The seed has no
+  // record of an account made here, so wiping `users` erased it: the session
+  // was dropped on the next load, and signing back in made an empty document
+  // with no name in its place. auth.js's credential vault is what says which
+  // accounts were made here; the squatter in the test above has no entry in it.
+  await resetWorld();
+  const MINE = 'local-made-here';
+  // The second entry names an account the seed has a record of. auth.js mints
+  // every uid it vaults as 'local-…', so it never writes one, but a vault is
+  // only localStorage: the seed's record must still be the one that wins.
+  writeRaw('zc.demo.credentials', {
+    'made-here@example.com': { uid: MINE, salt: 'aa', hash: 'bb' },
+    'planted@example.com': { uid: YOU, salt: 'cc', hash: 'dd' }
+  });
+  await store.updateUser(YOU, { displayName: 'Renamed before the reset' });
+  await store.createUser(MINE, { email: 'made-here@example.com', displayName: 'Made Here' });
+  await store.updateUser(MINE, {
+    profileComplete: true,
+    profile: { bio: 'A bio I wrote myself and would like to keep.', birthdate: '1990-03-03' },
+    blocked: ['maya-okonkwo']
+  });
+  await store.recordSwipe(MINE, 'devin-alvarez', 'like');
+  await store.bumpUsage(MINE, 'likes', 3);
+  await store.saveLearning(MINE, { interestAffinity: { hiking: 2 }, likeCount: 1, passCount: 0 });
+
+  assert.equal(await store.resetDemo(), true);
+  const kept = await store.getUser(MINE);
+  assert.ok(kept, 'the account made here is still there');
+  assert.equal(kept.displayName, 'Made Here');
+  assert.equal(kept.email, 'made-here@example.com');
+  assert.equal(kept.profileComplete, true);
+  assert.equal(kept.profile.bio, 'A bio I wrote myself and would like to keep.');
+  assert.equal(kept.profile.birthdate, '1990-03-03');
+  assert.deepEqual(kept.blocked, ['maya-okonkwo'], 'a block is about a person, and the person is still here');
+  assert.deepEqual(await store.getSwipes(MINE), [], 'its swipes went with everyone else\'s');
+  assert.equal(kept.usage.likes, 0, 'so today\'s count of them starts again');
+  assert.deepEqual(kept.learning, { interestAffinity: {}, likeCount: 0, passCount: 0 },
+    'and so does what the deck learned from them');
+  assert.equal(Object.keys(raw(KEYS.users)).length, 33, 'the seed cast, plus the account made here');
+  assert.equal((await store.getUser(YOU)).displayName, 'You', 'the demo account is rebuilt from the seed');
 });
 
 /* ------------------------------------------------------------------------
@@ -1572,6 +1636,56 @@ test('getPublicProfiles answers a list with the public projection, in both modes
     assert.deepEqual(faces[uid].blocked, [], uid + ': no block list');
   });
   assert.deepEqual(await store.getPublicProfiles([]), {}, 'nothing asked, nothing answered');
+});
+
+test('a paused profile\'s face is shown only to the accounts firestore.rules shows it to', async function () {
+  // In firebase mode a projection with "Show me in other people's decks" turned
+  // off is readable only by its owner, a match and somebody it liked, so
+  // getPublicProfile(s) answer null to everybody else — a reporter included,
+  // since anybody can file a report. This adapter has no rules, and answered
+  // with the profile whoever asked.
+  await resetWorld();
+  await store.createUser('paused-p', {
+    displayName: 'Paused', profileComplete: true, preferences: { discoverable: false }
+  });
+  for (const uid of ['match-m', 'liked-l', 'passed-x', 'reporter-r', 'stranger-s']) {
+    await store.createUser(uid, { displayName: uid });
+  }
+  await store.recordSwipe('match-m', 'paused-p', 'like');
+  await store.recordSwipe('paused-p', 'match-m', 'like');
+  await store.recordSwipe('paused-p', 'liked-l', 'like');
+  await store.recordSwipe('paused-p', 'passed-x', 'pass');
+  await store.reportUser('reporter-r', 'paused-p', 'other', 'for the settings list');
+  await store.reportUser('liked-l', 'paused-p', 'other', 'a reporter it liked');
+
+  const seen = {};
+  try {
+    for (const viewer of ['paused-p', 'match-m', 'liked-l', 'passed-x', 'reporter-r', 'stranger-s']) {
+      writeRaw(KEYS.session, { uid: viewer });
+      const one = await store.getPublicProfile('paused-p');
+      const list = await store.getPublicProfiles(['paused-p']);
+      assert.equal(!!one, !!list['paused-p'], viewer + ': the single and the list form agree');
+      seen[viewer] = !!one;
+    }
+  } finally {
+    backing.delete(KEYS.session);
+  }
+  assert.deepEqual(seen, {
+    'paused-p': true,
+    'match-m': true,
+    'liked-l': true,
+    'passed-x': false,
+    'reporter-r': false,
+    'stranger-s': false
+  });
+
+  // And a discoverable profile is still everybody's to see.
+  writeRaw(KEYS.session, { uid: 'stranger-s' });
+  try {
+    assert.ok(await store.getPublicProfile('match-m'), 'a discoverable face is shown to a stranger');
+  } finally {
+    backing.delete(KEYS.session);
+  }
 });
 
 test('and the projection keeps everything the conversation list scores on', async function () {

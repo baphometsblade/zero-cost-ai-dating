@@ -142,9 +142,9 @@ Open [`firestore.rules`](../firestore.rules). It is the only server-side securit
 has, so it is worth the five minutes.
 
 Everything below is also *executed* — `npm run test:rules` runs the real rules file against
-the Firestore emulator, **222 checks** including the attacks each rule exists to stop. If you
+the Firestore emulator, **269 checks** including the attacks each rule exists to stop. If you
 change the data model, run it. See [`rules-tests/README.md`](../rules-tests/README.md).
-`npm run test:emulator` adds the store suite to the same emulator boot: **269 more checks** that
+`npm run test:emulator` adds the store suite to the same emulator boot: **310 more checks** that
 drive the shipped `public/js/data-store.js` against a real Firestore, which is where the
 daily counter's transaction is proven — see [`store-tests/README.md`](../store-tests/README.md).
 
@@ -161,9 +161,15 @@ anywhere else was free to rot. It now reads every document.
   stale.
 - `discovery/{uid}` — the public projection other users actually see: display name, age (not
   birthdate), bio, interests, personality, ~1 km-rounded coordinates and the mutual filters.
-  Readable by any signed-in user, writable only by the owner, and the key list is **closed**
-  (`hasOnly`), so a tampered client cannot smuggle private fields into the readable copy. The
-  app mirrors it automatically on every profile save.
+  Readable by any signed-in user while it is discoverable. With "Show me in other people's
+  decks" turned off it is readable only by its owner, its matches and the people it liked; a
+  report does not count, since anybody can file one. A query that does not ask for
+  `discoverable == true` is refused whole. Writable only by the owner, and the key list is
+  **closed** (`hasOnly`), so a tampered client cannot smuggle private fields into the readable
+  copy. Its `interests` must be slugs from the editor's vocabulary (`ZC.INTEREST_TAGS`): every
+  card's interests are copied into the learning map of whoever swipes it, and a stranger's tags
+  must not be able to stop that map saving. The app mirrors it automatically on every profile
+  save, publishing only vocabulary interests.
 - `swipes/{swipeId}` — create only when you are the `from` user, the document id is
   exactly `from_to`, **and** the key list is closed (`hasOnly`). That last part is not
   tidiness: `hasAll` bounds the keys it names and nothing else, so a swipe could be padded
@@ -176,26 +182,36 @@ anywhere else was free to rot. It now reads every document.
   only the top level and `profile.personality` did, so a field such as `profile.padding`
   could carry whatever the 1 MiB ceiling would hold.
 
-  A swipe is readable by its two parties only: the one who made it and the one it is aimed
-  at. A read of a document that is *not there* is allowed only when the id names you,
-  which the client needs (every first swipe reads its own unwritten record, and every first
-  like or super like the usually-absent reciprocal one) and an onlooker must not have: an
+  A swipe is readable by the one who made it. When it is a like or a super like, the one it
+  is aimed at can read it too; a pass is private to its author. A read of a document that is
+  *not there* is allowed only when the id names you as its author, which the client needs
+  (every first swipe reads its own unwritten record) and an onlooker must not have: an
   unconditional allowance would answer "has Alice swiped on Bob?" for any pair, from the
-  difference between an empty snapshot and a denial. Delete your own, or one aimed at you
-  (account deletion purges inbound likes too), or one that is already gone, on the same id
-  terms as that read. A second rewind of the same card — from a second tab on the same
-  deck, or a retry — then deletes nothing and succeeds, as it does in demo mode, instead of
-  coming back `permission-denied`. No updates: a rewind deletes the swipe, and the next
-  swipe on that card creates it afresh.
+  difference between an empty snapshot and a denial. A missing swipe aimed at you is refused
+  exactly as a pass is, so a refusal cannot single out a pass, and the store reads that
+  refusal on the reciprocal swipe as "no like". Delete your own, or one aimed at you, or one
+  that is already gone. A missing one may be deleted by either party the id names, which is
+  wider than the read of a miss and can be: a delete answers the same whether or not the
+  swipe was there, so it tells the other party nothing. A second rewind of the same card —
+  from a second tab on the same deck, or a retry — then deletes nothing and succeeds, as it
+  does in demo mode, instead of coming back `permission-denied`. Account deletion purges the
+  likes aimed at the account; a pass aimed at it stays with its author, the only account that
+  can read it. No updates: a rewind deletes the swipe, and the next swipe on that card
+  creates it afresh.
 
   A closed key list bounds how *many* fields a document may have and not how big one may
   be, which is a separate hole and was open in every collection: `createdAt` and its
   siblings were checked as `is string`, so a swipe could still be a megabyte under a name
-  that reads like a timestamp. Every stamp is now capped, `matches.unread` may only be
-  keyed by the two participants with numeric counts, an `id` field must equal the document
-  id, and `discovery/{uid}`'s `location` — which was on its key list with **no validator at
-  all**, in the one world-readable collection — is held to a coordinate pair with a short
-  label. `personality` was on that same world-readable key list with no validator either,
+  that reads like a timestamp. Every stamp is now capped, and the ones that order other
+  people's screens — `discovery.lastActiveAt`, a match's `createdAt` and `lastMessageAt`, a
+  message's `createdAt` — must be a `toISOString()` stamp no more than a day past the
+  server's clock; `matches.unread` may only be keyed by the two participants, with whole-number
+  counts a write may set up to a million and a message's `increment(1)` may always raise by one,
+  so a count parked at the ceiling cannot stop the other person's messages; an `id` field must
+  equal the document id; and
+  `discovery/{uid}`'s `location` — which was on its key list with **no validator at
+  all**, in the one public collection — is held to a coordinate pair with a short
+  label. `personality` was on that same public key list with no validator either,
   three lines from `location`; it outlived the pass that found `location` and every pass
   since, and turned up only when `tests/limits.test.js` began asking mechanically whether
   every key an allowlist admits is one something examines. `reports/{from_about}` had the
@@ -209,10 +225,11 @@ anywhere else was free to rot. It now reads every document.
   a string and a string can be measured, which bounds every element at once whatever the
   split between them. That is the property that matters, since the ceiling being defended
   is the document's rather than any one field's. All of them are capped now, in the private
-  document and in the world-readable projection both, and `profile.js` caps a photo link at
-  1024 characters while you paste it so the refusal names the field instead of arriving as
-  a `permission-denied` on save. `tests/limits.test.js` keeps those two numbers the same
-  number.
+  document and in the public projection both — the projection's `interests` more
+  tightly still, since each must be a slug from the editor's vocabulary — and `profile.js`
+  caps a photo link at 1024 characters while you paste it so the refusal names the field
+  instead of arriving as a `permission-denied` on save. `tests/limits.test.js` keeps those
+  two numbers the same number.
 
   **Firestore evaluates at most 1000 expressions per request**, and this is the file that
   gets close to it. Adding those caps put `userDocOk` over, and going over is not a rule
@@ -236,14 +253,17 @@ anywhere else was free to rot. It now reads every document.
   clause is what makes a block durable: unmatching removes the match document but not the
   like underneath it, so without it the other side could write the document again and
   resume the conversation. The rule reads their private `users/{uid}` document to check —
-  which a rule may do and no client can. Absent documents follow the same id rule as swipes,
-  for a fact worth hiding rather more: whether two named people have matched.
+  which a rule may do and no client can. Absent documents are held to the id as swipes are,
+  though either of the pair may probe one rather than an author alone, for a fact worth
+  hiding rather more: whether two named people have matched.
 - `matches/{matchId}/messages/{msgId}` — read if you participate in the parent match; create
   only as yourself with 1–1000 characters of text. Never editable; deletable by participants
   so unmatch and account deletion can purge the conversation before the match goes.
 - `reports/{reportId}` — the abuse queue, id fixed to `from_about` so each account can file
   at most one report per existing user (bounding queue floods and quota burn), and the
-  subject must exist in `discovery`. A report is visible only to its own author, who may
+  subject must exist: in `discovery`, or as the reporter's match, so a match who deletes
+  their projection while still able to message can still be reported. Filing a report opens
+  no read of the subject's profile. A report is visible only to its own author, who may
   also delete it — that is what lets account deletion purge everything the account wrote —
   and reads of missing documents deny, so nobody can probe whether a report exists. The
   reported party can never see, edit or retract a report about them. **You review this
@@ -274,7 +294,7 @@ firebase use --add          # pick your project, alias it "default"
 Then:
 
 ```bash
-npm test                    # 14 suites, 306 checks, no install required
+npm test                    # 14 suites, 316 checks, no install required
 npm run deploy              # firebase deploy --only hosting,firestore
 ```
 
@@ -327,7 +347,9 @@ placeholder values, then `firebase deploy --only hosting`. Every visitor now get
 mode.
 
 A stored override always wins over the baked-in values, so if a browser looks stuck in the
-wrong mode after option B, clear it with **Reset to demo mode** on that settings panel.
+wrong mode after option B, clear it with **Reset to demo mode** on that settings panel. The
+sign-in page offers the same reset whenever a config saved in this browser is in use, which is
+the way out when that config cannot sign anyone in (Settings needs an account).
 
 ---
 
@@ -469,7 +491,7 @@ the suite still fails: *connect-src allows only what the three Firebase SDKs the
 can contact*, in the same file, holds every source in that directive to a list of the
 sources the shipped code actually connects to, each with its reason, and names both
 loopback origins as sources nothing in this app connects to. Be clear about what that does
-**not** catch — add them to that list as well and the suite goes quiet again, all 306
+**not** catch — add them to that list as well and the suite goes quiet again, all 316
 checks passing, and the weakened policy deploys to everyone. Change the meta copy only, and
 change it back.
 
@@ -489,12 +511,13 @@ two-line change to your own workflow. It is, though, the route that never touche
 | Symptom | Cause and fix |
 | --- | --- |
 | Console says `Demo mode` after deploying | The config never took. Check `BAKED_CONFIG` in `firebase-config.js` for leftover `your-…` values, or clear a stale `localStorage['zc.firebaseConfig']` with Settings → *Reset to demo mode*. |
+| Sign-in says Firebase refused the apiKey, or that Authentication is not set up | The config's `apiKey` is wrong, or the project has not enabled Authentication (step 3). Fix the config: `BAKED_CONFIG`, or the one saved in Settings. A config saved in this browser can also be removed with *Reset to demo mode* on the sign-in page. |
 | `Refused to execute inline …` or `Refused to load …`, naming the Content Security Policy | Usually something added to a page. An inline `<script>` whose hash the policy does not list, or an inline `on…="…"` handler, gives *Refused to execute inline*; a script from a host `script-src` does not list gives *Refused to load the script*. Run `npm test`; `tests/static.test.js` names the page, and the line for anything inline. It reads markup only, so it misses a script a page adds at runtime, and it does not look at a stylesheet's host, although one from a host `style-src` does not list is refused the same way, as *Refused to load the stylesheet*. A `style="…"` attribute is not one of the causes: the shipped `style-src` carries `'unsafe-inline'`, which allows it, although the static check still refuses one. |
 | `Refused to connect … Content Security Policy` pointing at `127.0.0.1` | You are aiming a browser at a local emulator. A different port is a different origin, so `connect-src 'self'` does not cover it. Section 12 has both ways round it. |
 | `auth/unauthorized-domain` on Google sign-in | Add the domain under Authentication → Settings → Authorized domains. |
 | `auth/operation-not-allowed` | The provider is not enabled in the console (step 3). |
 | Discover errors with `failed-precondition` and a console link | A composite index is still building, or was never deployed. Run `firebase deploy --only firestore:indexes` and wait. |
-| `permission-denied` on a write | The rules rejected it. Check the field limits in step 5 — an over-long bio or a 13th interest is the usual culprit. |
+| `permission-denied` on a write | The rules rejected it. Check the field limits in step 5 — an over-long bio or a 13th interest is the usual culprit. A device clock more than a day fast is another: messages and the activity refresh carry stamps the rules hold to no more than a day past the server's clock, and are refused. A profile save is tried once more without republishing the activity stamp, and a match the clock cannot date is dated by the like it answers, so those two still go through. |
 | Everything works locally but not deployed | `npm run serve` bypasses `firebase.json` entirely, so headers and `cleanUrls` only exist in production. Use `firebase hosting:channel:deploy preview` to test the real configuration for free. |
 | Rules changes seem to have no effect | Rules deploy separately from hosting: `firebase deploy --only firestore:rules`. |
 

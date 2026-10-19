@@ -848,7 +848,7 @@
   async function onResetDemo() {
     const ok = typeof ui.confirm === 'function'
       ? await ui.confirm(
-        'This wipes the demo database in this browser and seeds the bundled sample profiles again.\nYour swipes, matches and messages are deleted. Accounts you created stay signed up, but their profile data is rebuilt from the seed.',
+        'This wipes the demo database in this browser and seeds the bundled sample profiles again.\nYour swipes, matches, messages and reports are deleted. Accounts you created here stay signed up and keep their profiles; the demo account’s profile is rebuilt from the seed.',
         { title: 'Reset the demo data?', confirmLabel: 'Reset it', variant: 'danger' }
       )
       : true;
@@ -1022,9 +1022,10 @@
     busy(dom.deleteButton, true, 'Deleting…');
     let dataGone = false;
     try {
-      // 1. Every stored trace of the account: swipes in both directions,
-      //    matches with their messages, the discovery projection and the
-      //    account document.
+      // 1. Every stored trace of the account: its own swipes, the likes aimed
+      //    at it, matches with their messages, the discovery projection and the
+      //    account document. A pass aimed at it is the passer's decision, which
+      //    this account may not read, and it stays with them.
       await ZC.store.deleteAccountData(uid);
       dataGone = true;
 

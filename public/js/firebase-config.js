@@ -151,6 +151,11 @@
     mode: mode,
     version: VERSION,
     overrideKey: OVERRIDE_KEY,
+    // True when a config saved in Settings was found; its fields win over
+    // BAKED_CONFIG's. The sign-in page reads it to offer to remove that config:
+    // a saved config no one can sign in with keeps everyone off Settings,
+    // where the other reset is.
+    fromSettings: !!override,
     limits: {
       free: { likesPerDay: 25, superLikesPerDay: 1, rewinds: 0, seeLikedYou: false, adaptiveWeights: false },
       premium: { likesPerDay: Infinity, superLikesPerDay: 5, rewinds: Infinity, seeLikedYou: true, adaptiveWeights: true }

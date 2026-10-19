@@ -3,6 +3,39 @@
 
 const MARKER = ' Edited by the e2e suite.';
 
+/**
+ * The unread count the store holds for the signed-in account, beside what the
+ * nav's Matches badge says. The count comes from a subscription of the test's
+ * own to the store's shared match stream. In demo mode, the only one this spec
+ * runs in, the shell subscribes to that stream (or, with the switch off,
+ * paints the badge empty) inside the task that dispatches DOMContentLoaded.
+ * The page's own setup starts before it in that same task: app.js runs while
+ * the document is still loading, so the page's onReady callback is queued
+ * first, and the demo store answers on microtasks, so the dashboard has drawn
+ * its deck by the time the shell's turn comes. What the order cannot change is
+ * that the task is over before the test acts on anything the page drew. The
+ * stream hands rows to its subscribers in the order they came, a late one from
+ * the rows it already delivered — so when this one's first rows arrive, the
+ * shell has had the same rows and painted them, or chosen not to. Call it once
+ * the page has drawn something of its own. No wait stands in for that.
+ * @param {Object} page a Playwright Page on a signed-in page
+ * @returns {Promise<{unread:number, badge:string|null}>}
+ */
+function unreadAgainstBadge(page) {
+  return page.evaluate(function () {
+    return new Promise(function (resolve) {
+      let stop = null;
+      stop = window.ZC.store.listenMatches(window.ZC.auth.current.uid, function (rows) {
+        let unread = 0;
+        rows.forEach(function (row) { unread += Math.max(0, Number(row && row.unread) || 0); });
+        const badge = document.querySelector('[data-badge="matches"]');
+        if (stop) stop();
+        resolve({ unread: unread, badge: badge ? badge.textContent.trim() : null });
+      });
+    });
+  });
+}
+
 module.exports = {
   title: 'Profile editing and settings',
   viewports: ['mobile', 'desktop'],
@@ -10,6 +43,15 @@ module.exports = {
   async run(t, page, ctx) {
     const h = ctx.harness;
     await h.signIn(page, ctx.base);
+
+    // The control for the notifications check further down: with the switch
+    // in its default place, the badge carries the count the store holds. It is
+    // what makes an empty badge there mean the switch, not a badge that was
+    // never painted or a demo account with nothing unread.
+    const notifyOnBadge = await unreadAgainstBadge(page);
+    t.check('with in-app notifications on, the Matches badge carries the unread count',
+      notifyOnBadge.unread > 0 && notifyOnBadge.badge === String(notifyOnBadge.unread),
+      JSON.stringify(notifyOnBadge));
 
     /* ---- profile ---- */
     await page.goto(ctx.base + '/profile.html', { waitUntil: 'domcontentloaded' });
@@ -640,6 +682,14 @@ module.exports = {
     await page.waitForSelector('#deck-stack .swipe-card');
     t.check('the chosen theme carries to the next page',
       (await page.getAttribute('html', 'data-theme')) === 'light');
+
+    // The switch flipped above is stored on the profile, and Settings says it
+    // puts the number of unread messages on Matches. Nothing read it: with it
+    // off, the badge went on counting unread messages exactly as before.
+    const notifyOffBadge = await unreadAgainstBadge(page);
+    t.check('with in-app notifications off, the Matches badge stays empty while messages are unread',
+      notifyStored === false && notifyOffBadge.unread > 0 && notifyOffBadge.badge === '',
+      'stored ' + (notifyStored ? 'on' : 'off') + ', ' + JSON.stringify(notifyOffBadge));
 
     // Onboarding hands people back to the page they were headed for. A guard
     // or the sign-up form sends someone to profile.html?onboarding=1 with the
