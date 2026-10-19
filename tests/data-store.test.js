@@ -390,6 +390,46 @@ test('recordSwipe is idempotent and super counts as positive', async function ()
   assert.equal((await store.getSwipes('cara'))[0].action, 'like', 'the original action is preserved');
 });
 
+test('recordSwipe says when a decision already stood, and which one', async function () {
+  await resetWorld();
+  await store.createUser('alice', {});
+  await store.createUser('bob', {});
+  await store.createUser('cara', {});
+
+  // Writing nothing is only half of standing by a decision. The deck has to be
+  // told, or it counts the like it just announced and folds it into the
+  // learning map — for a swipe that was never recorded.
+  const fresh = await store.recordSwipe('alice', 'bob', 'pass');
+  assert.equal(fresh.existing, undefined, 'a swipe that was written is not an earlier one');
+  const again = await store.recordSwipe('alice', 'bob', 'like');
+  assert.equal(again.existing, true, 'the second swipe found the first');
+  assert.equal(again.action, 'pass', 'and says the pass is what stands');
+  assert.equal(again.matched, false);
+
+  // The same when the earlier decision made a match: the match is reported,
+  // and so is the fact that this swipe added nothing to it.
+  await store.recordSwipe('cara', 'alice', 'like');
+  const matched = await store.recordSwipe('alice', 'cara', 'super');
+  assert.equal(matched.existing, undefined);
+  const rematched = await store.recordSwipe('alice', 'cara', 'pass');
+  assert.deepEqual(rematched, {
+    matched: true, matchId: matched.matchId, created: false, existing: true, action: 'super'
+  });
+  assert.deepEqual((await store.getSwipes('alice')).map(function (s) { return s.action; }).sort(), ['pass', 'super']);
+
+  // Writing no swipe is not writing nothing. A mutual pair whose match
+  // document is missing, which is what a failed match check leaves, gets it
+  // from the swipe that finds the pair decided.
+  const matches = raw(KEYS.matches);
+  delete matches[matched.matchId];
+  writeRaw(KEYS.matches, matches);
+  const healed = await store.recordSwipe('alice', 'cara', 'pass');
+  assert.deepEqual(healed, {
+    matched: true, matchId: matched.matchId, created: true, existing: true, action: 'super'
+  });
+  assert.ok(raw(KEYS.matches)[matched.matchId], 'the match document is back');
+});
+
 test('a block outranks a mutual like, and says so as a plain no-match', async function () {
   await resetWorld();
   await store.createUser('alice', {});

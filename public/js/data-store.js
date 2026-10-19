@@ -1199,7 +1199,9 @@
       const existing = isPlainObject(swipes[id]) ? swipes[id] : null;
 
       // Mirror the Firestore adapter, where the rules make swipes create-or-delete only:
-      // an already-recorded decision stands and re-recording it writes nothing.
+      // an already-recorded decision stands, re-recording it writes no swipe, and the
+      // answer says so through `decidedEarlier`. The match check below still runs on
+      // the decision that stands.
       let effective = act;
       if (existing) {
         effective = normalizeAction(existing.action);
@@ -1234,7 +1236,8 @@
       // — a caller that read it that way would put the card back over a decision
       // already recorded, and the rules forbid overwriting one.
       try {
-        return demoMatchFor(fromUid, toUid, effective, swipes);
+        const outcome = demoMatchFor(fromUid, toUid, effective, swipes);
+        return existing ? decidedEarlier(outcome, effective) : outcome;
       } catch (err) {
         throw storedSwipeFailure(err);
       }
@@ -2517,6 +2520,30 @@
   }
 
   /**
+   * Mark a recordSwipe answer as one that found the pair already decided, so
+   * wrote no swipe, and name the decision that stands.
+   *
+   * That is not the same as writing nothing. The match check still runs on
+   * that decision, and a mutual pair whose match document is missing (what a
+   * failed match check leaves behind) gets it now, with `created: true` in the
+   * same answer.
+   *
+   * Both adapters answer through this one function, so the shape cannot drift
+   * between them. The deck needs the word: it announces a swipe before the
+   * store has answered, and it counts a like and folds it into the learning
+   * map afterwards. For a swipe that was never recorded, both of those used to
+   * happen anyway.
+   * @param {{matched:boolean, matchId:string|null, created:boolean}} outcome the match answer
+   * @param {string} action the action already stored, which is the one that stands
+   * @returns {Object} the same answer, with `existing: true` and that `action`
+   */
+  function decidedEarlier(outcome, action) {
+    outcome.existing = true;
+    outcome.action = action;
+    return outcome;
+  }
+
+  /**
    * The half of recordSwipe that runs once the swipe itself is stored: is this
    * mutual, and if so does the match document exist yet.
    * @param {string} fromUid the swiper
@@ -2785,8 +2812,10 @@
       // Swipes are immutable: the rules allow create and delete but never update, and a
       // set() over an existing document counts as an update. Re-recording the same pair
       // (two tabs on one deck, or a retry whose first write actually landed) therefore
-      // writes nothing and simply re-reports the outcome. Changing your mind goes through
-      // undoSwipe, which deletes the document so the next record creates it afresh.
+      // writes no swipe, runs the match check again on the decision that stands, and
+      // says the pair was decided already: see `decidedEarlier`. Changing your mind
+      // goes through undoSwipe, which deletes the document so the next record creates
+      // it afresh.
       let effective = act;
       if (existing.exists) {
         effective = normalizeAction((existing.data() || {}).action);
@@ -2813,11 +2842,12 @@
       // line above it and of nothing after.
       //
       // The distinction is not cosmetic. Putting the card back invites a second,
-      // contradictory decision, and a recorded swipe stands — the store would
-      // keep the first one and silently drop the second, leaving the deck
-      // showing a choice the account no longer has.
+      // contradictory decision, and a recorded swipe stands — the store keeps
+      // the first one and answers the second with the decision on record, so
+      // the deck would be showing a choice the account no longer has.
       try {
-        return await recordMatchFor(fromUid, toUid, effective);
+        const outcome = await recordMatchFor(fromUid, toUid, effective);
+        return existing.exists ? decidedEarlier(outcome, effective) : outcome;
       } catch (err) {
         throw storedSwipeFailure(err);
       }
@@ -4120,11 +4150,16 @@
 
     /**
      * Write a swipe and create the match when the like is mutual. Idempotent:
-     * re-recording the same swipe never produces a second match.
+     * re-recording the same swipe never produces a second match. A pair that
+     * already has a decision keeps it, whatever `action` says: no swipe is
+     * written, and the answer carries `existing: true` and the `action` that
+     * stands. The match check still runs on that action, so a mutual pair
+     * whose match document is missing gets it then.
      * @param {string} fromUid swiper
      * @param {string} toUid swiped
      * @param {'like'|'pass'|'super'} action what they did
-     * @returns {Promise<{matched:boolean, matchId:string|null, created:boolean}>}
+     * @returns {Promise<{matched:boolean, matchId:string|null, created:boolean,
+     *   existing?:boolean, action?:string}>}
      */
     async recordSwipe(fromUid, toUid, action) {
       await ready;

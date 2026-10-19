@@ -190,6 +190,25 @@ module.exports = {
       pass.wrote.concat(like.wrote).every(function (entry) { return entry.indexOf('discovery/') === -1; }),
       k.show(pass.wrote.concat(like.wrote)));
 
+    /* ---- 2b. a like on a pair somebody already decided ------------------- */
+
+    // Two tabs on one deck: the other one passed, and this one likes the card
+    // it is still showing. Swipes are create-or-delete under the rules, so the
+    // decision on record stands, and on a passed pair `recordSwipe` writes
+    // nothing at all (3b is the pair where it still has a write to make) —
+    // and says so, because the deck counts the like and saves the learning
+    // map only for a swipe that was recorded. Without that word those were two
+    // more writes, for a like that never happened.
+    const decided = await measure(function () {
+      return k.store.recordSwipe(me, passed, 'like');
+    });
+    k.ctx.drainWarnings();
+
+    t.check('a like on a pair already passed writes nothing, and says the pass is what stands',
+      decided.writes === 0 && !!decided.value && decided.value.existing === true &&
+        decided.value.action === 'pass' && decided.value.matched === false,
+      decided.writes + ' write(s), answered ' + k.show(decided.value));
+
     /* ---- 3. a like that turns out mutual --------------------------------- */
 
     await k.admin.set('swipes', mutual + '_' + me, {
@@ -212,6 +231,30 @@ module.exports = {
         k.same(shape(both.wrote),
           ['swipes:set', 'matches:set', 'tx:users:update', 'users:update']),
       both.writes + ' write(s): ' + k.show(both.wrote));
+
+    /* ---- 3b. a decided mutual pair that has lost its match ---------------- */
+
+    // Writing no swipe is not the same as writing nothing. The match check
+    // runs on the decision that stands, so a mutual pair whose match document
+    // is missing, which is what a failed match check leaves behind, gets it
+    // from the next swipe on the pair: one write, the match, in an answer that
+    // still says the like is what stands. Section 4 talks in this match, so a
+    // swipe that failed to put it back is not left to fail that check too.
+    const lostMatch = await k.admin.get('matches', k.h.pairId(me, mutual));
+    await k.admin.del('matches', k.h.pairId(me, mutual));
+    const healed = await measure(function () {
+      return k.store.recordSwipe(me, mutual, 'pass');
+    });
+    k.ctx.drainWarnings();
+
+    t.check('a swipe on a decided mutual pair that lost its match writes the match alone, and says the like stands',
+      healed.writes === 1 && k.same(shape(healed.wrote), ['matches:set']) && !!healed.value &&
+        healed.value.matched === true && healed.value.created === true &&
+        healed.value.existing === true && healed.value.action === 'like',
+      healed.writes + ' write(s): ' + k.show(healed.wrote) + ', answered ' + k.show(healed.value));
+    if (!(await k.admin.get('matches', k.h.pairId(me, mutual)))) {
+      await k.admin.set('matches', k.h.pairId(me, mutual), lostMatch);
+    }
 
     /* ---- 4. a message ---------------------------------------------------- */
 

@@ -46,6 +46,28 @@ function movedOff(page, uid) {
 }
 
 /**
+ * Whether `predicate(arg)` comes true in the page within five seconds.
+ * Answered rather than thrown, for the reason `reached` gives.
+ * @param {Object} page a Playwright Page
+ * @param {Function} predicate runs in the page
+ * @param {*} [arg] handed to the predicate
+ * @returns {Promise<boolean>}
+ */
+function becomes(page, predicate, arg) {
+  return page.waitForFunction(predicate, arg, { timeout: 5000 })
+    .then(function () { return true; }, function () { return false; });
+}
+
+/** The hint under the deck, and whether the Super button can be pressed. */
+function budgetShown(page) {
+  return page.evaluate(function () {
+    const hint = document.getElementById('usage-hint');
+    const button = document.getElementById('btn-super');
+    return { hint: hint ? hint.textContent.trim() : '', superDisabled: !!(button && button.disabled) };
+  });
+}
+
+/**
  * The decision the signed-in account has stored on `uid`, looked for until
  * five seconds have passed; null when there is none by then.
  *
@@ -214,8 +236,8 @@ module.exports = {
     // recordSwipe writes the swipe and then goes looking for a match, so a
     // failure can arrive after the decision is already stored. The deck used to
     // read every failure as "the swipe is not stored" and put the card back —
-    // which invites a second, contradictory decision that the store silently
-    // drops, because a recorded swipe stands.
+    // which invites a second, contradictory decision that the store will not
+    // record, because a recorded swipe stands.
     await page.evaluate(function () {
       const real = window.ZC.store.recordSwipe;
       window.__zcRealRecordSwipe = real;
@@ -275,6 +297,198 @@ module.exports = {
     });
     await h.closeBurst(page);
 
+    /* ---- a swipe that fails while the next one waits for its budget ---- */
+
+    // A like reads its budget before it takes the card; a pass waits for
+    // nothing. So a pass whose write fails can put its card back on top while
+    // the like after it is still waiting, and `commit` used to take whatever
+    // was on top when the read came back: the card just put back, under the
+    // like's name, leaving the liked one on top. Both are held here and let go
+    // in that order, so the overlap is the one thing that can happen rather
+    // than a race the check usually wins. The failure is shaped like Firestore's
+    // offline read at the top of `recordSwipe`: no `swipeStored` mark, so the
+    // swipe never landed.
+    const putBack = await topCard(page);
+    await page.evaluate(function () {
+      const store = window.ZC.store;
+      const held = { recordSwipe: store.recordSwipe, canSpend: store.canSpend, fail: null, budget: null };
+      window.__zcHeld = held;
+      store.recordSwipe = function () {
+        if (held.fail) return held.recordSwipe.apply(store, arguments);
+        return new Promise(function (resolve, reject) {
+          held.fail = function () {
+            const err = new Error('Failed to get document because the client is offline.');
+            err.code = 'unavailable';
+            reject(err);
+          };
+        });
+      };
+      store.canSpend = function () {
+        const args = arguments;
+        return new Promise(function (resolve) { held.budget = resolve; })
+          .then(function () { return held.canSpend.apply(store, args); });
+      };
+    });
+    await page.keyboard.press('ArrowLeft');
+    const passWaiting = await becomes(page, function (was) {
+      const card = document.querySelector('#deck-stack .swipe-card:not([data-exiting])');
+      return !!window.__zcHeld.fail && !!card && card.dataset.uid !== was;
+    }, putBack.uid);
+    const takenNext = await topCard(page);
+    await page.keyboard.press('ArrowRight');
+    const likeWaiting = passWaiting && await becomes(page, function () { return !!window.__zcHeld.budget; });
+    if (likeWaiting) await page.evaluate(function () { window.__zcHeld.fail(); });
+    const backOnTop = likeWaiting && await becomes(page, function (uid) {
+      const card = document.querySelector('#deck-stack .swipe-card:not([data-exiting])');
+      return !!card && card.dataset.uid === uid;
+    }, putBack.uid);
+    if (likeWaiting) await page.evaluate(function () { window.__zcHeld.budget(); });
+    const likedNext = backOnTop ? await storedAction(page, me, takenNext.uid) : null;
+    const raced = await page.evaluate(function () {
+      const store = window.ZC.store;
+      store.recordSwipe = window.__zcHeld.recordSwipe;
+      store.canSpend = window.__zcHeld.canSpend;
+      delete window.__zcHeld;
+      return {
+        stack: Array.prototype.map.call(
+          document.querySelectorAll('#deck-stack .swipe-card:not([data-exiting])'),
+          function (card) { return card.dataset.uid; }),
+        said: (document.getElementById('deck-status').textContent || '').trim()
+      };
+    });
+    t.check('a swipe that fails while the next one waits for its budget gets its own card back, and the next one takes its own',
+      backOnTop && likedNext === 'like' && raced.stack[0] === putBack.uid &&
+        raced.stack.indexOf(takenNext.uid) === -1,
+      (passWaiting ? '' : 'the pass never reached its write; ') + (likeWaiting ? '' : 'the like never asked for its budget; ') +
+      putBack.name + ' failed, ' + takenNext.name + ' stored as ' + (likedNext || 'nothing') +
+      '; on top now: ' + raced.stack[0] + ', stack ' + JSON.stringify(raced.stack) + '; said ' + JSON.stringify(raced.said));
+    await h.closeBurst(page);
+
+    /* ---- a card decided somewhere else ---- */
+
+    // A recorded decision stands, so `recordSwipe` writes no swipe when the
+    // pair already has one: two tabs on one deck, or two devices. The deck has
+    // already said "Liked …" by then, and it used to go on to count the like
+    // and teach the learning map a like that was never recorded. The pass is
+    // stored the way the other tab's deck would store it, through the store,
+    // and a pass moves no counter there.
+    const elsewhere = await topCard(page);
+    const untouched = await page.evaluate(function (args) {
+      const store = window.ZC.store;
+      return store.recordSwipe(args.me, args.uid, 'pass').then(function () {
+        return Promise.all([store.getUsage(args.me), store.getUser(args.me)]);
+      }).then(function (got) {
+        return {
+          likes: got[0].likes,
+          learning: JSON.stringify(got[1].learning || null),
+          hint: (document.getElementById('usage-hint').textContent || '').trim()
+        };
+      });
+    }, { me: me, uid: elsewhere.uid });
+    await page.keyboard.press('ArrowRight');
+    const told = await page.waitForFunction(function () {
+      const toasts = Array.prototype.map.call(document.querySelectorAll('.toast'), function (node) {
+        return (node.textContent || '').trim();
+      }).filter(function (text) { return /already/i.test(text); });
+      return toasts.length ? toasts[toasts.length - 1] : null;
+    }, null, { timeout: 5000 }).then(function (handle) { return handle.jsonValue(); }, function () { return null; });
+    // The like is reserved the moment it is pressed, so the counter drops; it
+    // has to come back once the store has answered, or the like was spent.
+    const restored = await becomes(page, function (hint) {
+      return (document.getElementById('usage-hint').textContent || '').trim() === hint;
+    }, untouched.hint);
+    const afterwards = await page.evaluate(function (args) {
+      const store = window.ZC.store;
+      return Promise.all([store.getUsage(args.me), store.getUser(args.me), store.getSwipes(args.me)]).then(function (got) {
+        return {
+          likes: got[0].likes,
+          learning: JSON.stringify(got[1].learning || null),
+          stored: got[2].filter(function (swipe) { return swipe.to === args.uid; }).map(function (swipe) { return swipe.action; }),
+          hint: (document.getElementById('usage-hint').textContent || '').trim(),
+          said: (document.getElementById('deck-status').textContent || '').trim()
+        };
+      });
+    }, { me: me, uid: elsewhere.uid });
+    t.check('a like on a card already passed elsewhere says the pass stands, and spends no like and teaches nothing',
+      !!told && /passed/i.test(told) && restored && afterwards.likes === untouched.likes &&
+        afterwards.learning === untouched.learning && afterwards.stored.join() === 'pass',
+      elsewhere.name + ': toast ' + JSON.stringify(told) + ', said ' + JSON.stringify(afterwards.said) +
+      ', likes ' + untouched.likes + ' -> ' + afterwards.likes + ', hint ' + JSON.stringify(afterwards.hint) +
+      ', learning ' + (afterwards.learning === untouched.learning ? 'unchanged' : 'changed') +
+      ', stored ' + JSON.stringify(afterwards.stored));
+    await h.closeBurst(page);
+
+    /* ---- a write that landed although the deck was told it had not ---- */
+
+    // Then the deck puts the card back itself, and a retry of the same
+    // decision finds that first write on record. Nobody counted it, because
+    // the failure came back before anything was counted, so the retry is
+    // counted once and taught, and nothing is said about an earlier decision:
+    // the earlier decision is this one. The stub makes the real write and
+    // then rejects with no `swipeStored` mark, as a failure before the write
+    // would, and puts the real `recordSwipe` back as it does, so the retry
+    // goes through the store untouched.
+    const retried = await topCard(page);
+    const beforeRetry = await page.evaluate(function (me) {
+      const store = window.ZC.store;
+      const real = store.recordSwipe;
+      store.recordSwipe = function () {
+        store.recordSwipe = real;
+        return real.apply(store, arguments).then(function () {
+          const err = new Error('The swipe was not confirmed.');
+          err.code = 'unavailable';
+          throw err;
+        });
+      };
+      // Every toast already up is marked, so only the ones raised from here on
+      // are read: the "already" toast of the check above may still be showing.
+      Array.prototype.forEach.call(document.querySelectorAll('.toast'), function (node) {
+        node.dataset.zcSeen = '1';
+      });
+      return Promise.all([store.getUsage(me), store.getUser(me)]).then(function (got) {
+        return { likes: got[0].likes, learning: JSON.stringify(got[1].learning || null) };
+      });
+    }, me);
+    await page.keyboard.press('ArrowRight');
+    // `persistSwipe` raises its toast straight after putting the card back.
+    const cameBack = await becomes(page, function (uid) {
+      const card = document.querySelector('#deck-stack .swipe-card:not([data-exiting])');
+      const said = Array.prototype.some.call(document.querySelectorAll('.toast:not([data-zc-seen])'), function (node) {
+        return /did not save/.test(node.textContent || '');
+      });
+      return said && !!card && card.dataset.uid === uid;
+    }, retried.uid);
+    if (cameBack) await page.keyboard.press('ArrowRight');
+    // Polled in the page, for the reason `storedAction` gives.
+    const counted = await page.evaluate(function (args) {
+      const store = window.ZC.store;
+      const deadline = Date.now() + 5000;
+      function poll() {
+        return Promise.all([store.getUsage(args.me), store.getUser(args.me), store.getSwipes(args.me)]).then(function (got) {
+          const now = {
+            likes: got[0].likes,
+            learning: JSON.stringify(got[1].learning || null),
+            stored: got[2].filter(function (swipe) { return swipe.to === args.uid; }).map(function (swipe) { return swipe.action; }),
+            toasts: Array.prototype.map.call(document.querySelectorAll('.toast:not([data-zc-seen])'), function (node) {
+              return (node.textContent || '').trim();
+            })
+          };
+          if ((now.likes === args.likes + 1 && now.learning !== args.learning) || Date.now() > deadline) return now;
+          return new Promise(function (resolve) { window.setTimeout(resolve, 50); }).then(poll);
+        });
+      }
+      return poll();
+    }, { me: me, uid: retried.uid, likes: beforeRetry.likes, learning: beforeRetry.learning });
+    t.check('a retry that finds its own first write on record is counted once and taught, and told of no earlier decision',
+      cameBack && counted.likes === beforeRetry.likes + 1 && counted.learning !== beforeRetry.learning &&
+        counted.stored.join() === 'like' &&
+        !counted.toasts.some(function (text) { return /already/i.test(text); }),
+      retried.name + ': ' + (cameBack ? '' : 'the card never came back; ') +
+      'likes ' + beforeRetry.likes + ' -> ' + counted.likes +
+      ', learning ' + (counted.learning === beforeRetry.learning ? 'unchanged' : 'changed') +
+      ', stored ' + JSON.stringify(counted.stored) + ', toasts ' + JSON.stringify(counted.toasts));
+    await h.closeBurst(page);
+
     /* ---- the shortcuts modal ---- */
     await page.click('#btn-shortcuts');
     await page.waitForSelector('.modal[role="dialog"]');
@@ -311,5 +525,93 @@ module.exports = {
       asked ? 'title=' + askedTitle : 'no dialog opened');
     await page.keyboard.press('Escape');
     await page.waitForSelector('.modal[role="dialog"]', { state: 'detached' });
+
+    /* ---- left open across midnight ---- */
+
+    // Last, because it moves the clock, and the clock stays moved for the rest
+    // of this browser context. The free super like spent and likes left is the
+    // ordinary evening, and the one the deck used to get wrong: a swipe re-reads
+    // the budgets, but the only thing that re-read them because the day had
+    // turned was the limit banner's countdown, which runs only while the LIKES
+    // are used up. So a deck nobody touched went on giving yesterday's numbers,
+    // with the Super button disabled, into the new day until the next swipe.
+    const now = new Date();
+    await page.clock.install({ time: new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 58, 0) });
+    await page.goto(ctx.base + '/dashboard.html', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#deck-stack .swipe-card');
+    const spendToday = function () {
+      return page.evaluate(function () {
+        return window.ZC.store.updateUser(window.ZC.auth.current.uid, {
+          usage: { date: window.ZC.util.todayKey(), likes: 3, superLikes: 1, rewinds: 0 }
+        });
+      });
+    };
+    const superSpent = function () {
+      return becomes(page, function () {
+        const button = document.getElementById('btn-super');
+        return /\b0 super likes left/.test(document.getElementById('usage-hint').textContent || '') &&
+          !!button && button.disabled;
+      });
+    };
+    const superBack = function () {
+      return becomes(page, function () {
+        const button = document.getElementById('btn-super');
+        const text = document.getElementById('usage-hint').textContent || '';
+        const likes = /^(\d+) of (\d+) likes left today/.exec(text);
+        return !!likes && likes[1] === likes[2] && /\b1 super like left/.test(text) && !!button && !button.disabled;
+      });
+    };
+    await spendToday();
+    await page.goto(ctx.base + '/dashboard.html', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#deck-stack .swipe-card');
+    const evening = await superSpent();
+    const beforeMidnight = await budgetShown(page);
+    // Three minutes on: past midnight, with every timer the page set run on the
+    // way, which is what an open tab gets.
+    await page.clock.runFor(3 * 60 * 1000);
+    const morning = evening && await superBack();
+    const afterMidnight = await budgetShown(page);
+    t.check('left open across midnight, the deck re-reads its budgets: the new day\'s likes, its super like and the Super button',
+      evening && morning,
+      JSON.stringify(beforeMidnight) + ' -> ' + JSON.stringify(afterMidnight));
+
+    // A machine asleep across midnight runs no timers while it sleeps, and a
+    // timer that was due during the sleep is not something to count on
+    // afterwards. `setSystemTime` is that case: it moves `Date` a day on and
+    // leaves every timer the page set exactly where it was. What the person
+    // does next is come back to the tab.
+    await spendToday();
+    await page.goto(ctx.base + '/dashboard.html', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#deck-stack .swipe-card');
+    const asleep = await superSpent();
+    const beforeSleep = await budgetShown(page);
+    const nextDay = await page.evaluate(function () { return Date.now() + 24 * 60 * 60 * 1000; });
+    await page.clock.setSystemTime(nextDay);
+    await page.evaluate(function () { document.dispatchEvent(new Event('visibilitychange')); });
+    const awake = asleep && await superBack();
+    const afterSleep = await budgetShown(page);
+    t.check('and a tab come back to on a later day re-reads them too, with no timer having run',
+      asleep && awake,
+      JSON.stringify(beforeSleep) + ' -> ' + JSON.stringify(afterSleep) + ' on ' + new Date(nextDay).toDateString());
+
+    // A page the browser kept whole in its back/forward cache comes back with
+    // `pageshow` rather than a load. The event is dispatched by hand, as
+    // `visibilitychange` is above: what is checked is that the deck listens
+    // for it, with the day moved on the same way.
+    await spendToday();
+    await page.goto(ctx.base + '/dashboard.html', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#deck-stack .swipe-card');
+    const kept = await superSpent();
+    const beforeKept = await budgetShown(page);
+    const dayAfter = await page.evaluate(function () { return Date.now() + 24 * 60 * 60 * 1000; });
+    await page.clock.setSystemTime(dayAfter);
+    await page.evaluate(function () {
+      window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+    });
+    const shownAgain = kept && await superBack();
+    const afterKept = await budgetShown(page);
+    t.check('and so does a page given back by the back/forward cache on a later day',
+      kept && shownAgain,
+      JSON.stringify(beforeKept) + ' -> ' + JSON.stringify(afterKept) + ' on ' + new Date(dayAfter).toDateString());
   }
 };

@@ -200,8 +200,8 @@ module.exports = {
     // itself. dashboard.js reads any throw from recordSwipe as "the swipe is
     // not stored" and puts the card back — true of the first write in that
     // function and of nothing after it. Taking a card back that was in fact
-    // recorded invites a second, contradictory decision the store will silently
-    // drop, because a recorded swipe stands.
+    // recorded invites a second, contradictory decision the store will not
+    // record, because a recorded swipe stands.
     t.check('and says the swipe itself was already stored',
       !!outageError && outageError.swipeStored === true,
       outageError ? 'swipeStored=' + outageError.swipeStored : 'no error');

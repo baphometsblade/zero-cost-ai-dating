@@ -75,8 +75,10 @@
   const bannerTextEl = document.getElementById('limit-text');
   /** Speaks for the banner, once per raise; see `updateLimitBanner`. */
   const bannerStatusEl = document.getElementById('limit-status');
-  /** The local day the limit banner was raised on; see `tickCountdown`. */
-  let bannerDay = null;
+  /** The local day the budgets on screen were read for; see `watchDay`. */
+  let budgetDay = null;
+  /** The wake-up `watchDay` set for the next local midnight. */
+  let dayTimer = null;
   const detailsEl = document.getElementById('deck-details');
   const detailsBodyEl = document.getElementById('details-body');
   const buttons = {
@@ -522,21 +524,22 @@
     const budget = state.budget.likes;
     if (!bannerTextEl || !budget) return;
 
-    // The day this banner was raised on. Midnight is detected by the date
-    // CHANGING, not by a countdown reaching zero: `msToMidnight` rebuilds its
-    // target from `new Date()` on every tick, so it is always tomorrow relative
-    // to now and can never reach zero — 1ms at 23:59:59.999, then 86,400,000 one
-    // second later. `if (remaining <= 0)` was therefore dead code, and with it
-    // the only thing that re-read the daily budget while the limit banner was
-    // up: someone who hit their limit and left the tab open watched the
-    // countdown run down, wrap around, and keep telling them to wait.
-    const today = ZC.util.todayKey();
-    if (bannerDay && bannerDay !== today) {
-      bannerDay = today;
+    // Midnight is detected by the date CHANGING, not by a countdown reaching
+    // zero: `msToMidnight` rebuilds its target from `new Date()` on every tick,
+    // so it is always tomorrow relative to now and can never reach zero — 1ms at
+    // 23:59:59.999, then 86,400,000 one second later. `if (remaining <= 0)` was
+    // therefore dead code, and with it the only thing that re-read the daily
+    // budget while the limit banner was up: someone who hit their limit and
+    // left the tab open watched the countdown run down, wrap around, and keep
+    // telling them to wait. `watchDay` re-reads at midnight whether or not the
+    // banner is up. The check stays here as well because this tick and that
+    // timer both come round within a second of midnight, in no fixed order, and
+    // a tick that came first would start counting down to the next midnight
+    // under a banner the new day has already lifted.
+    if (budgetDay && budgetDay !== ZC.util.todayKey()) {
       refreshBudgets();
       return;
     }
-    if (!bannerDay) bannerDay = today;
 
     const remaining = msToMidnight();
     bannerTextEl.textContent = likesUsedSentence(budget) + ' They come back in ' +
@@ -571,10 +574,7 @@
       window.clearInterval(state.countdown);
       state.countdown = null;
     }
-    // Cleared with the banner, so the next one starts from the day it is raised
-    // on rather than from a day that has already turned.
-    bannerDay = null;
-    // Emptied with it as well. The region is always rendered, so a sentence
+    // Emptied with the banner. The region is always rendered, so a sentence
     // left in it would go on telling a screen reader the likes are used up
     // after they have come back.
     if (bannerStatusEl) bannerStatusEl.textContent = '';
@@ -630,6 +630,11 @@
   async function refreshBudgets() {
     const token = budgetRead + 1;
     budgetRead = token;
+    // Taken when the question is asked, not when the answer comes back, so it
+    // can only ever be older than the counters it describes. A read that
+    // straddles midnight is then asked again by `watchDay`, rather than being
+    // filed under a day it may not belong to.
+    budgetDay = ZC.util.todayKey();
     const fields = ['likes', 'superLikes', 'rewinds'];
     // One call, not three. `canSpendAll` answers every field from a single read
     // of `users/{uid}`; three `checkBudget` calls in a Promise.all read the same
@@ -647,6 +652,40 @@
       state.budget[field] = isBudget(answer) ? answer : estimatedBudget();
     });
     paintBudgets();
+    watchDay();
+  }
+
+  /**
+   * Re-read the budgets once the day they were read for is over, and until
+   * then wait for the next local midnight to ask again.
+   *
+   * The counters reset at midnight, and the hint, the Super button and the
+   * banner are painted from a read. Every swipe that saves repeats that read,
+   * and so does a rewind that goes through, but nothing repeated it because
+   * the day had turned except the banner's countdown, which runs only while
+   * the likes are used up. So on the ordinary evening, with the free super
+   * like spent and likes left, a deck nobody touched went on showing
+   * yesterday's numbers and a disabled Super button into the new day, until
+   * the next swipe read them again.
+   *
+   * A timer is not enough on its own: one that was due while the machine slept
+   * is not something to count on afterwards. So coming back to the tab asks
+   * too (see `wireControls`). Neither costs a read unless the day has actually
+   * changed.
+   * @returns {void}
+   */
+  function watchDay() {
+    window.clearTimeout(dayTimer);
+    dayTimer = null;
+    if (!budgetDay) return;
+    // `refreshBudgets` comes back here once it has painted.
+    if (budgetDay !== ZC.util.todayKey()) {
+      refreshBudgets();
+      return;
+    }
+    // A timer that wakes a moment early finds the same day and simply sets
+    // itself again for what is left.
+    dayTimer = window.setTimeout(watchDay, msToMidnight());
   }
 
   /* ------------------------------------------------------------------------
@@ -831,7 +870,7 @@
     if (!result || state.loading || state.error) return;
     state.busy = true;
 
-    const card = topCard();
+    let card = topCard();
     const field = SPEND_FIELD[action];
 
     // Daily limits are checked before anything is spent or animated — against
@@ -858,6 +897,25 @@
       paintBudgets();
     }
 
+    // The budget read is the one wait on this path, and the deck can change
+    // under it: an earlier swipe whose write failed puts its card back on top
+    // while this one waits. So the card is found again by who is on it rather
+    // than taken from the top. Taking the top removed the card just put back,
+    // under this swipe's name, and left the one this swipe was for on top.
+    // Gone from the deck altogether is not something any path produces today
+    // (only `load` replaces the queue, and nothing that starts one is on screen
+    // while a card is), but `splice(-1, 1)` would quietly drop the last card,
+    // so that ends the swipe instead.
+    const at = state.queue.indexOf(result);
+    if (at === -1) {
+      state.busy = false;
+      releaseReservation(field);
+      return;
+    }
+    card = $$('.swipe-card:not([data-exiting])', stackEl).filter(function (node) {
+      return node.dataset.uid === result.uid;
+    })[0] || null;
+
     const entry = {
       result: result,
       action: action,
@@ -870,7 +928,7 @@
     // so whether the keyboard was on the deck has to be read before that.
     const keyboardOnDeck = !!(card && document.activeElement && card.contains(document.activeElement));
 
-    state.queue.shift();
+    state.queue.splice(at, 1);
     state.history.push(entry);
     if (card) animateOut(card, action);
     renderStack();
@@ -920,6 +978,10 @@
   // and is fixed above. Said plainly because the difference matters.
   let bookkeeping = Promise.resolve();
 
+  // Cards this deck put back after a write it was told had failed, by uid,
+  // with the action that write carried; see `persistSwipe`.
+  const putBack = {};
+
   /**
    * Run one swipe's bookkeeping after any still running.
    * @param {Object} entry the queue entry being persisted
@@ -947,12 +1009,14 @@
       // after it.
       //
       // Taking the card back when the swipe did land is worse than it looks. A
-      // recorded decision stands, so the second swipe would be silently dropped
-      // and the deck would be offering a choice the account no longer has —
-      // most sharply when somebody swipes the other way the second time.
+      // recorded decision stands: a second swipe on that card is not stored,
+      // only answered with the decision on record, so the deck would be
+      // offering a choice the account no longer has — most sharply when
+      // somebody swipes the other way the second time.
       if (!(err && err.swipeStored)) {
         entry.pending = false;
         releaseReservation(entry.field);
+        putBack[entry.result.uid] = entry.action;
         restoreEntry(entry);
         toast('That swipe did not save. The card is back on top — try again.', 'error');
         return;
@@ -990,6 +1054,39 @@
     entry.matchId = (outcome && outcome.matchId) || null;
     entry.pending = false;
 
+    // The pair already had a decision — from another tab on this deck, or
+    // another device — and a recorded decision stands: the store wrote no
+    // swipe this time and left the one on record as it was. The deck
+    // announced this swipe before it could know, so it says what stands
+    // instead, and the history keeps what stands too. Nor is this swipe
+    // counted, or taught to the learning map: both belong to the swipe that
+    // was recorded, and the page that recorded it took them then.
+    //
+    // Unless the page that recorded it is this one. When a write this deck
+    // was told had failed landed after all, the deck put the card back itself
+    // and said the swipe did not save. Retried with the same decision, it
+    // finds its own first write on record, which nobody has counted, so it is
+    // counted and taught now like any recorded swipe, and nothing is said. A
+    // retry with a different decision is told the first one stands, like any
+    // other. Another tab making that same decision on that same card in
+    // between would be counted twice, as every such pair was before the store
+    // said when a decision was already there.
+    const tried = putBack[entry.result.uid];
+    delete putBack[entry.result.uid];
+    const stood = outcome && outcome.existing ? outcome.action : null;
+    const earlier = stood && !(stood === tried && stood === entry.action) ? stood : null;
+    if (earlier) {
+      const said = 'You had already ' + ACTION_VERB[earlier].toLowerCase() + ' ' +
+        nameOf(entry.result.profile) + ' — that decision stands' +
+        (entry.field ? ', and this one was not counted.' : '.');
+      entry.action = earlier;
+      toast(said, 'warn');
+      // When the decision on record made a match and the burst below opens,
+      // its sentence replaces this one in the deck's live region. The toast
+      // is a status region of its own, so it still says this.
+      announce(said);
+    }
+
     if (entry.matched) {
       showMatchBurst(entry.result, entry.matchId);
       if (ZC.app && typeof ZC.app.refreshBadges === 'function') ZC.app.refreshBadges(true);
@@ -1002,7 +1099,7 @@
     // two swipes out of two. The SDK replays and the data is right, which is
     // why it went unnoticed; it was never free. So nothing else of ours may be
     // in flight against that document while this runs.
-    if (entry.field) {
+    if (entry.field && !earlier) {
       try {
         await ZC.store.bumpUsage(state.me.uid, entry.field, 1);
       } catch (err) {
@@ -1012,7 +1109,7 @@
     }
     // Then the learning map, after the bump rather than across it. The deck is
     // still not waiting: commit() left persistSwipe unawaited long ago.
-    await persistLearning(entry.result.profile, entry.action);
+    if (!earlier) await persistLearning(entry.result.profile, entry.action);
     await refreshBudgets();
     releaseReservation(entry.field);
   }
@@ -1601,6 +1698,12 @@
     if (buttons.info) buttons.info.addEventListener('click', function () { toggleDetails(); });
     if (buttons.shortcuts) buttons.shortcuts.addEventListener('click', function () { showShortcuts(); });
     document.addEventListener('keydown', onKeydown);
+    // Back to the tab, perhaps on a later day; see `watchDay`. `pageshow` is
+    // for a page the browser kept whole in its back/forward cache.
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState !== 'hidden') watchDay();
+    });
+    window.addEventListener('pageshow', function () { watchDay(); });
   }
 
   /**
