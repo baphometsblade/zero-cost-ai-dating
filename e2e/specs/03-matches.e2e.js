@@ -1001,6 +1001,177 @@ module.exports = {
 
     await page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#match-list .match-row');
+
+    /* ---- a send that fails after the reader has moved on ---- */
+
+    // In firebase mode a send settles only when the server answers, which with
+    // no connection is whenever it comes back, so the reader can be in another
+    // conversation by the time a refusal arrives (the match ended meanwhile).
+    // The failed text used to go into whichever composer was open, over the
+    // draft there, under "Your text is still in the box", and the next Enter
+    // sent the first person's words to the second (measured against the
+    // emulator). The demo store answers at once, so here the next send is held
+    // until this check refuses it, the way a refused Firestore write rejects.
+    // Toasts are recorded as they are made: they leave the screen on a timer.
+    // The recorder is put in once per page, so a second hold does not record
+    // every toast twice.
+    const holdNextSend = function () {
+      const store = window.ZC.store;
+      const realSend = store.sendMessage;
+      window.__zcHeld = { sends: [], toasts: [], refuse: null };
+      store.sendMessage = function (matchId, from, text) {
+        window.__zcHeld.sends.push({ matchId: matchId, text: text });
+        store.sendMessage = realSend;
+        return new Promise(function (resolve, reject) {
+          window.__zcHeld.refuse = function () { reject(new Error('Refused by the e2e suite.')); };
+        });
+      };
+      if (window.__zcToastsRecorded) return;
+      window.__zcToastsRecorded = true;
+      const realToast = window.ZC.ui.toast;
+      window.ZC.ui.toast = function (message) {
+        window.__zcHeld.toasts.push(String(message));
+        return realToast.apply(window.ZC.ui, arguments);
+      };
+    };
+    await page.evaluate(holdNextSend);
+    const MEANT = 'Meant for Devin and nobody else';
+    const SAM_DRAFT = 'Half a reply to Sam';
+    await openConversation(page, 'Devin');
+    const devinId = await page.evaluate(function () { return window.ZC.util.qs('m'); });
+    await page.fill('#chat-input', MEANT);
+    await page.press('#chat-input', 'Enter');
+    await page.waitForFunction(function () { return typeof window.__zcHeld.refuse === 'function'; });
+    if (ctx.viewport.key !== 'desktop') await page.click('#chat-back');
+    await openConversation(page, 'Sam');
+    await page.waitForFunction(function (id) {
+      return /Sam/.test(document.getElementById('chat-peer-name').textContent) && window.ZC.util.qs('m') !== id;
+    }, devinId);
+    await page.fill('#chat-input', SAM_DRAFT);
+    await page.evaluate(function () { window.__zcHeld.refuse(); });
+    await page.waitForFunction(function () { return !document.getElementById('chat-send').hasAttribute('aria-busy'); });
+    const elsewhere = await page.evaluate(function () {
+      return {
+        open: document.getElementById('chat-peer-name').textContent,
+        box: document.getElementById('chat-input').value,
+        toasts: window.__zcHeld.toasts.slice()
+      };
+    });
+    t.check('a send refused after the reader opened another conversation leaves that one\'s box alone, and names who it was for',
+      elsewhere.box === SAM_DRAFT && elsewhere.toasts.length === 1 && /Devin/.test(elsewhere.toasts[0]),
+      JSON.stringify(elsewhere));
+
+    // The words are not dropped either: they go back to the conversation they
+    // were written for, the next time it is opened.
+    if (ctx.viewport.key !== 'desktop') await page.click('#chat-back');
+    await openConversation(page, 'Devin');
+    await page.waitForFunction(function (id) { return window.ZC.util.qs('m') === id; }, devinId);
+    const backHome = await page.evaluate(function () {
+      return { box: document.getElementById('chat-input').value, sends: window.__zcHeld.sends.length };
+    });
+    t.check('and they are back in the box of the conversation they were written for when it is opened again',
+      backHome.box === MEANT && backHome.sends === 1, JSON.stringify(backHome));
+
+    // In their own conversation the words go back ahead of whatever was typed
+    // there since, and the box holds 1000 characters. A pair longer than that
+    // loses the end of the later text, and the toast used to say "Your text is
+    // still in the box" all the same.
+    await page.evaluate(holdNextSend);
+    await page.fill('#chat-input', MEANT);
+    await page.press('#chat-input', 'Enter');
+    await page.waitForFunction(function () { return typeof window.__zcHeld.refuse === 'function'; });
+    const LONG_SINCE = 'typed while it was sending '.repeat(37);
+    await page.fill('#chat-input', LONG_SINCE);
+    await page.evaluate(function () { window.__zcHeld.refuse(); });
+    await page.waitForFunction(function () { return !document.getElementById('chat-send').hasAttribute('aria-busy'); });
+    const overflow = await page.evaluate(function () {
+      return { box: document.getElementById('chat-input').value, toasts: window.__zcHeld.toasts.slice() };
+    });
+    t.check('and when they and what was typed since are more than the box holds, the toast says the end was cut',
+      overflow.box === (MEANT + '\n' + LONG_SINCE).slice(0, 1000) && overflow.toasts.length === 1 &&
+        /cut/.test(overflow.toasts[0]),
+      JSON.stringify({ boxLength: overflow.box.length, boxStart: overflow.box.slice(0, 40), toasts: overflow.toasts }));
+
+    // And when their conversation has ended, there is no box of theirs left:
+    // its row leaves the list, and it can never be opened again. Both orders
+    // happen. Against the emulator the refusal arrived first and the list's
+    // delivery of the ending a moment later. A list that delivers first is
+    // the other order. Either way the last thing the reader is told is that the
+    // message was not sent because its conversation has ended, and the open
+    // conversation's draft is left alone. Each order runs in a session of its
+    // own, because each ends one of the two seeded matches, and this page
+    // needs both of them below.
+    const endedElsewhere = async function (refuseFirst) {
+      const s = await h.openSession(page.context().browser(), ctx.viewport);
+      const p = s.page;
+      let seen = null;
+      try {
+        await h.signIn(p, ctx.base);
+        await p.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
+        await p.waitForSelector('#match-list .match-row');
+        await p.evaluate(holdNextSend);
+        await openConversation(p, 'Devin');
+        const leaving = await p.evaluate(function () { return window.ZC.util.qs('m'); });
+        await p.fill('#chat-input', 'Meant for Devin, who is leaving');
+        await p.press('#chat-input', 'Enter');
+        await p.waitForFunction(function () { return typeof window.__zcHeld.refuse === 'function'; });
+        if (ctx.viewport.key !== 'desktop') await p.click('#chat-back');
+        await openConversation(p, 'Sam');
+        await p.waitForFunction(function (id) {
+          return /Sam/.test(document.getElementById('chat-peer-name').textContent) && window.ZC.util.qs('m') !== id;
+        }, leaving);
+        await p.fill('#chat-input', SAM_DRAFT);
+        const refuse = async function () {
+          await p.evaluate(function () { window.__zcHeld.refuse(); });
+          await p.waitForFunction(function () { return !document.getElementById('chat-send').hasAttribute('aria-busy'); });
+        };
+        const unmatch = async function () {
+          await p.evaluate(function (id) {
+            return window.ZC.store.unmatch(id, window.ZC.auth.current.uid);
+          }, leaving);
+          await p.waitForFunction(function (id) {
+            return !Array.prototype.some.call(document.querySelectorAll('#match-list .match-row'), function (row) {
+              return row.dataset.matchId === id;
+            });
+          }, leaving);
+        };
+        if (refuseFirst) {
+          await refuse();
+          await unmatch();
+        } else {
+          await unmatch();
+          await refuse();
+        }
+        seen = await p.evaluate(function () {
+          return {
+            open: document.getElementById('chat-peer-name').textContent,
+            box: document.getElementById('chat-input').value,
+            toasts: window.__zcHeld.toasts.slice()
+          };
+        });
+      } finally {
+        await s.context.close();
+      }
+      const last = seen ? seen.toasts[seen.toasts.length - 1] || '' : '';
+      return {
+        told: !!seen && seen.box === SAM_DRAFT && /Devin/.test(last) && /not sent/.test(last) && /ended/.test(last),
+        seen: seen,
+        clean: s.errors.length === 0,
+        detail: JSON.stringify(seen && { last: last, toasts: seen.toasts.length, box: seen.box, open: seen.open }) +
+          (s.errors.length ? ' | ' + s.errors.slice(0, 2).join(' | ') : '')
+      };
+    };
+    const refusedThenEnded = await endedElsewhere(true);
+    t.check('a send refused elsewhere whose conversation then ends is said not to have been sent, after the refusal',
+      refusedThenEnded.clean && refusedThenEnded.told && refusedThenEnded.seen.toasts.length === 2,
+      refusedThenEnded.detail);
+    const endedThenRefused = await endedElsewhere(false);
+    t.check('and one whose conversation ended before the refusal is said not to have been sent, with no box promised',
+      endedThenRefused.clean && endedThenRefused.told && endedThenRefused.seen.toasts.length === 1,
+      endedThenRefused.detail);
+
+    await page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#match-list .match-row');
     await openConversation(page, 'Sam');
 
     /* ---- a restored page keeps the open conversation live ---- */
@@ -1019,6 +1190,11 @@ module.exports = {
     // is its policy and changes between versions, but `persisted: true` is the
     // contract the handler is written against, and that is the thing worth
     // pinning.
+    //
+    // The browser keeps what was in the box through a restore, and the page
+    // used to empty it: re-opening the conversation reset the composer.
+    const KEPT = 'Half a reply written before leaving for another page';
+    await page.fill('#chat-input', KEPT);
     const restoredText = await page.evaluate(async function () {
       window.dispatchEvent(new Event('pagehide'));
       let show;
@@ -1050,6 +1226,9 @@ module.exports = {
         ? 'a message sent after the restore reached the open thread'
         : 'nothing reached the thread in 3s — the restore put the list back and left ' +
           'the message listener dead');
+    const keptBox = await page.inputValue('#chat-input');
+    t.check('and it keeps what was typed in its box',
+      keptBox === KEPT, 'the box holds ' + JSON.stringify(keptBox));
 
     /* ---- and a conversation the other side ends keeps what was typed ---- */
 
@@ -1077,6 +1256,21 @@ module.exports = {
     const endedTickers = await page.evaluate(function () { return window.__zcStampTickers().length; });
     t.check('and the list beside it keeps its stamps ticking',
       endedTickers === 1, endedTickers + ' live one-minute ticker(s) after the conversation ended');
+
+    // An ended conversation has no listener for a restore to put back, and
+    // re-opening it found no match to open, so the restore closed it and
+    // emptied the box the ended conversation had just promised to keep.
+    const endedRestore = await page.evaluate(function () {
+      window.dispatchEvent(new Event('pagehide'));
+      window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+      return {
+        typed: document.getElementById('chat-input').value,
+        ended: !!document.getElementById('chat-ended'),
+        tickers: window.__zcStampTickers().length
+      };
+    });
+    t.check('and a restore from the back-forward cache leaves the ended conversation, and what was typed, where they were',
+      endedRestore.typed === typed && endedRestore.ended && endedRestore.tickers === 1, JSON.stringify(endedRestore));
 
     /* ---- and the NEXT conversation is not left disabled ---- */
 
@@ -1162,6 +1356,51 @@ module.exports = {
       rowSurvived && pressOpened,
       (rowSurvived ? 'the row was left alone' : 'the row was rebuilt under the press') + ', and the click ' +
       (pressOpened ? 'opened the conversation' : 'never arrived'));
+
+    /* ---- a send refused in a conversation that ended while it was held ---- */
+
+    // The usual reason a held write is refused: the other side ended the match
+    // first. The ended conversation disables its box and its Send button and
+    // keeps what was typed since the send, and the refusal then put the sent
+    // words back in that box over it. The send's own clean-up also re-enabled
+    // Send from what was in the box, without asking whether the conversation
+    // was still there to send to. The send is held as above; the unmatch is
+    // the real store's.
+    const heldInEnded = await page.evaluate(function () {
+      const store = window.ZC.store;
+      const realSend = store.sendMessage;
+      window.__zcHeld = { refuse: null };
+      store.sendMessage = function () {
+        store.sendMessage = realSend;
+        return new Promise(function (resolve, reject) {
+          window.__zcHeld.refuse = function () { reject(new Error('Refused by the e2e suite.')); };
+        });
+      };
+      return window.ZC.util.qs('m');
+    });
+    const LAST_WORDS = 'Sent just as the match ended';
+    await page.fill('#chat-input', LAST_WORDS);
+    await page.press('#chat-input', 'Enter');
+    await page.waitForFunction(function () { return typeof window.__zcHeld.refuse === 'function'; });
+    const TYPED_SINCE = 'and typed while it was sending';
+    await page.fill('#chat-input', TYPED_SINCE);
+    await page.evaluate(function (matchId) {
+      return window.ZC.store.unmatch(matchId, window.ZC.auth.current.uid);
+    }, heldInEnded);
+    await page.waitForSelector('#chat-ended', { timeout: 3000 });
+    await page.evaluate(function () { window.__zcHeld.refuse(); });
+    await page.waitForFunction(function () { return !document.getElementById('chat-send').hasAttribute('aria-busy'); });
+    const endedRefusal = await page.evaluate(function () {
+      return {
+        box: document.getElementById('chat-input').value,
+        boxDisabled: document.getElementById('chat-input').disabled,
+        sendDisabled: document.getElementById('chat-send').disabled
+      };
+    });
+    t.check('a send refused after its conversation ended puts the words back ahead of what was typed since',
+      endedRefusal.box === LAST_WORDS + '\n' + TYPED_SINCE, JSON.stringify(endedRefusal.box));
+    t.check('and leaves the ended conversation\'s box and Send button disabled',
+      endedRefusal.boxDisabled && endedRefusal.sendDisabled, JSON.stringify(endedRefusal));
 
     /* ---- "Yesterday" is the calendar's yesterday, on the days clocks change ---- */
 
@@ -1250,6 +1489,59 @@ module.exports = {
         nuuk.clean && !!nuuk.days && /^Sun Mar 29 2026 23:/.test(nuuk.days.now) && nuuk.days.offset === 60 &&
           nuuk.days.saturday === 'Yesterday' && nuuk.days.sunday === 'Today',
         nuuk.detail);
+
+      // A conversation left open across midnight. Separators were labelled
+      // once, when drawn, and the one-minute ticker rewrote every stamp but
+      // them: after midnight the evening's messages still sat under "Today",
+      // and the first message of the new day drew a second "Today" below it.
+      // Tokyo keeps no daylight saving, so this night is an ordinary one.
+      const night = await h.openSession(page.context().browser(), ctx.viewport);
+      const nightCdp = await night.context.newCDPSession(night.page);
+      let nightLog = null;
+      try {
+        await nightCdp.send('Emulation.setTimezoneOverride', { timezoneId: 'Asia/Tokyo' });
+        // 23:50 in Tokyo on Sunday 18 October 2026.
+        await night.page.clock.install({ time: new Date('2026-10-18T14:50:00Z') });
+        await h.signIn(night.page, ctx.base);
+        await night.page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
+        await night.page.waitForSelector('#match-list .match-row');
+        await openConversation(night.page, 'Sam');
+        await night.page.fill('#chat-input', 'sent ten minutes before midnight');
+        await night.page.press('#chat-input', 'Enter');
+        await night.page.waitForFunction(function () {
+          return document.querySelectorAll('#chat-log .msg').length === 1;
+        });
+        // Twenty minutes with the conversation open: the ticker runs twenty times.
+        await night.page.clock.runFor(20 * 60 * 1000);
+        await night.page.evaluate(async function () {
+          const store = window.ZC.store;
+          const matchId = window.ZC.util.qs('m');
+          const sam = (await store.getMatches(window.ZC.auth.current.uid))
+            .filter(function (m) { return m.matchId === matchId; })[0];
+          await store.sendMessage(matchId, sam.otherUid, 'answered ten minutes after');
+        });
+        await night.page.waitForFunction(function () {
+          return document.querySelectorAll('#chat-log .msg').length === 2;
+        });
+        nightLog = await night.page.evaluate(function () {
+          return {
+            now: new Date().toString().slice(0, 21),
+            log: Array.prototype.map.call(document.getElementById('chat-log').children, function (node) {
+              if (node.classList.contains('chat-day')) return '[' + node.textContent.trim() + ']';
+              const text = node.querySelector('.msg-text');
+              return text ? text.textContent.trim() : node.className;
+            })
+          };
+        });
+      } finally {
+        await nightCdp.detach().catch(function () {});
+        await night.context.close();
+      }
+      t.check('a conversation left open past midnight moves its evening under "Yesterday" and draws one "Today"',
+        night.errors.length === 0 && !!nightLog && /^Mon Oct 19 2026 00:1/.test(nightLog.now) &&
+          JSON.stringify(nightLog.log) === JSON.stringify(
+            ['[Yesterday]', 'sent ten minutes before midnight', '[Today]', 'answered ten minutes after']),
+        JSON.stringify(nightLog) + (night.errors.length ? ' | ' + night.errors.slice(0, 2).join(' | ') : ''));
     }
   }
 };

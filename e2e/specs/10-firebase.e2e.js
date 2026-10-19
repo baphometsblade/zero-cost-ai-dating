@@ -735,6 +735,53 @@ module.exports = {
         }),
         JSON.stringify({ away: whileAway, back: onReturn, witnessFromCache: probeFlips }));
 
+      /* ---- a first message the server refuses ---- */
+
+      // The SDK draws a write the moment it is made, marked pending, and takes
+      // it back when the server refuses it. In a conversation with nothing else
+      // in it, the take-back is an empty delivery, and the page reads an empty
+      // delivery as "new, or gone?": a question it skipped while anything was
+      // drawn, so the refused message stayed on screen saying "Sending…" for
+      // good. The message is the store's own shape, stamped two days ahead,
+      // which is what a device whose clock runs more than the rules' day fast
+      // sends, and is refused for (currentStampOk in firestore.rules). It is
+      // written with the page's own SDK, so the take-back is the SDK's. Every
+      // bubble drawn is recorded as it is added: the refusal can take it back
+      // before a poll would see it.
+      await page.evaluate(function (args) {
+        const seen = [];
+        const observer = new MutationObserver(function (records) {
+          records.forEach(function (record) {
+            Array.prototype.forEach.call(record.addedNodes, function (node) {
+              const stamp = node.classList && node.classList.contains('msg') ? node.querySelector('.msg-time') : null;
+              if (stamp) seen.push(stamp.textContent);
+            });
+          });
+        });
+        observer.observe(document.getElementById('chat-log'), { childList: true, subtree: true });
+        const ref = window.ZC.firebase.db.collection('matches').doc(args.id).collection('messages').doc();
+        const write = ref.set({
+          id: ref.id, from: args.me, text: 'Sent from a clock two days fast',
+          createdAt: new Date(Date.now() + 2 * 86400000).toISOString()
+        }).then(function () { return 'stored'; }, function (err) { return (err && err.code) || 'refused'; });
+        window.__zcRefusedFirst = { seen: seen, observer: observer, write: write };
+      }, { id: quietId, me: uid });
+      const refusedWrite = await page.evaluate(function () { return window.__zcRefusedFirst.write; });
+      const takenBack = await page.waitForFunction(function () {
+        return !document.querySelector('#chat-log .msg') && !!document.querySelector('#chat-log .icebreaker');
+      }, null, { timeout: 5000 }).then(function () { return true; }, function () { return false; });
+      const refusedSeen = await page.evaluate(function () {
+        const probe = window.__zcRefusedFirst;
+        probe.observer.disconnect();
+        return {
+          drawn: probe.seen,
+          left: Array.prototype.map.call(document.querySelectorAll('#chat-log .msg .msg-time'), function (n) { return n.textContent; })
+        };
+      });
+      t.check('a first message the server refuses is taken off the screen, not left saying "Sending…"',
+        refusedWrite === 'permission-denied' && refusedSeen.drawn.length === 1 && /Sending/.test(refusedSeen.drawn[0]) && takenBack,
+        JSON.stringify({ write: refusedWrite, drawn: refusedSeen.drawn, left: refusedSeen.left, openers: takenBack }));
+
       /* ---- a message sent with no connection ---- */
 
       // Offline, the SDK holds a write in memory until the server takes it,

@@ -87,6 +87,7 @@
     unsubscribe: null,   // teardown for the open conversation's listener
     corpus: null,        // TF-IDF corpus, built lazily for "view profile"
     draft: null,         // ?draft= text waiting to be placed in the composer
+    unsent: Object.create(null), // matchId -> { text, name } of a failed send, kept for that conversation (see giveBack)
     loading: true,
     error: null,
     sending: false,
@@ -719,9 +720,19 @@
     ]);
   }
 
-  /** A day separator chip. */
+  /**
+   * A day separator chip. It keeps the timestamp it was drawn for, because
+   * its label does not keep: 'Today' becomes 'Yesterday' at midnight, and
+   * `refreshStamps` relabels it from this.
+   * @param {*} dateLike timestamp of the first message under it
+   * @returns {HTMLElement}
+   */
   function buildDay(dateLike) {
-    return el('p', { class: 'chat-day', text: dayLabel(dateLike) });
+    return el('p', {
+      class: 'chat-day',
+      dataset: { at: String(dateLike || '') },
+      text: dayLabel(dateLike)
+    });
   }
 
   /**
@@ -813,18 +824,25 @@
    * wrong wipes a visible history and replaces it with an invitation to write
    * into a match the other person has already ended.
    * @param {Object} match the MatchView the empty delivery belongs to
-   * @returns {Promise<void>}
+   * @returns {void}
    */
   function confirmEmptyThread(match) {
     if (!match || !state.me) return;
     if (!state.active || state.active.matchId !== match.matchId) return;
 
-    // A delivery carrying real messages may have landed in the meantime. That is
-    // fresher — and stronger — evidence than the empty snapshot which started
-    // the check: messages cannot arrive from a match that no longer exists.
-    // Leave the painted conversation alone, or the openers would wipe a message
-    // the listener has already delivered and may never send again.
-    if (state.rendered.length) return;
+    // Messages the store has delivered as stored are on screen. That is
+    // stronger evidence than the empty delivery which started the check: leave
+    // the painted conversation alone, or the openers would wipe messages the
+    // listener may never send again. If the match has gone, the list's
+    // delivery is what closes it (see onViews).
+    //
+    // Messages still marked pending are no such evidence. In firebase mode a
+    // write the server refuses is taken back, and when it was the
+    // conversation's only message the taking back is this empty delivery:
+    // counted as evidence, the refused message stayed on screen saying
+    // 'Sending…' for good, in a conversation that was still there. The demo
+    // adapter never marks a message pending, so there this is unchanged.
+    if (state.rendered.some(function (message) { return !message.pending; })) return;
     if (state.ended) return;
 
     // No read. This used to call `getMatches` — one match document and a profile
@@ -960,6 +978,13 @@
     }
 
     if (!dom.log) return;
+    // The day separators as well. They were labelled once, when drawn, so in
+    // a conversation left open past midnight the evening's messages stayed
+    // under 'Today', and the first message of the new day drew a second
+    // 'Today' under them.
+    $$('.chat-day', dom.log).forEach(function (chip) {
+      chip.textContent = dayLabel(chip.dataset.at);
+    });
     $$('.msg', dom.log).forEach(function (node, index) {
       const stamp = $('.msg-time', node);
       const message = state.rendered[index];
@@ -990,11 +1015,17 @@
     input.style.setProperty('height', Math.min(input.scrollHeight, max) + 'px');
   }
 
-  /** Enable the send button, and warn about the cap only when it is close. */
+  /**
+   * Enable the send button, and warn about the cap only when it is close.
+   * Never in a conversation that has ended: a refused send puts its words back
+   * in that box after `endActiveConversation` has disabled it, and its
+   * `finally` comes here, which used to turn Send back on from the text alone.
+   * @returns {void}
+   */
   function syncComposer() {
     const value = dom.input ? dom.input.value : '';
     const length = value.length;
-    if (dom.send) dom.send.disabled = state.sending || !value.trim();
+    if (dom.send) dom.send.disabled = state.sending || state.ended || !value.trim();
     if (dom.count) {
       dom.count.textContent = length + ' / ' + MESSAGE_MAX;
       show(dom.count, length >= COUNTER_FROM);
@@ -1046,6 +1077,74 @@
   }
 
   /**
+   * Give the words of a failed send back to the conversation they were
+   * written for, and to no other. A send settles when the store answers, and
+   * in firebase mode with no connection that is whenever the connection comes
+   * back, so the reader may have opened another conversation by then, and the
+   * write can be refused because the first match ended meanwhile. The words
+   * used to go into whichever box was open, over the draft there, under "Your
+   * text is still in the box", and the next Enter sent them to the wrong
+   * person.
+   *
+   * In their own conversation they go back in the box, ahead of anything
+   * typed there since, which the box used to lose to them instead. The box
+   * holds MESSAGE_MAX characters, so when the two together are longer the end
+   * of the later text is cut, and the toast says so rather than claim all of
+   * it is there.
+   *
+   * Elsewhere they wait in `state.unsent` until `openMatch` opens their
+   * conversation again, and the toast names who they were for. A refusal can
+   * mean that their match has ended, and then the conversation leaves the
+   * list and can never be opened again. If it has already left, the toast
+   * says the message was not sent and why; if it leaves later, `onViews` says
+   * so then. Against the emulator the refusal arrived first and the list's
+   * delivery of the ending after it, so the first toast promises the box only
+   * if the conversation can still be opened, and the second does not have to
+   * take anything back. That map lives in this page's memory only: nothing
+   * about it is stored.
+   * @param {Object} match the MatchView the send was made in
+   * @param {string} text the words that were sent
+   * @returns {void}
+   */
+  function giveBack(match, text) {
+    if (state.active && state.active.matchId === match.matchId) {
+      const since = dom.input ? dom.input.value : '';
+      const joined = since.trim() ? text + '\n' + since : text;
+      setComposer(joined);
+      // `text` was cut to MESSAGE_MAX before it was sent, so only what was
+      // typed since can be past the end.
+      toast(joined.length > MESSAGE_MAX
+        ? 'That message could not be sent. It is back in the box, ahead of what you typed since, ' +
+          'but the box holds ' + MESSAGE_MAX + ' characters, so the end of what you typed since was cut.'
+        : 'That message could not be sent. Your text is still in the box.', 'error');
+      announce('The message could not be sent.');
+      return;
+    }
+    const name = nameOf(match.other);
+    if (!state.matches.some(function (item) { return item.matchId === match.matchId; })) {
+      sayUnsentEnded(name);
+      return;
+    }
+    state.unsent[match.matchId] = { text: text, name: name };
+    toast('Your message to ' + name + ' could not be sent. If you can still open that conversation, the message will be back in its box.', 'error');
+    announce('Your message to ' + name + ' could not be sent.');
+  }
+
+  /**
+   * Say that the words of a failed send have nowhere left to go. Their
+   * conversation has ended, so there is no box of theirs to put them back in,
+   * and any other box is somebody else's. Used by `giveBack` when the
+   * conversation had left the list before the refusal arrived, and by
+   * `onViews` when it leaves afterwards.
+   * @param {string} name who the message was for
+   * @returns {void}
+   */
+  function sayUnsentEnded(name) {
+    toast('Your message to ' + name + ' was not sent: that conversation has ended.', 'error');
+    announce('Your message to ' + name + ' was not sent: that conversation has ended.');
+  }
+
+  /**
    * Send whatever is in the composer. Empty and whitespace-only messages are
    * ignored; anything longer than the cap is trimmed to fit.
    * @returns {Promise<void>}
@@ -1073,10 +1172,9 @@
       if (ZC.app && typeof ZC.app.refreshBadges === 'function') ZC.app.refreshBadges(true);
     } catch (err) {
       console.warn('[zc] Message could not be sent:', err);
-      // Give them their words back rather than losing them to a failed write.
-      setComposer(text);
-      toast('That message could not be sent. Your text is still in the box.', 'error');
-      announce('The message could not be sent.');
+      // Give them their words back rather than losing them to a failed write,
+      // in the conversation they were for: see giveBack.
+      giveBack(match, text);
     } finally {
       state.sending = false;
       window.removeEventListener('beforeunload', askBeforeLeaving);
@@ -1253,12 +1351,17 @@
     syncUrl(matchId);
 
     // A draft handed over by the match burst goes in before anything else can
-    // steal the composer.
+    // steal the composer. Otherwise, the words of a send to this conversation
+    // that failed while another one was open (see giveBack). The two never
+    // meet: the draft goes into the first conversation opened, before
+    // anything can have been sent.
     if (state.draft) {
       setComposer(state.draft);
       state.draft = null;
     } else {
-      setComposer('');
+      const unsent = state.unsent[matchId];
+      delete state.unsent[matchId];
+      setComposer(unsent ? unsent.text : '');
     }
 
     // Live messages. The callback runs until this returns unsubscribe().
@@ -1727,6 +1830,17 @@
       }
     }
 
+    // The words of a failed send kept for a conversation that has now left
+    // the list can never go back in its box (see giveBack). Say that the
+    // message was not sent, rather than leave the words waiting where nothing
+    // can reach them.
+    Object.keys(state.unsent).forEach(function (matchId) {
+      if (state.matches.some(function (item) { return item.matchId === matchId; })) return;
+      const name = state.unsent[matchId].name;
+      delete state.unsent[matchId];
+      sayUnsentEnded(name);
+    });
+
     // A delivery is proof the list is live, whichever subscription brought it.
     // The error used to be cleared only in `firstViews`, which runs once per
     // page — so a list that loaded, lost its stream, and came back on focus
@@ -2013,12 +2127,19 @@
       // Idempotent, and needed even with no conversation open: the list's own
       // relative stamps go stale without it.
       startStampTicker();
-      if (state.active) {
+      // Not an ended conversation: it has no listener to put back, and its
+      // match has left the list, so re-opening it found nothing and closed it,
+      // emptying the box it had just said it would keep.
+      if (state.active && !state.ended) {
         const id = state.active.matchId;
+        // A restored page is the same document, box and all, and `openMatch`
+        // resets the composer, so what was in it is put back afterwards.
+        const typed = dom.input ? dom.input.value : '';
         // Cleared first, or `openMatch`'s same-conversation short-circuit
         // returns before it re-subscribes.
         state.active = null;
         openMatch(id, false);
+        if (typed && state.active && state.active.matchId === id) setComposer(typed);
       }
     });
   }
