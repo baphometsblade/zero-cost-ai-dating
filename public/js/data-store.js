@@ -905,6 +905,40 @@
   }
 
   /**
+   * Whether the demo adapter shows `viewer` the face of `uid`: the paused-profile
+   * half of the discovery read rule in firestore.rules, restated for the store
+   * that has no rules.
+   *
+   * A paused profile — "Show me in other people's decks" turned off — is
+   * readable in firebase mode only by its owner, a match and somebody it liked,
+   * and `getPublicProfile(s)` there answer null for anybody else: a reporter
+   * too, because anybody can file a report. This adapter answered with the
+   * profile whoever asked. The pages ask as one of those three — the report
+   * menu is in a conversation, so a reporter is a match, and unmatching leaves
+   * the like that made it — so nothing on screen differed; the facade did, and
+   * two adapters diverging quietly is the failure this file keeps finding in
+   * itself. A missing account is "shown" so that it comes back missing, as a
+   * miss does there.
+   *
+   * The rule's other half, that a signed-out caller reads nothing at all, is not
+   * restated: this adapter has always answered a discoverable profile without a
+   * session, and nothing here changes what a signed-out page sees.
+   * @param {Object} users the stored accounts
+   * @param {string|null} viewer the signed-in account, or null
+   * @param {string} uid the account whose face is asked for
+   * @returns {boolean} true when the profile is discoverable or missing, or when
+   *   `viewer` is its owner, a match, or somebody it liked
+   */
+  function faceShown(users, viewer, uid) {
+    if (!isPlainObject(users[uid])) return true;
+    if (normalizeUser(users[uid]).preferences.discoverable !== false) return true;
+    if (!viewer) return false;
+    if (viewer === uid || isPlainObject(readMatches()[pairId(viewer, uid)])) return true;
+    const liked = readSwipes()[swipeId(uid, viewer)];
+    return isPlainObject(liked) && isPositive(liked.action);
+  }
+
+  /**
    * The match rows this account is in, newest conversation first.
    * @param {Object} matches the stored matches map
    * @param {string} uid the viewer
@@ -1518,7 +1552,9 @@
     },
 
     async getPublicProfile(uid) {
-      // Demo mode has no separate projection — the stored doc is the profile.
+      // Demo mode has no separate projection — the stored doc is the profile —
+      // shown on the terms the rules show a projection (see `faceShown`).
+      if (!faceShown(readUsers(), currentUid(), uid)) return null;
       return demoAdapter.getUser(uid);
     },
 
@@ -1529,9 +1565,10 @@
       // Firestore adapter's version takes an option about its face cache, and
       // there is no cache here to file in.
       const users = readUsers();
+      const viewer = currentUid();
       const out = {};
       (uids || []).forEach(function (uid) {
-        if (uid && users[uid]) out[uid] = normalizeUser(users[uid]);
+        if (uid && users[uid] && faceShown(users, viewer, uid)) out[uid] = normalizeUser(users[uid]);
       });
       return out;
     },
@@ -1539,10 +1576,13 @@
     async deleteAccountData(uid) {
       // Swipes in both directions, matches (and their messages) either way,
       // then the account document itself — mirroring the Firestore adapter.
+      // Inbound, that means likes: the Firestore adapter cannot find a pass aimed
+      // at the account, because the rules keep a pass private to its author, so
+      // a pass stays with whoever made it there and stays here too.
       const swipes = readSwipes();
       Object.keys(swipes).forEach(function (id) {
         const swipe = swipes[id];
-        if (swipe && (swipe.from === uid || swipe.to === uid)) delete swipes[id];
+        if (swipe && (swipe.from === uid || (swipe.to === uid && isPositive(swipe.action)))) delete swipes[id];
       });
       writeSwipes(swipes);
 
@@ -2024,12 +2064,14 @@
    *
    * Two things it deliberately does not do. It does not survive sign-out any
    * differently from `zc.lastTouch` and `zc.pendingMatch`, which also outlive a
-   * session on a shared browser; what it holds is the world-readable projection
-   * any signed-in account may fetch for itself, so the only thing it discloses
-   * is which uids this device looked up — the same class those two already
-   * accept. And two overlapping fetches each read, merge and write the whole
-   * blob, so the loser's entries can be dropped; that costs a read next time and
-   * cannot corrupt anything, which is the right way for a cache to lose a race.
+   * session on a shared browser; what it holds is only projections any
+   * signed-in account may fetch for itself — `fetchProfiles` does not file a
+   * paused one, which the rules show only to the accounts that know the
+   * person — so the only thing it discloses is which uids this device looked
+   * up, the same class those two already accept. And two overlapping fetches
+   * each read, merge and write the whole blob, so the loser's entries can be
+   * dropped; that costs a read next time and cannot corrupt anything, which is
+   * the right way for a cache to lose a race.
    */
   function readFaceCache() {
     const stored = readJson(KEYS.profiles, null);
@@ -2187,7 +2229,20 @@
     wanted.forEach(function (uid, index) {
       if (results[index]) {
         map[uid] = results[index];
-        fresh[uid] = results[index];
+        // A paused profile is served and not filed. firestore.rules lets only the
+        // accounts that know the person read one — a match, somebody they liked —
+        // and the cache is one blob per browser that outlives a sign-out, so
+        // filing it would hand the face to whoever signs in next, for the TTL.
+        // Not filing it costs every page that shows a paused face the read of it
+        // and the lookups the rule spends allowing that read: one more for a
+        // match, two for somebody they liked. Before the cache, a face cost the
+        // read alone, because the rule spent nothing on anybody.
+        //
+        // An entry already filed is not taken back when its person pauses: the
+        // cache cannot see that happen, so the face they had while discoverable
+        // stays in it, for whoever signs in on this browser, until its TTL runs
+        // out. That includes entries filed before this check existed.
+        if (results[index].preferences.discoverable !== false) fresh[uid] = results[index];
       }
     });
     rememberFaces(fresh, Date.now(), !!(options && options.conversation));
@@ -2338,13 +2393,14 @@
    * @returns {Promise<string[]>} sender uids
    */
   async function likeSenders(uid) {
-    let snap;
-    try {
-      snap = await db().collection('swipes').where('to', '==', uid).where('action', 'in', ['like', 'super']).get();
-    } catch (err) {
-      console.warn('[zc.store] "in" query unavailable, filtering client-side.', err);
-      snap = await db().collection('swipes').where('to', '==', uid).get();
-    }
+    // No unfiltered fallback any more. There was one, `where('to', '==', uid)`
+    // filtered here, for an SDK without `in`; but that query can return a pass,
+    // and firestore.rules refuses any query that could, because a pass is private
+    // to its author. The fallback could only ever be refused, so a failure here
+    // now arrives as itself rather than as that refusal. Both the SDK the pages
+    // load and the emulator take `in`, and the live count below has never had a
+    // fallback at all.
+    const snap = await db().collection('swipes').where('to', '==', uid).where('action', 'in', ['like', 'super']).get();
     return positiveSenders(snap);
   }
 
@@ -2569,7 +2625,22 @@
   async function recordMatchFor(fromUid, toUid, effective) {
     if (!isPositive(effective)) return { matched: false, matchId: null, created: false };
 
-    const reverseSnap = await db().collection('swipes').doc(swipeId(toUid, fromUid)).get();
+    // A refusal here is the ordinary answer, not a failure. firestore.rules lets
+    // this account read a swipe aimed at it only when that swipe is a like or a
+    // super like, and refuses a pass and a missing swipe alike — answering the
+    // miss would make the refusal itself mean "they passed". Both mean the same
+    // thing here: they have not liked you, so there is no match. It is not
+    // logged, because every like of somebody who has not liked you gets it,
+    // and it says nothing that is wrong. Any other failure still propagates,
+    // for the reason matchDocumentFor gives: this function cannot claim "no
+    // match" for an outage.
+    let reverseSnap;
+    try {
+      reverseSnap = await db().collection('swipes').doc(swipeId(toUid, fromUid)).get();
+    } catch (err) {
+      if (isPermissionDenied(err)) return { matched: false, matchId: null, created: false };
+      throw err;
+    }
     if (!reverseSnap.exists || !isPositive((reverseSnap.data() || {}).action)) {
       return { matched: false, matchId: null, created: false };
     }
@@ -2718,31 +2789,52 @@
       // the collection with a cursor until the deck is full, the collection is
       // exhausted, or a hard scan cap is hit.
       const out = [];
+      const seen = {};
       let cursor = null;
       let scanned = 0;
-      let ordered = true;
+      let indexed = true;
       while (out.length < limit && scanned < 1500) {
-        let snap;
-        try {
-          // Matches the composite index shipped in firestore.indexes.json.
-          let query = discovery
-            .where('profileComplete', '==', true)
-            .where('preferences.discoverable', '==', true)
-            .orderBy('lastActiveAt', 'desc')
-            .limit(pageSize);
-          if (cursor) query = query.startAfter(cursor);
-          snap = await query.get();
-        } catch (err) {
-          console.warn('[zc.store] Indexed candidate query unavailable, falling back.', err);
+        let snap = null;
+        if (indexed) {
           try {
-            let query = discovery.orderBy('lastActiveAt', 'desc').limit(pageSize);
+            // Matches the composite index shipped in firestore.indexes.json.
+            let query = discovery
+              .where('profileComplete', '==', true)
+              .where('preferences.discoverable', '==', true)
+              .orderBy('lastActiveAt', 'desc')
+              .limit(pageSize);
             if (cursor) query = query.startAfter(cursor);
             snap = await query.get();
-          } catch (innerErr) {
-            console.warn('[zc.store] Ordered candidate query unavailable, falling back again.', innerErr);
-            snap = await discovery.limit(pageSize).get();
-            ordered = false;
+          } catch (err) {
+            // The rest of the walk is the fallback below, from its first page.
+            // It runs in document order, where a cursor from this query's
+            // newest-first order would skip whoever sorts before that document
+            // and was not on the pages already read; `seen` keeps anybody those
+            // pages showed from being asked about twice.
+            console.warn('[zc.store] Indexed candidate query unavailable, falling back.', err);
+            indexed = false;
+            cursor = null;
           }
+        }
+        if (!indexed) {
+          // Discoverable profiles, unordered and paged by document: an equality
+          // on one field, which Firestore serves from its automatic single-field
+          // index, so it works while the composite index above is missing or
+          // building.
+          //
+          // It keeps `discoverable == true` because firestore.rules requires it.
+          // A paused projection is readable only by the accounts that know the
+          // person, and the rules are not a filter, so a query that does not say
+          // `discoverable == true` is refused whole. There used to be two fallbacks
+          // here, newest-first and then unordered, and neither said it; both would
+          // now only ever be refused. Newest-first with the filter does not replace
+          // the first of them: Firestore's index documentation lists an equality on
+          // one field ordered by another as a query that needs a composite index of
+          // its own, and a missing index is the reason this branch runs. (The
+          // emulator builds indexes on demand, so nothing here can measure that.)
+          let query = discovery.where('preferences.discoverable', '==', true).limit(pageSize);
+          if (cursor) query = query.startAfter(cursor);
+          snap = await query.get();
         }
         if (snap.empty) break;
         cursor = snap.docs[snap.docs.length - 1];
@@ -2755,7 +2847,8 @@
         // gender filter is never looked up at all.
         const shortlist = [];
         snap.forEach(function (doc) {
-          if (doc.id === uid) return;
+          if (doc.id === uid || seen[doc.id]) return;
+          seen[doc.id] = true;
           if (myBlocks.indexOf(doc.id) !== -1) return;
           // People I blocked are filtered above, from my own private document. People
           // who blocked *me* are not, and cannot be: their block list is private, and
@@ -2786,8 +2879,7 @@
           });
         }
 
-        // The unordered fallback cannot paginate; take the one page it gives.
-        if (!ordered || snap.size < pageSize) break;
+        if (snap.size < pageSize) break;
       }
       return out;
     },
@@ -3201,11 +3293,13 @@
               watcher.settle(true);
             });
           }, function (err) {
-            // No client-side fallback for the `in` query, unlike getLikesReceived:
-            // a listener's error arrives asynchronously, so "try the other query"
-            // would mean holding two subscriptions and reconciling them. The
-            // emulator and production both support `in`; a failure here means the
-            // badge stops updating, not that anything is lost.
+            // No client-side fallback for the `in` query, and getLikesReceived no
+            // longer has one either: the only other query, everything aimed at
+            // this account, can return a pass, which firestore.rules refuses. A
+            // listener's error arrives asynchronously besides, so "try the other
+            // query" would mean holding two subscriptions and reconciling them.
+            // The emulator and production both support `in`; a failure here means
+            // the badge stops updating, not that anything is lost.
             //
             // Stops updating — and used to stop SILENTLY, with no way back. This
             // listener took no error handler, so `app.js` kept holding the dead
@@ -3430,13 +3524,25 @@
       const reports = await db().collection('reports').where('from', '==', uid).get();
       await batchDelete(reports.docs.map(function (doc) { return doc.ref; }));
 
-      // Swipes in both directions: the ones this account made, and the ones
+      // Swipes in both directions: the ones this account made, and the likes
       // aimed at it — an inbound like is data about this account and must not
       // outlive it.
+      //
+      // Likes, not every inbound swipe, because a pass is no longer this
+      // account's to see. firestore.rules lets it read a swipe aimed at it only
+      // when that swipe is a like or a super like, and refuses a query that could
+      // return anything else, so asking for everything aimed at it would fail this
+      // whole deletion. A pass aimed at it stays with the account that made it,
+      // as that account's own record of a decision, readable by nobody else; the
+      // demo adapter leaves it the same way. settings.html promises to remove
+      // "every swipe you have made", which this still does.
       const swipes = db().collection('swipes');
-      const directions = ['from', 'to'];
-      for (let d = 0; d < directions.length; d += 1) {
-        const snap = await swipes.where(directions[d], '==', uid).get();
+      const queries = [
+        swipes.where('from', '==', uid),
+        swipes.where('to', '==', uid).where('action', 'in', ['like', 'super'])
+      ];
+      for (let q = 0; q < queries.length; q += 1) {
+        const snap = await queries[q].get();
         await batchDelete(snap.docs.map(function (doc) { return doc.ref; }));
       }
 
@@ -3450,7 +3556,7 @@
       // The public projection, then the private document — and in that order,
       // with nothing swallowed between them.
       //
-      // discovery/{uid} is the world-readable half of an account: display
+      // discovery/{uid} is the half of an account other people read: display
       // name, photo, the profile fields the deck needs. It used to be deleted
       // inside a .catch that warned and carried on, so a rejected delete still
       // reached the line below, removed the private document, and returned
@@ -4589,7 +4695,9 @@
     },
 
     /**
-     * The public face of an account: what any signed-in user may see of it.
+     * The public face of an account: what any signed-in user may see of it
+     * while it is discoverable, and, once it is paused, what its owner, its
+     * matches and the people it liked still may.
      * Demo mode serves the stored document itself; firebase mode reads the
      * discovery projection. Null when the account is gone or unreadable —
      * callers should treat that as "a deleted account", not as an error.
@@ -4625,10 +4733,13 @@
     },
 
     /**
-     * Remove everything stored about an account: swipes in both directions,
-     * matches with their messages, the public discovery projection (firebase
-     * mode) and the account document itself. Deleting the sign-in credential
-     * is the caller's job — this only clears the data.
+     * Remove everything stored about an account: the swipes it made and the
+     * likes aimed at it, matches with their messages, the public discovery
+     * projection (firebase mode) and the account document itself. A pass aimed
+     * at it stays, in both modes, as the record of the account that made it:
+     * firestore.rules keeps a pass private to its author, so firebase mode
+     * cannot find one to delete. Deleting the sign-in credential is the
+     * caller's job — this only clears the data.
      * @param {string} uid the account being deleted
      * @returns {Promise<boolean>}
      */

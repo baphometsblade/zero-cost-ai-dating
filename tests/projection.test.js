@@ -2,10 +2,10 @@
    Zero Cost AI Dating — what is public about an account, agreed in one place
 
    An account is split in two. `users/{uid}` is readable only by its owner;
-   `discovery/{uid}` is readable by every signed-in user, because that is the
-   surface the deck ranks. Deciding which fields cross that line is the single
-   most consequential judgement in this codebase, and it was written down three
-   times independently:
+   `discovery/{uid}` is readable by every signed-in user while it is
+   discoverable, because that is the surface the deck ranks. Deciding which
+   fields cross that line is the single most consequential judgement in this
+   codebase, and it was written down three times independently:
 
      - `projectDiscovery()` in public/js/data-store.js decides what is copied;
      - three `keys().hasOnly([...])` lists in firestore.rules decide what is

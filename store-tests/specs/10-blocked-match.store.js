@@ -9,11 +9,10 @@
 
    It matters because the failure lands in the middle of `recordSwipe`, after
    the swipe document is already stored. Letting the rejection propagate would
-   reach `persistSwipe` in dashboard.js, which treats any throw from
-   `recordSwipe` as "the swipe is not stored" — it puts the card back on the
-   deck and says "That swipe did not save." Both halves of that would be false,
-   and the second tells somebody they have been blocked by showing them an
-   error nobody else gets.
+   reach `persistSwipe` in dashboard.js as a swipe that was stored and an
+   exchange that did not finish, and the deck would say "Saved, but we could
+   not check for a match just then." That tells somebody they have been
+   blocked by showing them a warning nobody else gets.
 
    The rejection is injected rather than provoked. This suite's own project
    runs open rules and cannot produce a real denial — see the caveat in
@@ -265,5 +264,74 @@ module.exports = {
     t.check('and keeps the code and the message it arrived with',
       !!frozenError && frozenError.code === 'unavailable' && /Backend unavailable/.test(String(frozenError.message)),
       frozenError ? frozenError.code + ': ' + frozenError.message : 'no error');
+
+    /* ---- a reciprocal swipe the rules will not show is not a match ------ */
+
+    // Real, not injected: the shipped recordSwipe and finishMatchCheck, signed in
+    // as the swiper, against the real firestore.rules. Those let an account read a
+    // swipe aimed at it only when it is a like or a super like, and refuse a pass
+    // and a missing swipe alike, because answering the miss would make the refusal
+    // mean "they passed". So the reciprocal read that every like ends in is now
+    // refused far more often than it is answered — on every first like — and a
+    // store that let that refusal through would have had the deck say "Saved, but
+    // we could not check for a match just then" on nearly every card.
+    const swiper = 'recip-me';
+    const passer = 'recip-passer';
+    const silent = 'recip-silent';
+    const liker = 'recip-liker';
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      const db = c.firestore();
+      for (const uid of [swiper, passer, silent, liker]) {
+        await k.fs.setDoc(k.fs.doc(db, 'users', uid), k.h.userDoc(uid));
+      }
+      await k.fs.setDoc(k.fs.doc(db, 'swipes', passer + '_' + swiper), k.h.swipeDoc(passer, swiper, 'pass'));
+      await k.fs.setDoc(k.fs.doc(db, 'swipes', liker + '_' + swiper), k.h.swipeDoc(liker, swiper, 'like'));
+    });
+
+    const openDb = k.ctx.ZC.firebase.db;
+    const answer = function (err) { return { rejected: (err && err.code) || String(err), swipeStored: !!(err && err.swipeStored) }; };
+    const outcomes = {};
+    k.ctx.drainWarnings();
+    try {
+      k.ctx.ZC.firebase.db = k.rulesEnv.authenticatedContext(swiper).firestore();
+      outcomes.passer = await k.store.recordSwipe(swiper, passer, 'like').catch(answer);
+      outcomes.silent = await k.store.recordSwipe(swiper, silent, 'super').catch(answer);
+      // A check a page load lost, as `16-reconcile` writes one: the next page load
+      // finishes it through finishMatchCheck, which ends in the same read.
+      const KEY = k.ctx.ZC.store.KEYS.pendingMatch;
+      const owed = {};
+      owed[swiper] = {};
+      owed[swiper][passer] = { at: new Date().toISOString(), last: null };
+      globalThis.localStorage.setItem(KEY, JSON.stringify(owed));
+      outcomes.finished = await k.store.reconcileMatches(swiper).catch(answer);
+      outcomes.liker = await k.store.recordSwipe(swiper, liker, 'like').catch(answer);
+    } finally {
+      k.ctx.ZC.firebase.db = openDb;
+    }
+    const recipWarnings = k.ctx.drainWarnings();
+    const noMatch = function (o) { return !!o && o.matched === false && o.matchId === null && !o.rejected; };
+
+    t.check('under the real rules, liking somebody who passed on you is plainly no match',
+      noMatch(outcomes.passer), k.show(outcomes.passer));
+
+    t.check('and so is liking somebody who has not swiped yet, which is the same refusal',
+      noMatch(outcomes.silent), k.show(outcomes.silent));
+
+    // Answered and spent. A refusal that propagated would keep the note and fail
+    // the same way on every page load after this one.
+    t.check('finishing a lost check against a pass settles it, rather than failing every page load',
+      !!outcomes.finished && outcomes.finished.checked === 1 && outcomes.finished.repaired === 0 &&
+        outcomes.finished.pending === 0, k.show(outcomes.finished));
+
+    // The control: a like aimed at the swiper is still readable, so the refusal
+    // above cannot be a store that has stopped asking.
+    t.check('while liking somebody who liked you still makes the match',
+      !!outcomes.liker && outcomes.liker.matched === true && outcomes.liker.created === true,
+      k.show(outcomes.liker));
+
+    // Not even the breadcrumb a refused match write leaves: this refusal is what
+    // most likes get, and it says nothing that is wrong.
+    t.check('and the refusals are not logged',
+      recipWarnings.length === 0, k.show(recipWarnings));
   }
 };

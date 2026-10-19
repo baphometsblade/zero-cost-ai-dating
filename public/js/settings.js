@@ -1022,9 +1022,10 @@
     busy(dom.deleteButton, true, 'Deleting…');
     let dataGone = false;
     try {
-      // 1. Every stored trace of the account: swipes in both directions,
-      //    matches with their messages, the discovery projection and the
-      //    account document.
+      // 1. Every stored trace of the account: its own swipes, the likes aimed
+      //    at it, matches with their messages, the discovery projection and the
+      //    account document. A pass aimed at it is the passer's decision, which
+      //    this account may not read, and it stays with them.
       await ZC.store.deleteAccountData(uid);
       dataGone = true;
 

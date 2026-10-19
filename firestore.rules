@@ -381,8 +381,9 @@ service cloud.firestore {
     // ---------------------------------------------------------------------------
     //
     // The on-device matching engine needs to scan other people's profiles, so this
-    // collection is readable by any signed-in user — and therefore it may contain
-    // ONLY fields meant for other users. `hasOnly` guarantees a tampered client
+    // collection is readable by any signed-in user (every projection that is
+    // discoverable; see the read rule) — and therefore it may contain ONLY fields
+    // meant for other users. `hasOnly` guarantees a tampered client
     // cannot smuggle private fields (email, birthdate, blocked, learning, usage)
     // into the readable copy. The app writes it as a mirror of users/{uid} on
     // every profile save, with coordinates rounded to ~1 km.
@@ -407,7 +408,7 @@ service cloud.firestore {
           && (!('showAge' in p) || (p.showAge is bool))
           && (!('showDistance' in p) || (p.showDistance is bool))
           // `location` and `personality` were both on the key list above with no
-          // validator at all, so the one world-readable collection in the project
+          // validator at all, so the one public collection in the project
           // accepted a megabyte under either name. Every signed-in user reads these
           // documents to build a deck. `location` was found by eye a few rounds ago;
           // `personality` outlived that pass, and was found by asking the question
@@ -489,8 +490,54 @@ service cloud.firestore {
           && (!('preferences' in d) || discoveryPrefsOk(d.preferences));
       }
 
-      // Read: any signed-in user — this is the discovery surface.
-      allow read: if isSignedIn();
+      // Read: any signed-in user while the projection is discoverable — this is the
+      // discovery surface. Turned off, it is readable only by the accounts that
+      // already know the person.
+      //
+      // "Show me in other people's decks" used to be honoured by the client alone:
+      // the deck query asks for `discoverable == true` and the engine hard-fails the
+      // rest, while this rule said `isSignedIn()`. So the switch hid nobody from
+      // anybody who asked, and `where('preferences.discoverable', '==', false)`
+      // returned exactly the people who had asked to disappear — bio, photos,
+      // approximate location — as a list.
+      //
+      // A paused projection stays readable to its owner and to the accounts that
+      // already know the person, and to nobody else: a match, whose conversation is
+      // drawn with this face (settings.html promises "Your existing matches and
+      // conversations stay exactly where they are"), and somebody it liked, whose
+      // who-liked-you list reads the face of everybody still waiting. Neither is
+      // something the reader can make alone: a match is written only once the
+      // other person has liked you, and a swipe only by its author. The like is
+      // asked by its action, not by whether the swipe exists: otherwise a paused
+      // profile you could read and that is not among your likes would be a pass,
+      // which the swipes rule below keeps private to its author. A miss is an
+      // empty snapshot, as it has always been, because fetchProfiles asks about
+      // accounts that may since have been deleted.
+      //
+      // Somebody who reported the person is not on that list, though the settings
+      // page names each report. Anybody signed in may file a report about any
+      // published account and withdraw it again, so a read it opened would be one a
+      // stranger holding the uid could grant themselves, use and retract, leaving
+      // nothing in the queue. The report menu is in a conversation, so a reporter
+      // is a match; unmatching deletes the match and leaves the like under it, and
+      // the like keeps the name. A report the page cannot read it names "a deleted
+      // account", as it names one it cannot fetch.
+      //
+      // The rules are not a filter, so a query is allowed only when every document
+      // it could return is: the deck's query names `discoverable == true` and is,
+      // and a query that does not name it is refused whole. Each of the last two
+      // clauses is a billed document read, so they come after every free one and in
+      // the order the app needs them: a discoverable profile costs what it always
+      // did, and only a paused one read by somebody other than its owner pays more —
+      // up to two reads, when neither holds.
+      allow read: if isSignedIn()
+        && (resource == null
+            || resource.data.preferences.discoverable == true
+            || isOwner(uid)
+            || exists(/databases/$(database)/documents/matches/$(uid < request.auth.uid
+                 ? uid + '_' + request.auth.uid : request.auth.uid + '_' + uid))
+            || get(/databases/$(database)/documents/swipes/$(uid + '_' + request.auth.uid))
+                 .data.action in ['like', 'super']);
 
       // Write: only your own projection, only in the public shape. The partial
       // lastActiveAt refresh must also stay inside the closed key list.
@@ -514,7 +561,7 @@ service cloud.firestore {
       // padded to the 1 MiB document ceiling. Nothing about this record is worth a
       // megabyte, and this is the cheapest such write in the project: creating one needs
       // only a signed-in account and a uid, and uids are enumerable from the
-      // world-readable discovery collection. A Spark project gets 1 GiB of storage, which
+      // discovery collection the deck lists. A Spark project gets 1 GiB of storage, which
       // is a thousand documents at that size — and the daily swipe limit that would
       // otherwise slow it down is enforced in the browser, so it does not apply to a
       // client that has stopped cooperating. Bounding the shape is what bounds the write.
@@ -530,16 +577,29 @@ service cloud.firestore {
           && swipeId == d.from + '_' + d.to;
       }
 
-      // Read: the swipes you made, plus the swipes aimed at you — the latter is required
-      // for match detection and for the premium "who liked you" list. No one else's.
+      // Read: the swipes you made, plus the likes and super likes aimed at you — those
+      // are required for match detection and for the premium "who liked you" list.
+      // No one else's, and no pass aimed at you.
+      //
+      // Inbound passes used to be readable as well, because the rule allowed every
+      // document with `to == you`, and neither reason above needs one: a match needs
+      // the other person's like, and the list is likes. A pass is the one decision
+      // somebody makes about you that the app never shows you, and a single query
+      // listed every account that had passed on you, with the time.
       //
       // `resource` is null when the requested document does not exist, and dereferencing
       // it would raise an evaluation error (surfacing to the client as PERMISSION_DENIED
       // rather than an empty snapshot). The client reads absent documents constantly:
-      // every first swipe reads its own not-yet-written record and the usually-absent
-      // reciprocal one, and `getLikesReceived` asks, once per person who liked you,
-      // whether `swipes/{me}_{them}` exists. So a miss has to be an allowed read that
-      // reports `exists == false`.
+      // every first swipe reads its own not-yet-written record, and `getLikesReceived`
+      // asks, once per person who liked you, whether `swipes/{me}_{them}` exists. So a
+      // miss of a swipe you would have made has to be an allowed read that reports
+      // `exists == false`.
+      //
+      // A miss of a swipe aimed at you is refused, and that is what keeps a pass
+      // private. Were it answered, a refusal would mean "this exists and is a pass" and
+      // an empty snapshot "nobody has swiped", so the denial itself would be the pass.
+      // Refused alike, they say the one thing both mean to the client: they have not
+      // liked you. recordSwipe and finishMatchCheck read the reciprocal swipe that way.
       //
       // Which miss, though, is the whole question. This used to be a bare
       // `resource == null`, allowing every signed-in caller to read every absent
@@ -547,19 +607,22 @@ service cloud.firestore {
       // answers differ: an empty snapshot means the document is not there, a denial
       // means it is there and is not yours. Anyone could therefore learn that Alice has
       // swiped on Bob, for any pair, without reading a byte of it — and uids are
-      // enumerable, since `discovery/{uid}` is world-readable to signed-in users and its
-      // document id is the uid. The reports rule below already refuses misses for exactly
-      // this reason and says so; these two disagreed with it.
+      // enumerable, since any signed-in user can list every discoverable projection in
+      // `discovery/{uid}` and its document id is the uid. The reports rule below
+      // already refuses misses for exactly this reason and says so; these two
+      // disagreed with it.
       //
       // The id is `from_to`, so the pair is in the name: a caller may probe a miss only
-      // when they are one half of it. That is precisely what the client does, and a uid
-      // is never a substring match — `in` compares whole elements — so a uid that somehow
-      // contained an underscore would be denied rather than admitted.
+      // when they are its first half, the author it would have had. That is precisely
+      // what the client asks about, and a uid is never a prefix match — the id is split
+      // and its first element compared whole — so a uid that somehow contained an
+      // underscore would be denied rather than admitted.
       allow read: if isSignedIn()
         && (resource == null
-              ? request.auth.uid in swipeId.split('_')
+              ? swipeId.split('_')[0] == request.auth.uid
               : (resource.data.from == request.auth.uid
-                 || resource.data.to == request.auth.uid));
+                 || (resource.data.to == request.auth.uid
+                     && resource.data.action in ['like', 'super'])));
 
       // Create: you may only record swipes authored by yourself.
       allow create: if isSignedIn()
@@ -573,15 +636,18 @@ service cloud.firestore {
       // inbound like is data about you, and account deletion must be able to
       // purge it.
       //
-      // And a swipe that is already gone, on the terms the read rule above allows a
-      // miss and for its reason: `resource` is null for a missing document, and this
-      // rule dereferenced it. undoSwipe deletes inside a transaction without reading
-      // the swipe first, so rewinding a card whose swipe was already removed — a
-      // second tab on the same deck, or a retry — came back permission-denied in
+      // And a swipe that is already gone: `resource` is null for a missing document,
+      // and this rule dereferenced it. undoSwipe deletes inside a transaction without
+      // reading the swipe first, so rewinding a card whose swipe was already removed —
+      // a second tab on the same deck, or a retry — came back permission-denied in
       // Firebase mode, where the demo adapter answers `{ ok: true }` and
       // tests/data-store.test.js pins that as the contract. Deleting nothing changes
-      // nothing, and it is allowed by the id rather than unconditionally, so a
-      // stranger is refused for a missing swipe exactly as for a present one.
+      // nothing, and it is allowed by the id rather than unconditionally: either half
+      // of the pair may delete a miss, as either may delete the swipe while it is
+      // there, so a stranger is refused for a missing swipe exactly as for a present
+      // one. That is wider than the read rule's miss, which only the author may
+      // probe, and it can be: a delete gets the same answer whether or not the swipe
+      // was there, so it tells the other half nothing.
       allow delete: if isSignedIn()
         && (resource == null
               ? request.auth.uid in swipeId.split('_')
@@ -673,12 +739,13 @@ service cloud.firestore {
       // Create: a participant creating a well-formed match document, but only once the
       // other person has actually liked them back. Without that proof any signed-in user
       // could mint a match against a uid read out of `discovery/{uid}` — which IS
-      // deliberately open to any signed-in account, and whose document id is the uid —
-      // and then message a stranger, since message writes are gated purely on membership
-      // of the match. (This used to say "the deliberately open users read". There is no
-      // such thing: `users/{uid}` is `allow read: if isOwner(uid)`, as the comment above
-      // that rule says and `rules-tests/specs/01-users.rules.js` asserts. The enumerable
-      // surface the argument needs is the projection, which the swipes rule below names
+      // deliberately open to any signed-in account while the person is discoverable,
+      // and whose document id is the uid — and then message a stranger, since message
+      // writes are gated purely on membership of the match. (This used to say "the
+      // deliberately open users read". There is no such thing: `users/{uid}` is
+      // `allow read: if isOwner(uid)`, as the comment above that rule says and
+      // `rules-tests/specs/01-users.rules.js` asserts. The enumerable surface the
+      // argument needs is the projection, which the swipes rule below names
       // correctly.) The client already satisfies this: recordSwipe writes
       // the swipe and only then, as a separate operation, creates the match — and so does
       // the quieter second caller, `finishMatchCheck`, which finishes a check a page load
@@ -753,12 +820,15 @@ service cloud.firestore {
     // Anyone signed in can file a report about another account. The deterministic
     // id bounds the queue — one report per (reporter, subject) pair, so a single
     // account cannot flood the queue or burn the write quota with random ids —
-    // and the subject must actually exist in discovery, so reports cannot be
-    // filed against invented uids. Reports are invisible to everyone except
-    // their own author: the reported party can never enumerate, alter or retract
-    // them. Authors can read and delete only their own (that is what lets
-    // account deletion honestly purge everything the account wrote). The project
-    // owner reviews the queue in the Firebase console or with admin credentials.
+    // and the subject must actually exist — in discovery, or as the reporter's
+    // match — so reports cannot be filed against invented uids. Reports are
+    // invisible to everyone except their own author: the reported party can never
+    // enumerate, alter or retract them. Authors can read and delete only their own
+    // (that is what lets account deletion honestly purge everything the account
+    // wrote), and filing one opens nothing else to its author: the discovery read
+    // rule does not count a report as knowing somebody, because anybody can file
+    // one. The project owner reviews the queue in the Firebase console or with
+    // admin credentials.
     match /reports/{reportId} {
 
       function reportOk(d) {
@@ -767,7 +837,19 @@ service cloud.firestore {
           && d.about is string && d.about.size() > 0
           && d.about != d.from
           && reportId == d.from + '_' + d.about
-          && exists(/databases/$(database)/documents/discovery/$(d.about))
+          // A real account, by either of two proofs. `discovery/{about}` alone let
+          // a matched harasser opt out of the queue: that document is theirs to
+          // delete whenever they like, and nothing a conversation needs depends on
+          // it — a message is allowed on membership of the match, never on a
+          // projection — so deleting it turned every report about them into a
+          // refusal while they went on writing. The match is the proof they cannot
+          // remove without also losing the thread, and the pair id is built from
+          // this report's own two uids, so somebody else's match proves nothing.
+          // It is asked second, so a report about a published account costs the
+          // one read it always did.
+          && (exists(/databases/$(database)/documents/discovery/$(d.about))
+              || exists(/databases/$(database)/documents/matches/$(d.from < d.about
+                   ? d.from + '_' + d.about : d.about + '_' + d.from)))
           && d.reason in ['fake-profile', 'inappropriate-content', 'harassment', 'underage', 'scam-or-spam', 'other']
           && (!('details' in d) || (d.details is string && d.details.size() <= 500))
           // `id` was on the key list above with no validator at all — the same

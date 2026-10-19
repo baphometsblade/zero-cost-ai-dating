@@ -193,5 +193,107 @@ module.exports = {
       await k.ok(k.testing.assertFails(
         setDoc(doc(author, 'reports', R + '_someone-else'), stored))),
       'reports/' + R + '_someone-else');
+
+    /* ---- a harasser cannot leave the queue by unpublishing -------------- */
+
+    // The shipped reportUser and sendMessage, each signed in as its own account,
+    // against the real ruleset. The rules used to demand that a report's subject
+    // exist in `discovery`, a document its subject may delete at any time and that
+    // no conversation depends on — so a match could delete it, go on writing, and
+    // every report about them came back refused while matches.js said "The report
+    // could not be filed, but you can still block them."
+    const H = 'report-harasser';
+    const V = 'report-victim';
+    const matchId = k.h.pairId(H, V);
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      const db = c.firestore();
+      for (const uid of [H, V]) {
+        await setDoc(doc(db, 'users', uid), k.h.userDoc(uid));
+        await setDoc(doc(db, 'discovery', uid), k.h.discoveryDoc(uid));
+      }
+      await setDoc(doc(db, 'swipes', H + '_' + V), k.h.swipeDoc(H, V, 'like'));
+      await setDoc(doc(db, 'swipes', V + '_' + H), k.h.swipeDoc(V, H, 'like'));
+      await setDoc(doc(db, 'matches', matchId), k.h.matchDoc(H, V));
+    });
+    const openDb = k.ctx.ZC.firebase.db;
+    const answer = function (err) { return { rejected: (err && err.code) || String(err) }; };
+    let unpublished = false;
+    let filedAbout = null;
+    let wroteOn = null;
+    try {
+      k.ctx.ZC.firebase.db = k.rulesEnv.authenticatedContext(H).firestore();
+      unpublished = await k.ok(k.testing.assertSucceeds(
+        k.fs.deleteDoc(doc(k.rulesEnv.authenticatedContext(H).firestore(), 'discovery', H))));
+      wroteOn = await k.store.sendMessage(matchId, H, 'still here').then(function () { return 'sent'; }, answer);
+      k.ctx.ZC.firebase.db = k.rulesEnv.authenticatedContext(V).firestore();
+      filedAbout = await k.store.reportUser(V, H, 'harassment', 'abusive messages').catch(answer);
+    } finally {
+      k.ctx.ZC.firebase.db = openDb;
+    }
+    k.ctx.drainWarnings();
+
+    t.check('the subject can delete their own projection and go on writing',
+      unpublished && wroteOn === 'sent', 'deleted: ' + unpublished + ', message: ' + k.show(wroteOn));
+
+    t.check('and the person they are writing to can still report them',
+      !!filedAbout && filedAbout.ok === true && filedAbout.duplicate === false, k.show(filedAbout));
+
+    /* ---- the settings page still names a subject who has paused --------- */
+
+    // settings.js resolves the name of every account a person has reported through
+    // getPublicProfiles, and shows "a deleted account" for one it cannot read. A
+    // subject who turns off "Show me in other people's decks" is readable now only
+    // by the accounts that know them. The report menu is in a conversation, so a
+    // reporter is a match, and the dialog's next question is whether to unmatch;
+    // unmatching deletes the match and leaves the like under it, which is what
+    // still names the subject here. The report itself opens nothing: anybody may
+    // file one about any published account and withdraw it again. And the face
+    // cache — one blob per browser, kept across a sign-out — must not hand the
+    // reporter's copy to the next account either.
+    const P = 'report-paused';
+    const PR = 'report-paused-reporter';
+    const STRANGER = 'report-paused-stranger';
+    const FILER = 'report-paused-filer';
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      const db = c.firestore();
+      await setDoc(doc(db, 'discovery', P), k.h.discoveryDoc(P, {
+        preferences: Object.assign({}, k.h.discoveryDoc(P).preferences, { discoverable: false })
+      }));
+      // Matched once, and since unmatched: both likes, no match document.
+      await setDoc(doc(db, 'swipes', P + '_' + PR), k.h.swipeDoc(P, PR, 'like'));
+      await setDoc(doc(db, 'swipes', PR + '_' + P), k.h.swipeDoc(PR, P, 'like'));
+      await setDoc(doc(db, 'reports', PR + '_' + P), k.h.reportDoc(PR, P));
+    });
+    let reporterSees = null;
+    let strangerSees = null;
+    let filerFiled = null;
+    let filerSees = null;
+    try {
+      k.ctx.ZC.firebase.db = k.rulesEnv.authenticatedContext(PR).firestore();
+      reporterSees = await k.store.getPublicProfiles([P]).catch(answer);
+      k.ctx.ZC.firebase.db = k.rulesEnv.authenticatedContext(STRANGER).firestore();
+      strangerSees = await k.store.getPublicProfiles([P]).catch(answer);
+      k.ctx.ZC.firebase.db = k.rulesEnv.authenticatedContext(FILER).firestore();
+      filerFiled = await k.store.reportUser(FILER, P, 'other', 'to see who this is').catch(answer);
+      filerSees = await k.store.getPublicProfiles([P]).catch(answer);
+    } finally {
+      k.ctx.ZC.firebase.db = openDb;
+    }
+    k.ctx.drainWarnings();
+
+    t.check('under the real rules, a reporter who has since unmatched can still name a subject who paused',
+      !!reporterSees && !!reporterSees[P] && reporterSees[P].displayName === 'Test ' + P,
+      k.show(reporterSees && reporterSees[P] ? reporterSees[P].displayName : reporterSees));
+
+    t.check('while the next account on the same browser cannot, from the server or the face cache',
+      !!strangerSees && !strangerSees.rejected && !strangerSees[P],
+      k.show(strangerSees && strangerSees[P] ? 'shown: ' + strangerSees[P].displayName : strangerSees));
+
+    t.check('nor can a stranger by filing a report about them, which anybody may',
+      !!filerFiled && filerFiled.ok === true && !!filerSees && !filerSees.rejected && !filerSees[P],
+      k.show({
+        filed: filerFiled,
+        sees: filerSees && filerSees[P] ? 'shown: ' + filerSees[P].displayName : filerSees
+      }));
   }
 };

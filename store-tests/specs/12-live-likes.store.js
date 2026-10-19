@@ -560,6 +560,47 @@ module.exports = {
             (raceIds.indexOf(early) === -1 ? ', without the newcomer' : ''))) +
       '; the count said ' + (raceAsked ? k.show(raceAsked.counts) : '?') + ' when it was asked, then ' +
       k.show(raceCounts.slice(-1)));
+
+    /* ---- under the real rules: likes only, and a paused liker's face ---- */
+
+    // Everything above runs on this suite's open rules. firestore.rules now lets
+    // an account read a swipe aimed at it only when it is a like or a super like,
+    // and lets a paused projection — "Show me in other people's decks" turned off —
+    // be read only by the accounts that know the person, somebody it liked among
+    // them. Both halves of the who-liked-you list depend on that: its query has to
+    // name the actions, and the face of a liker who has since paused has to stay
+    // readable to the person waiting on them. Run as that person, for real.
+    const waiter = 'likes-real';
+    const pausedLiker = 'likes-real-paused';
+    const realPasser = 'likes-real-passer';
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      const db = c.firestore();
+      await k.fs.setDoc(k.fs.doc(db, 'users', waiter), k.h.userDoc(waiter, { plan: 'premium' }));
+      await k.fs.setDoc(k.fs.doc(db, 'discovery', pausedLiker), k.h.discoveryDoc(pausedLiker, {
+        preferences: Object.assign({}, k.h.discoveryDoc(pausedLiker).preferences, { discoverable: false })
+      }));
+      await k.fs.setDoc(k.fs.doc(db, 'discovery', realPasser), k.h.discoveryDoc(realPasser));
+      await k.fs.setDoc(k.fs.doc(db, 'swipes', pausedLiker + '_' + waiter), k.h.swipeDoc(pausedLiker, waiter, 'super'));
+      await k.fs.setDoc(k.fs.doc(db, 'swipes', realPasser + '_' + waiter), k.h.swipeDoc(realPasser, waiter, 'pass'));
+    });
+    let realList = null;
+    let realCount = null;
+    try {
+      k.ctx.ZC.firebase.db = k.rulesEnv.authenticatedContext(waiter).firestore();
+      const reject = function (err) { return { rejected: (err && err.code) || String(err) }; };
+      realList = await k.store.getLikesReceived(waiter).catch(reject);
+      realCount = await k.store.countLikesReceived(waiter).catch(reject);
+    } finally {
+      k.ctx.ZC.firebase.db = real;
+    }
+    k.ctx.drainWarnings();
+    const realIds = Array.isArray(realList) ? realList.map(function (user) { return user.uid; }) : [];
+
+    t.check('under the real rules, the who-liked-you list loads, and a paused liker keeps their face',
+      Array.isArray(realList) && realIds.length === 1 && realIds[0] === pausedLiker, k.show(realIds.length ? realIds : realList));
+
+    t.check('and the count agrees, with nobody who passed in either',
+      realCount === 1, k.show(realCount));
   }
 };
 

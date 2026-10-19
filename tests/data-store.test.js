@@ -933,6 +933,27 @@ test('deleteAccountData purges the account\'s footprint but keeps reports about 
   assert.ok(await store.getUser(YOU));
 });
 
+test('deleteAccountData leaves a pass aimed at the account with whoever made it, as firebase mode must', async function () {
+  // firestore.rules keeps a pass private to its author: the account it is aimed
+  // at can neither read it nor list it, so the Firestore adapter's purge cannot
+  // find one and takes only the likes aimed at the account. Both adapters
+  // leave the pass where it is, as its author's own record.
+  await resetWorld();
+  await store.createUser('gone', {});
+  await store.createUser('liker', {});
+  await store.createUser('passer', {});
+  await store.recordSwipe('liker', 'gone', 'like');
+  await store.recordSwipe('passer', 'gone', 'pass');
+
+  await store.deleteAccountData('gone');
+
+  const swipes = raw(KEYS.swipes);
+  assert.equal(swipes.liker_gone, undefined, 'the like aimed at the account went with it');
+  assert.equal(swipes.passer_gone && swipes.passer_gone.action, 'pass', 'the pass stayed with its author');
+  assert.deepEqual((await store.getSwipes('passer')).map(function (s) { return s.to; }), ['gone'],
+    'and is still in its author\'s history');
+});
+
 /* ------------------------------------------------------------------------
    10. Export, import, reset
    ------------------------------------------------------------------------ */
@@ -1572,6 +1593,56 @@ test('getPublicProfiles answers a list with the public projection, in both modes
     assert.deepEqual(faces[uid].blocked, [], uid + ': no block list');
   });
   assert.deepEqual(await store.getPublicProfiles([]), {}, 'nothing asked, nothing answered');
+});
+
+test('a paused profile\'s face is shown only to the accounts firestore.rules shows it to', async function () {
+  // In firebase mode a projection with "Show me in other people's decks" turned
+  // off is readable only by its owner, a match and somebody it liked, so
+  // getPublicProfile(s) answer null to everybody else — a reporter included,
+  // since anybody can file a report. This adapter has no rules, and answered
+  // with the profile whoever asked.
+  await resetWorld();
+  await store.createUser('paused-p', {
+    displayName: 'Paused', profileComplete: true, preferences: { discoverable: false }
+  });
+  for (const uid of ['match-m', 'liked-l', 'passed-x', 'reporter-r', 'stranger-s']) {
+    await store.createUser(uid, { displayName: uid });
+  }
+  await store.recordSwipe('match-m', 'paused-p', 'like');
+  await store.recordSwipe('paused-p', 'match-m', 'like');
+  await store.recordSwipe('paused-p', 'liked-l', 'like');
+  await store.recordSwipe('paused-p', 'passed-x', 'pass');
+  await store.reportUser('reporter-r', 'paused-p', 'other', 'for the settings list');
+  await store.reportUser('liked-l', 'paused-p', 'other', 'a reporter it liked');
+
+  const seen = {};
+  try {
+    for (const viewer of ['paused-p', 'match-m', 'liked-l', 'passed-x', 'reporter-r', 'stranger-s']) {
+      writeRaw(KEYS.session, { uid: viewer });
+      const one = await store.getPublicProfile('paused-p');
+      const list = await store.getPublicProfiles(['paused-p']);
+      assert.equal(!!one, !!list['paused-p'], viewer + ': the single and the list form agree');
+      seen[viewer] = !!one;
+    }
+  } finally {
+    backing.delete(KEYS.session);
+  }
+  assert.deepEqual(seen, {
+    'paused-p': true,
+    'match-m': true,
+    'liked-l': true,
+    'passed-x': false,
+    'reporter-r': false,
+    'stranger-s': false
+  });
+
+  // And a discoverable profile is still everybody's to see.
+  writeRaw(KEYS.session, { uid: 'stranger-s' });
+  try {
+    assert.ok(await store.getPublicProfile('match-m'), 'a discoverable face is shown to a stranger');
+  } finally {
+    backing.delete(KEYS.session);
+  }
 });
 
 test('and the projection keeps everything the conversation list scores on', async function () {
