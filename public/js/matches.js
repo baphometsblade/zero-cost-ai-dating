@@ -1035,7 +1035,8 @@
    * sendMessage adds it for the length of a send and takes it away after,
    * because a page with a `beforeunload` listener is never kept in Firefox's
    * back-forward cache, and this page is built to be restored from it (see the
-   * `pageshow` handler).
+   * `pageshow` handler). The app leaving the page itself takes it away too
+   * (see the `zc:leaving` handler in `wire`).
    * @param {BeforeUnloadEvent} event the page is about to be left
    * @returns {void}
    */
@@ -1967,6 +1968,18 @@
 
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('focus', onVisible);
+
+    // The question a held send asks is for the person. auth.js and app.js say
+    // `zc:leaving` just before the app itself leaves: for the sign-in page when
+    // the account signed out or changed in another tab, and for the landing
+    // page after this page's own Sign out. Either way the account the send was
+    // made as has gone, and with it signed out the SDK went on holding the
+    // write even once the connection was back, so the send's `finally` did not
+    // come to take the question away. It stopped both of those, and every
+    // later way off the page, with the conversation still on screen.
+    window.addEventListener('zc:leaving', function () {
+      window.removeEventListener('beforeunload', askBeforeLeaving);
+    });
 
     window.addEventListener('pagehide', teardown);
     // `pagehide` tears the subscription down and the back-forward cache can

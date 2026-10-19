@@ -1094,6 +1094,99 @@ module.exports = {
           h.pageUrl('auth').test(movedTo) && /[?&]next=/.test(movedTo),
         JSON.stringify(failed) + ' · ' + movedTo);
 
+      /* ---- a sign-out while a message is still sending ---- */
+
+      // The question asked above while a message is held lasted until the send
+      // finished, and a held write belongs to the account that made it: once
+      // that account had signed out, the send did not finish even with the
+      // connection back, so the question outlived the account. A sign-out in
+      // another tab sends this page to the sign-in page, and the question
+      // stopped it; the page's own Sign out ends the session and then goes to
+      // the landing page, and the question stopped that too. Whoever chose to
+      // stay was left signed out with the other person's messages on screen,
+      // and was asked again on every way off the page. The session accepts
+      // every native dialog, so the page leaves either way; what is checked is
+      // that nothing asked, and where it went.
+      //
+      // An account of its own, seeded whole beside its conversation, so that
+      // nothing above decides whether it reaches one. Signed out, the
+      // conversation's address goes to the sign-in page, and signing in there
+      // comes back to it, so this never passes through the deck: a draft that
+      // did, signing the account before it out on the deck and then going
+      // straight from the deck to the conversation, logged Firestore console
+      // errors on four runs out of six.
+      const heldEmail = 'e2e-held-' + Date.now() + '@example.com';
+      const heldMade = await emulator(AUTH, 'POST', '/identitytoolkit.googleapis.com/v1/accounts:signUp?key=emulator-api-key',
+        { email: heldEmail, password: password, returnSecureToken: true });
+      const heldUid = heldMade.body && heldMade.body.localId;
+      const heldWho = { uid: heldUid, name: 'Held Sender', age: 29, gender: 'man' };
+      await emulator(FIRESTORE, 'PATCH', DOCS + '/discovery/' + heldUid, { fields: encodeFields(discoveryDoc(heldWho)) });
+      await emulator(FIRESTORE, 'PATCH', DOCS + '/users/' + heldUid,
+        { fields: encodeFields(Object.assign(userDoc(heldWho), { email: heldEmail })) });
+      const heldPeer = CANDIDATES[0];
+      const heldId = [heldUid, heldPeer.uid].sort().join('_');
+      const ASKED = 'Are you still coming?';
+      await emulator(FIRESTORE, 'PATCH', DOCS + '/matches/' + heldId, { fields: encodeFields({
+        id: heldId, users: [heldUid, heldPeer.uid].sort(), createdAt: '2026-08-02T00:00:00.000Z',
+        lastMessage: ASKED, lastMessageAt: '2026-08-02T00:00:01.000Z', unread: { [heldUid]: 0, [heldPeer.uid]: 0 }
+      }) });
+      await emulator(FIRESTORE, 'PATCH', DOCS + '/matches/' + heldId + '/messages/h1', { fields: encodeFields({
+        id: 'h1', from: heldPeer.uid, text: ASKED, createdAt: '2026-08-02T00:00:01.000Z'
+      }) });
+      // From the sign-in page the conversation sent this page to: sign in,
+      // land back in the conversation, take the connection away and send
+      // `text`, which is then held and drawn 'Sending…'.
+      const holdOne = async function (text) {
+        await page.waitForURL(h.pageUrl('auth'));
+        await page.waitForSelector('#auth-form');
+        await page.fill('#input-email', heldEmail);
+        await page.fill('#input-password', password);
+        await page.click('#submit-btn');
+        await page.waitForURL(h.pageUrl('matches'));
+        await page.waitForFunction(function (want) {
+          return ((document.getElementById('chat-log') || {}).textContent || '').indexOf(want) !== -1;
+        }, ASKED);
+        await page.evaluate(function () { return window.ZC.firebase.db.disableNetwork(); });
+        await page.fill('#chat-input', text);
+        await page.click('#chat-send');
+        return page.waitForFunction(stampOf, text).then(function (handle) { return handle.jsonValue(); });
+      };
+      const leaving = [];
+      const recordLeaving = function (dialog) { leaving.push(dialog.type()); };
+      page.on('dialog', recordLeaving);
+      try {
+        await page.goto(base + '/matches.html?m=' + encodeURIComponent(heldId), { waitUntil: 'domcontentloaded' });
+        const heldThere = await holdOne('Held while another tab signs out.');
+        const other = await ctx.session.context.newPage();
+        await other.goto(base + '/index.html', { waitUntil: 'domcontentloaded' });
+        await other.waitForFunction(function () { return !!(window.ZC && window.ZC.auth && window.ZC.auth.current); });
+        await other.evaluate(function () { return window.ZC.auth.signOut(); });
+        await page.waitForURL(h.pageUrl('auth'), { timeout: 10000 }).catch(function () {});
+        const guardedTo = page.url();
+        await other.close();
+        const askedThere = leaving.splice(0);
+        const backTo = new URL(guardedTo).searchParams.get('next') || '';
+        t.check('a sign-out in another tab while a message is still sending sends the page to sign in, without asking',
+          /Sending/.test(heldThere || '') && askedThere.length === 0 && h.pageUrl('auth').test(guardedTo) &&
+            h.pageUrl('matches').test(backTo) && backTo.indexOf(heldId) !== -1,
+          JSON.stringify({ stamp: heldThere, asked: askedThere, at: guardedTo.replace(base, '') }));
+
+        const heldHere = await holdOne('Held while this page signs out.');
+        // The nav's Sign out. CSS hides the nav's links at this width, where
+        // Settings carries the control, so the click is dispatched to the
+        // button rather than made with a pointer: app.js handles it the same
+        // way at every width.
+        await page.locator('[data-zc-nav] [data-signout]').dispatchEvent('click');
+        await page.waitForURL(h.pageUrl('index'), { timeout: 10000 }).catch(function () {});
+        const signedOutTo = page.url();
+        const askedHere = leaving.splice(0);
+        t.check('and the page\'s own Sign out goes on to the landing page without asking',
+          /Sending/.test(heldHere || '') && askedHere.length === 0 && h.pageUrl('index').test(signedOutTo),
+          JSON.stringify({ stamp: heldHere, asked: askedHere, at: signedOutTo.replace(base, '') }));
+      } finally {
+        page.off('dialog', recordLeaving);
+      }
+
       /* ---- two accounts whose identity the app did not choose ---- */
 
       // Both are made in the Auth emulator directly, the way a provider makes

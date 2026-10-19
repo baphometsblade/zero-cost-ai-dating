@@ -509,6 +509,11 @@
         return;
       }
       stopBadgePolling();
+      // Said the way auth.js's guards say it (see `leaveTo` there): a page
+      // asking before it is left — matches.js, with a message still sending —
+      // asks for the person, and the account it would be asking for has just
+      // signed out, so the question would only stop the way out.
+      window.dispatchEvent(new Event('zc:leaving'));
       window.location.href = url('index.html');
     } catch (err) {
       if (button && ZC.ui) ZC.ui.setBusy(button, false);

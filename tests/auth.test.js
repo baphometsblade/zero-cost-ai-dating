@@ -73,7 +73,8 @@ const documentShim = {
   addEventListener: function () { /* never reached: readyState is not 'loading' */ }
 };
 
-// window-level listeners, so the cross-tab 'storage' handler can be fired.
+// window-level listeners, so the cross-tab 'storage' handler can be fired and
+// what auth.js says on window (`zc:leaving`) can be heard.
 const windowListeners = {};
 
 globalThis.window = globalThis;
@@ -85,6 +86,10 @@ globalThis.addEventListener = function (type, cb) {
 };
 globalThis.removeEventListener = function (type, cb) {
   windowListeners[type] = (windowListeners[type] || []).filter(function (fn) { return fn !== cb; });
+};
+globalThis.dispatchEvent = function (event) {
+  (windowListeners[event.type] || []).slice().forEach(function (cb) { cb(event); });
+  return true;
 };
 
 // Load order mirrors the page: utils → seed data → config → store. auth.js
@@ -754,6 +759,36 @@ test('requireProfile insists on onboarding, and defers to requireAuth when signe
   await auth.refresh();
   assert.equal(await navigates(auth.requireProfile()), 'pending');
   assert.deepEqual(locationShim.replaced, ['profile.html?onboarding=1&next=%2Fdashboard.html']);
+});
+
+test('a guard that sends the page away says zc:leaving on window first, and one that lets it stay says nothing', async function () {
+  const auth = await resetWorld();
+  locationShim.pathname = '/matches.html';
+  // How many navigations had already been asked for each time it was heard.
+  const heard = [];
+  const onLeaving = function () { heard.push(locationShim.replaced.length); };
+  window.addEventListener('zc:leaving', onLeaving);
+  try {
+    await auth.signInAsDemoUser();
+    assert.equal((await auth.requireAuth()).uid, DEMO_UID);
+    assert.deepEqual(heard, [], 'a page allowed to stay is told nothing');
+
+    // Another tab signs out under a guarded page, which leaves for the sign-in
+    // page. matches.js asks before the page is left while a message is
+    // sending, and in a browser that question stopped this navigation, so the
+    // page has to be told before location.replace is called, not after.
+    backing.delete(SESSION_KEY);
+    fireStorage(SESSION_KEY);
+    assert.deepEqual(locationShim.replaced, ['auth.html?next=%2Fmatches.html']);
+    assert.deepEqual(heard, [0], 'told once, before the navigation was asked for');
+
+    // The signed-out visitor's redirect is told the same way.
+    assert.equal(await navigates(auth.requireAuth()), 'pending');
+    assert.deepEqual(heard, [0, 1]);
+    assert.equal(locationShim.replaced.length, 2);
+  } finally {
+    window.removeEventListener('zc:leaving', onLeaving);
+  }
 });
 
 test('resolveNext hands onboarding back the page it was asked for, and nothing it should not', async function () {

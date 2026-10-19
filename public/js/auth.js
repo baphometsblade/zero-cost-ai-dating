@@ -859,10 +859,20 @@
 
   /**
    * Leave the page. Uses replace() so guards never build up history entries.
+   *
+   * Every call is the app moving on because of the session — a guard, or the
+   * sign-in page once someone has signed in — never the person choosing to
+   * go, so the page is told first with a `zc:leaving` event on window. A page
+   * that asks before it is left asks for the person: matches.js does while a
+   * message is sending, and a guard leaving because the account had signed
+   * out in another tab was stopped by that question, with the account it was
+   * asked for already gone. app.js says the same before its own Sign out
+   * leaves.
    * @param {string} url relative destination
    * @returns {void}
    */
   function leaveTo(url) {
+    window.dispatchEvent(new Event('zc:leaving'));
     window.location.replace(url);
   }
 
