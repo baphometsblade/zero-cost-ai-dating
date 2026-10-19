@@ -175,6 +175,42 @@ test('the photo-link cap in the rules is exactly six of what the editor allows',
       : 'The rule is looser than the editor, so the editor is the only thing enforcing it.'));
 });
 
+test('no display name the store or a sign-in writes is one firestore.rules refuses', function () {
+  // The one identity field somebody else chooses. The forms stop at NAME_MAX, but a
+  // sign-in provider does not: Google hands over the account's own name, and one
+  // longer than the rules allow made that account's create refused on every page
+  // load, so it never got a document. auth.js now cuts a provider's name to the
+  // forms' NAME_MAX, and normalizeUser cuts every name to DISPLAY_NAME_MAX in both
+  // adapters. The store's cap is derived from the rules' (on users/{uid} and on
+  // discovery/{uid}, where the projection copies the name), so the two must be
+  // equal, and every form's has to fit inside it.
+  const sources = {
+    'public/js/data-store.js': fs.readFileSync(path.join(ROOT, 'public/js/data-store.js'), 'utf8'),
+    'public/js/auth.js': fs.readFileSync(path.join(ROOT, 'public/js/auth.js'), 'utf8'),
+    'public/js/profile.js': EDITOR,
+    'public/js/settings.js': fs.readFileSync(path.join(ROOT, 'public/js/settings.js'), 'utf8')
+  };
+  const constIn = function (file, name) {
+    const found = new RegExp('^\\s*const ' + name + ' = (\\d+);', 'm').exec(sources[file]);
+    assert.ok(found, file + ' has no `const ' + name + ' = <number>;` — this test is comparing nothing.');
+    return Number(found[1]);
+  };
+
+  const rule = ruleCap('display name length', /d\.displayName is string && d\.displayName\.size\(\) <= (\d+)/g, 2);
+  const store = constIn('public/js/data-store.js', 'DISPLAY_NAME_MAX');
+  assert.equal(store, rule,
+    'public/js/data-store.js cuts display names to ' + store + ' but firestore.rules caps them at ' +
+    rule + '. ' + (store > rule
+      ? 'A name the store keeps is refused, and for a provider\'s name that means no document at all.'
+      : 'Names the rules accept are being cut for nothing.'));
+
+  ['public/js/auth.js', 'public/js/profile.js', 'public/js/settings.js'].forEach(function (file) {
+    const form = constIn(file, 'NAME_MAX');
+    assert.ok(form <= store,
+      file + ' accepts a display name of ' + form + ' characters, which the store cuts to ' + store + '.');
+  });
+});
+
 test('every key a closed allowlist admits is one something validates', function () {
   // `keys().hasOnly([...])` decides which fields a document may have. It says
   // nothing about what any of them may contain, so a key that appears on the list

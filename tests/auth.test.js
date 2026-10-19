@@ -11,9 +11,11 @@
      • auth.js runs its boot as a side effect of loading, so "reloading the
        page" is modelled by dropping ZC.auth plus the require cache entry and
        requiring the file again — see loadAuth().
-     • Node 22 ships crypto.subtle, so the real SHA-256 path is the one under
-       test; the documented weak fallback is covered separately by hiding
-       window.crypto for one test.
+     • Every Node package.json admits (20 and later) has a global
+       crypto.subtle, so the real SHA-256 path is the one under test; the
+       documented weak fallback is covered separately by hiding window.crypto
+       for one test. Node 18 has no global crypto at all, and there the vault
+       tests fail, which is one reason package.json no longer admits it.
    ========================================================================== */
 'use strict';
 
@@ -848,4 +850,101 @@ test('the demo backend declines Google sign-in and password resets, helpfully', 
 
   // The address is still validated first, whichever backend is live.
   assert.equal((await auth.resetPassword('not-an-email')).error, 'That email address does not look right.');
+});
+
+/* ------------------------------------------------------------------------
+   12. The Firebase backend's account identity
+
+   auth.js picks its backend when it loads, from ZC.config.mode and a live
+   ZC.firebase.auth. These boot it in firebase mode on a stand-in for that
+   handle, which reports one account as signed in the way onAuthStateChanged
+   does on every page load. The store underneath is still the demo adapter,
+   so what auth.js asked it to write can be read back.
+   ------------------------------------------------------------------------ */
+
+/**
+ * Boot auth.js in firebase mode with `user` signed in.
+ * @param {Object} user what firebase.User would carry: uid, email, displayName
+ * @returns {Promise<Object>} the booted ZC.auth, settled
+ */
+async function bootFirebase(user) {
+  const priorMode = window.ZC.config.mode;
+  window.ZC.config.mode = 'firebase';
+  window.ZC.firebase = {
+    auth: { onAuthStateChanged: function (next) { next(user); return function () {}; } }
+  };
+  try {
+    const auth = loadAuth();
+    await auth.ready;
+    return auth;
+  } finally {
+    // The backend was chosen at load; nothing after this test may inherit it.
+    window.ZC.config.mode = priorMode;
+    delete window.ZC.firebase;
+  }
+}
+
+// Google hands over the account's own name, uncut, and firestore.rules refuses
+// a users/{uid} whose name is over 60 characters. The create was refused on
+// every page load, so that account could never get a document and was held at
+// onboarding for good. The editors allow 40, so that is where it is cut.
+test('a provider name longer than the editors allow is cut before it reaches a document', async function () {
+  await resetWorld();
+  const long = 'Maria Fernanda de los Angeles Garcia-Rodriguez Montenegro y Bustamante';
+  const auth = await bootFirebase({ uid: 'google-uma', email: 'uma@example.com', displayName: long });
+  assert.equal(auth.mode, 'firebase');
+  assert.equal(auth.current.displayName, long.slice(0, 40));
+
+  const stored = await store.getUser('google-uma');
+  assert.ok(stored, 'the first sign-in created the account document');
+  assert.equal(stored.displayName, long.slice(0, 40));
+  assert.equal(stored.email, 'uma@example.com');
+
+  // Counted the way the editors count, in UTF-16 units, and never splitting
+  // a surrogate pair: a character that would straddle the limit is left out
+  // whole, as is the space a cut can leave at the end.
+  const straddling = await bootFirebase({
+    uid: 'google-emoji', email: 'emoji@example.com', displayName: 'x'.repeat(39) + '\u{1F600}'
+  });
+  assert.equal(straddling.current.displayName, 'x'.repeat(39));
+  const spaced = await bootFirebase({
+    uid: 'google-spaced', email: 'spaced@example.com', displayName: '  ' + 'y'.repeat(39) + ' and more'
+  });
+  assert.equal(spaced.current.displayName, 'y'.repeat(39));
+});
+
+// loadOrCreateDoc corrects a stored email that differs from the account's on
+// every page load. When that write was refused — and firestore.rules refused
+// every one of them — it handed the page a blank in-memory document in place
+// of the stored one, with profileComplete false, so every guarded page sent a
+// finished account back through onboarding, forever.
+test('a refused identity repair keeps the stored document rather than a blank stand-in', async function () {
+  await resetWorld();
+  await store.createUser('fb-uma', { email: '', displayName: 'Uma' });
+  await store.updateUser('fb-uma', { profileComplete: true });
+
+  const realUpdate = store.updateUser;
+  const sent = [];
+  store.updateUser = async function (uid, patch) {
+    sent.push(patch);
+    const err = new Error('Missing or insufficient permissions.');
+    err.code = 'permission-denied';
+    throw err;
+  };
+  let auth;
+  try {
+    auth = await quiet(function () {
+      return bootFirebase({ uid: 'fb-uma', email: 'uma@example.com', displayName: 'Uma' });
+    });
+  } finally {
+    store.updateUser = realUpdate;
+  }
+  assert.deepEqual(sent, [{ email: 'uma@example.com' }], 'the repair was attempted');
+  assert.equal(auth.doc.profileComplete, true, 'the page gets the stored, finished profile');
+  assert.equal(auth.doc.displayName, 'Uma');
+
+  locationShim.pathname = '/dashboard.html';
+  locationShim.replaced.length = 0;
+  assert.equal(await navigates(auth.requireProfile()), 'resolved');
+  assert.deepEqual(locationShim.replaced, [], 'and no guard sends it through onboarding');
 });

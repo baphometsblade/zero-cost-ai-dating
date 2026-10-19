@@ -184,7 +184,8 @@ function fakeResponse(body, opts) {
 /**
  * Evaluate the shipped sw.js against stand-ins, and hand back what it did.
  * @param {Object} opts `fetch(path)` to answer requests; `putFails` to make
- *   every cache write reject; `existing` cache names already on the origin
+ *   every cache write reject; `existing` cache names already on the origin;
+ *   `scope` the directory the worker is served from, '/' unless given
  * @returns {Object} the caches it left, the names it deleted, and `fire(type, event)`
  */
 function runWorker(opts) {
@@ -195,8 +196,11 @@ function runWorker(opts) {
   const deleted = [];
   const fetched = [];
   const origin = 'https://example.test';
+  const location = new URL(origin + (o.scope || '/') + 'sw.js');
+  // A relative cache key resolves against the worker's own URL, as it does in
+  // a browser: under a project subpath 'matches.html' is that subpath's page.
   function keyOf(req) {
-    return new URL(typeof req === 'string' ? req : req.url, origin + '/').href;
+    return new URL(typeof req === 'string' ? req : req.url, location).href;
   }
   const caches = {
     open: function (name) {
@@ -220,7 +224,7 @@ function runWorker(opts) {
     }
   };
   const self = {
-    location: new URL(origin + '/sw.js'),
+    location: location,
     addEventListener: function (type, fn) { listeners[type] = fn; },
     skipWaiting: function () { return Promise.resolve(); },
     clients: { claim: function () { return Promise.resolve(); } }
@@ -412,4 +416,116 @@ test('a failed runtime cache write is caught, not left as an unhandled rejection
     process.removeListener('unhandledRejection', onUnhandled);
   }
   assert.deepEqual(unhandled.map(String), [], 'a cache write failure escaped');
+});
+
+test('offline, a page is the copy its last visit stored, whatever URL it was visited at', async function () {
+  // Firebase Hosting answers every page at its clean URL, so a visit to the
+  // matches page is a navigation to `/matches`, and the landing page is '/'.
+  // Offline the worker looks a page up by its file name. Stored under the URL
+  // it was answered at, the visit was a copy nothing read: offline served the
+  // page the worker installed with, while the same visit had refreshed the
+  // page's scripts — so after any deploy that left sw.js alone, the offline
+  // page was one deploy and its scripts the next. A query string did the same
+  // on either host. GitHub Pages serves the file name itself, and must still.
+  //
+  // Each page is asked for offline twice: before the visit it must be the
+  // install's copy, not the 404 page — which pins the name a visit is stored
+  // under to the name the install stored it under, since one function now
+  // makes both the write and the lookup, and a wrong name in it would agree
+  // with itself.
+  const visits = [
+    { scope: '/', path: 'matches', page: 'matches.html' },
+    { scope: '/', path: '', page: 'index.html' },
+    { scope: '/', path: 'auth?mode=signup', page: 'auth.html' },
+    { scope: '/zero-cost-ai-dating/', path: 'matches.html', page: 'matches.html' },
+    { scope: '/zero-cost-ai-dating/', path: '', page: 'index.html' },
+    { scope: '/zero-cost-ai-dating/', path: 'auth.html?mode=signup', page: 'auth.html' }
+  ];
+  const problems = [];
+  for (const visit of visits) {
+    let deploy = 1;
+    let online = true;
+    const request = { method: 'GET', url: 'https://example.test' + visit.scope + visit.path, mode: 'navigate' };
+    const worker = runWorker({
+      scope: visit.scope,
+      // The install asks for each file by its CORE name; the visit by its URL.
+      fetch: function (url) {
+        if (!online) return Promise.reject(new TypeError('Failed to fetch'));
+        return fakeResponse('deploy ' + deploy + ' ' + (url === request.url ? visit.page : url));
+      }
+    });
+    const offline = async function () {
+      online = false;
+      const answered = await worker.fire('fetch', { request: request });
+      online = true;
+      // A clone, because the stand-in cache hands back the response it holds,
+      // where a browser's hands back a new one each time: read in place, the
+      // installed copy could not be read a second time.
+      return answered ? answered.clone().text() : 'nothing';
+    };
+    await worker.fire('install');
+    const installed = await offline();
+    if (installed !== 'deploy 1 ' + visit.page) {
+      problems.push(request.url + ' served "' + installed + '" offline before any visit, not the installed ' +
+        visit.page);
+    }
+    deploy = 2;
+    await worker.fire('fetch', { request: request });
+    // The worker answers before it writes; every step of the write is a
+    // settled promise here, so it has landed once the microtasks drain.
+    await new Promise(function (resolve) { setImmediate(resolve); });
+    const visited = await offline();
+    if (visited !== 'deploy 2 ' + visit.page) {
+      problems.push(request.url + ' served "' + visited + '" offline after a visit to deploy 2');
+    }
+  }
+  assert.equal(problems.length, 0, report('Offline, a page is not the copy its last visit stored:', problems));
+});
+
+test('a visit stores what it fetched the way the install does: no redirect, no headers that describe the wire', async function () {
+  // The install stores every asset rebuilt from its decoded bytes, so nothing
+  // it serves offline says `content-encoding: gzip` over plain text. A visit
+  // writes over those copies, and on Firebase Hosting nothing it fetches is
+  // redirected but a `.html` name: so the visit wrote the page and every
+  // script and stylesheet back exactly as they came off the wire. Measured
+  // in Chromium against a server that compresses the way Hosting does: after
+  // one online visit the matches page an offline navigation is served said
+  // "gzip, 3238 bytes" over 10,014, and matches.js "gzip, 24842" over 83,947.
+  const HTML = 'text/html; charset=utf-8';
+  const visits = [
+    { why: 'a page at its clean URL, as Hosting answers it', url: 'matches', mode: 'navigate', key: 'matches.html', type: HTML },
+    { why: 'a script', url: 'js/matches.js', mode: 'no-cors', key: 'js/matches.js', type: 'text/javascript; charset=utf-8' },
+    { why: 'a page asked for by its file name, which Hosting redirects', url: 'settings.html', mode: 'cors',
+      key: 'settings.html', type: HTML, redirected: true }
+  ];
+  const problems = [];
+  for (const visit of visits) {
+    const url = 'https://example.test/' + visit.url;
+    const worker = runWorker({
+      fetch: function (asked) {
+        return fakeResponse('decoded ' + asked, {
+          redirected: !!visit.redirected,
+          headers: { 'content-type': visit.type, 'content-encoding': 'gzip', 'content-length': '7' }
+        });
+      }
+    });
+    await worker.fire('fetch', { request: { method: 'GET', url: url, mode: visit.mode } });
+    // The write lands after the answer; every step of it is a settled promise
+    // here, so it has landed once the microtasks drain.
+    await new Promise(function (resolve) { setImmediate(resolve); });
+    const shell = worker.stores.get(worker.cacheName);
+    const stored = shell && shell.get('https://example.test/' + visit.key);
+    if (!stored) {
+      problems.push(visit.why + ': nothing stored under ' + visit.key);
+      continue;
+    }
+    const said = [];
+    if (stored.redirected) said.push('redirected');
+    if (stored.headers.get('content-encoding') !== null) said.push('content-encoding: ' + stored.headers.get('content-encoding'));
+    if (stored.headers.get('content-length') !== null) said.push('content-length: ' + stored.headers.get('content-length'));
+    if (stored.headers.get('content-type') !== visit.type) said.push('lost its content type');
+    if (await stored.clone().text() !== 'decoded ' + url) said.push('lost its body');
+    if (said.length) problems.push(visit.why + ' (' + visit.key + ') was stored ' + said.join(', '));
+  }
+  assert.equal(problems.length, 0, report('A visit stored a copy the install would not have:', problems));
 });

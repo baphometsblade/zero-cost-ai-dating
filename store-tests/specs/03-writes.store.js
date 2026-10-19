@@ -119,8 +119,9 @@ module.exports = {
     await k.admin.set('users', offlineUid, k.h.userDoc(offlineUid, {
       usage: { date: today, likes: 12, superLikes: 0, rewinds: 0 }
     }));
-    // The deck reads the user before every swipe, which is what leaves the
-    // document in the SDK's local cache for the offline path to fall back on.
+    // The deck reads the user before every swipe that spends, which is what
+    // leaves the store knowing the last stored count for the offline path to
+    // fall back on.
     await k.store.getUsage(offlineUid);
 
     // The failure is injected rather than staged. `db.disableNetwork()` looks
@@ -129,31 +130,84 @@ module.exports = {
     // "off" (measured — it stored 13). Rejecting the transaction is what being
     // offline actually does to this call, and everything under test after that
     // point is the shipped catch branch.
-    const hadOwn = Object.prototype.hasOwnProperty.call(k.ctx.db, 'runTransaction');
-    const realRunTransaction = k.ctx.db.runTransaction;
-    k.ctx.db.runTransaction = function () {
-      return Promise.reject(new Error('Failed to get document because the client is offline.'));
-    };
-    let offline = null;
-    let offlineWarned = [];
-    try {
-      offline = await k.store.bumpUsage(offlineUid, 'likes');
-      offlineWarned = k.ctx.drainWarnings();
-    } finally {
-      if (hadOwn) k.ctx.db.runTransaction = realRunTransaction;
-      else delete k.ctx.db.runTransaction;
+    async function bumpOffline(who) {
+      const hadOwn = Object.prototype.hasOwnProperty.call(k.ctx.db, 'runTransaction');
+      const realRunTransaction = k.ctx.db.runTransaction;
+      k.ctx.db.runTransaction = function () {
+        return Promise.reject(new Error('Failed to get document because the client is offline.'));
+      };
+      try {
+        const value = await k.store.bumpUsage(who, 'likes');
+        return { value: value, warned: k.ctx.drainWarnings() };
+      } finally {
+        if (hadOwn) k.ctx.db.runTransaction = realRunTransaction;
+        else delete k.ctx.db.runTransaction;
+      }
     }
+    const offline = await bumpOffline(offlineUid);
     const offlineStored = (await k.admin.get('users', offlineUid) || {}).usage || {};
 
     t.check(
       'an offline bump counts on from the last known day, not from a fresh one',
-      offline.likes === 13 && offline.date === today,
-      k.show(offline)
+      offline.value.likes === 13 && offline.value.date === today,
+      k.show(offline.value)
     );
     t.check(
       'and it warned instead of throwing, having stored nothing',
-      offlineWarned.length === 1 && offlineStored.likes === 12,
-      offlineWarned.length + ' warning(s), stored ' + offlineStored.likes
+      offline.warned.length === 1 && offlineStored.likes === 12,
+      offline.warned.length + ' warning(s), stored ' + offlineStored.likes
+    );
+
+    // ...and it must know that without the SDK's cache, because the SDK the
+    // pages load does not keep the document there. Measured against the
+    // emulator: after a server `get()` of users/{uid}, `get({ source: 'cache' })`
+    // rejects with `unavailable` on the compat 10.12.2 every page loads from
+    // gstatic, whose memory cache lets go of a document no listener is attached
+    // to, and answers from the read on 12.18 and 12.19. This suite ran on 12.18
+    // while the store asked the cache, so the check above passed here, and on
+    // 10.12.2 the same bump answered 1. CI now runs the suite on the pages'
+    // version; a local run may not, so here the cache gives the document up on
+    // any SDK, exactly as 10.12.2 does by itself.
+    const docProto = Object.getPrototypeOf(k.ctx.db.collection('users').doc(offlineUid));
+    const realGet = docProto.get;
+    docProto.get = function (options) {
+      if (options && options.source === 'cache') {
+        const gone = new Error('Failed to get document from cache.');
+        gone.code = 'unavailable';
+        return Promise.reject(gone);
+      }
+      return realGet.apply(this, arguments);
+    };
+    let uncached = null;
+    let afterCommit = null;
+    let committed = null;
+    try {
+      uncached = await bumpOffline(offlineUid);
+      // A bump that commits is newer than the read before it, so the next
+      // offline bump counts on from it: 12 stored, this one makes 13, the
+      // offline one after it 14. The record it hands back is the caller's to
+      // do with as it likes; the deck happens not to touch it, but if what it
+      // did moved the count the store remembered, the offline answer would
+      // follow the caller instead of what was stored.
+      committed = await k.store.bumpUsage(offlineUid, 'likes');
+      const handedLikes = committed.likes;
+      committed.likes = 0;
+      committed = handedLikes;
+      afterCommit = await bumpOffline(offlineUid);
+    } finally {
+      docProto.get = realGet;
+    }
+    t.check(
+      'and it does not need the SDK\'s cache to know the last count, which 10.12.2 does not keep',
+      uncached.value.likes === 13 && uncached.value.date === today && uncached.warned.length === 1,
+      k.show(uncached.value) + ', ' + uncached.warned.length + ' warning(s)'
+    );
+    t.check(
+      'and after a bump that committed it counts on from that one, whatever the caller did to the record it was handed',
+      committed === 13 && afterCommit.value.likes === 14 && afterCommit.value.date === today &&
+        afterCommit.warned.length === 1,
+      'committed ' + committed + ', then offline ' + k.show(afterCommit.value) + ', ' +
+        afterCommit.warned.length + ' warning(s)'
     );
 
     /* ---- the presence write, and the throttle docs/ARCHITECTURE.md claims -- */

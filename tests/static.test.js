@@ -14,6 +14,7 @@
      (e) every page has <html lang>, <title>, viewport and description
      (f) sw.js CORE lists exactly what Hosting deploys, worker aside
      (g) every glyph the stylesheets generate has alternative text
+     (h) every page that themes itself applies the stored theme from <head>
 
    Failures print the offending page and line, because a static check nobody
    can act on is worse than no check at all.
@@ -23,6 +24,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -57,6 +59,11 @@ const CORE_SCRIPTS = [
 const MINIMAL_PAGES = {
   '404.html': []
 };
+
+// The one script a page loads in its <head>, ahead of the block above: the
+// stored theme has to be on <html> before the body is painted, and the body
+// is painted before any script at its end has run. See check (h).
+const HEAD_SCRIPTS = ['js/theme-boot.js'];
 
 // Every page the ownership map promises. A missing one is a dead link waiting
 // to happen, so assert the set rather than just walking whatever is there.
@@ -142,6 +149,20 @@ function parseScripts(html) {
     out.push({ attrs: parseAttrs(m[1]), body: m[2], index: m.index });
   }
   return out;
+}
+
+/**
+ * Split a page's <script> elements at the end of its <head>.
+ * @param {string} html comment-blanked markup
+ * @returns {{head:Array, body:Array}} the parsed scripts on each side
+ */
+function scriptsByPart(html) {
+  const end = html.search(/<\/head\s*>/i);
+  const all = parseScripts(html);
+  return {
+    head: all.filter(function (tag) { return end !== -1 && tag.index < end; }),
+    body: all.filter(function (tag) { return end === -1 || tag.index > end; })
+  };
 }
 
 /**
@@ -243,7 +264,9 @@ test('(b) the script block matches the load order in §2', function () {
   const problems = [];
 
   PAGES.forEach(function (page) {
-    const scripts = parseScripts(page.html);
+    // The block at the end of the body. What a page loads in its <head> is
+    // check (h)'s, so it is neither part of this order nor an extra here.
+    const scripts = scriptsByPart(page.html).body;
     const srcs = scripts.map(function (tag) { return tag.attrs.src || ''; });
 
     if (Object.prototype.hasOwnProperty.call(MINIMAL_PAGES, page.name)) {
@@ -306,6 +329,141 @@ test('(b) the script block matches the load order in §2', function () {
   });
 
   assert.equal(problems.length, 0, report('Script load order problems:', problems));
+});
+
+test('CI drives the store suite through the compat SDK the pages load', function () {
+  // The store suite is the only place data-store.js meets a real Firestore
+  // client, and it used to meet 12.18 while every page loaded 10.12.2. The two
+  // are not interchangeable: 10.12.2's memory cache lets a document go once no
+  // listener is attached to it, 12.18 keeps it, and a store guarantee that
+  // leaned on the cache held on the SDK CI installed and on no page anybody
+  // opened. So the version the emulator job installs for the store suite is
+  // pinned to the one in the gstatic tags (b) holds every page to, and the job
+  // has to hand that very install to the suite: store-tests/context.js loads
+  // the compat build from ZC_STORE_SDK, and refuses one of any other version.
+  const shipped = /\/firebasejs\/(\d+\.\d+\.\d+)\//.exec(FIREBASE_SDK[0]);
+  assert.ok(shipped, 'no version in ' + FIREBASE_SDK[0]);
+  const ci = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
+  const pinned = ci.match(/^\s*FIREBASE_SDK_VERSION:\s*'([^']*)'\s*$/gm) || [];
+  assert.equal(pinned.length, 1, 'ci.yml should set FIREBASE_SDK_VERSION exactly once, found ' + pinned.length);
+  const version = /'([^']*)'/.exec(pinned[0])[1];
+  assert.equal(version, shipped[1], 'ci.yml installs firebase ' + version + ' for the store suite; the pages load ' + shipped[1]);
+  const install = /--prefix\s+"\$RUNNER_TEMP\/([^"]+)"\s+"firebase@\$FIREBASE_SDK_VERSION"/.exec(ci);
+  assert.ok(install, 'ci.yml never installs firebase@$FIREBASE_SDK_VERSION into a prefix of its own');
+  const handed = /^\s*ZC_STORE_SDK:\s*(\S.*?)\s*$/m.exec(ci);
+  assert.ok(handed, 'ci.yml never hands the store suite ZC_STORE_SDK');
+  assert.equal(handed[1], '${{ runner.temp }}/' + install[1] + '/node_modules',
+    'ZC_STORE_SDK does not point at the prefix firebase@$FIREBASE_SDK_VERSION is installed into');
+});
+
+test('the store runner takes a relative ZC_STORE_SDK against the working directory', function () {
+  // CI hands the store suite an absolute ZC_STORE_SDK, but a local run need
+  // not, and a relative one holding exactly the pages' SDK used to be refused
+  // as holding none: Module.createRequire throws on a relative path, and
+  // context.js read the throw as "not installed". The pin still has to refuse
+  // a relative path that holds nothing, and then say which directory it took
+  // the path to mean, since the runner's working directory is the one
+  // rules-tests/emulate.js starts it in, not necessarily the shell's.
+  const context = require(path.join(ROOT, 'store-tests', 'context.js'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zc-store-sdk-'));
+  const sdk = path.join(dir, 'sdk', 'node_modules');
+  const empty = path.join(dir, 'empty', 'node_modules');
+  const saved = process.env.ZC_STORE_SDK;
+  const verdicts = {};
+  try {
+    // A stand-in for `npm install firebase@<the pages' version>`: the two
+    // compat entry points context.js loads, reporting that version.
+    const compat = path.join(sdk, 'firebase', 'compat');
+    fs.mkdirSync(compat, { recursive: true });
+    fs.writeFileSync(path.join(compat, 'app.js'),
+      'exports.SDK_VERSION = ' + JSON.stringify(context.shippedSdkVersion()) + ';\n' +
+      'exports.initializeApp = function () {};\n', 'utf8');
+    fs.writeFileSync(path.join(compat, 'firestore.js'), '', 'utf8');
+    fs.mkdirSync(empty, { recursive: true });
+    process.env.ZC_STORE_SDK = sdk;
+    verdicts.absolute = context.sdkProblem();
+    process.env.ZC_STORE_SDK = path.relative(process.cwd(), sdk);
+    verdicts.relative = context.sdkProblem();
+    process.env.ZC_STORE_SDK = path.relative(process.cwd(), empty);
+    verdicts.empty = context.sdkProblem();
+  } finally {
+    if (saved === undefined) delete process.env.ZC_STORE_SDK;
+    else process.env.ZC_STORE_SDK = saved;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  assert.equal(verdicts.absolute, null, 'the stand-in SDK is refused by its absolute path: ' + verdicts.absolute);
+  assert.equal(verdicts.relative, null, 'a relative ZC_STORE_SDK holding the pages\' SDK is refused: ' + verdicts.relative);
+  assert.match(String(verdicts.empty), /holds no firebase compat SDK/,
+    'a relative ZC_STORE_SDK holding nothing is not refused: ' + verdicts.empty);
+  assert.ok(String(verdicts.empty).includes(empty),
+    'the refusal of a relative ZC_STORE_SDK never names the directory it looked in: ' + verdicts.empty);
+});
+
+test('CI\'s emulator run of the browser suite fails, rather than skips, the Firebase spec', function () {
+  // The step that boots the emulators for the browser suite exists to run the
+  // Firebase spec, but e2e/run.js accepts that spec skipped as the plain
+  // total's shape wherever it happens: a probe that missed the emulators inside
+  // emulators:exec passed as a run without them. --require=firebase turns the
+  // skip into a failing check, and only the flag on that command does.
+  const ci = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
+  // Comments mention emulators:exec too; only the commands count.
+  const code = ci.split('\n').filter(function (line) { return !/^\s*#/.test(line); }).join('\n');
+  const commands = [];
+  const exec = /emulators:exec\b[^"]*"([^"]*)"/g;
+  let m;
+  while ((m = exec.exec(code)) !== null) {
+    if (/e2e\/run\.js/.test(m[1])) commands.push(m[1]);
+  }
+  assert.equal(commands.length, 1, 'expected one emulators:exec running e2e/run.js in ci.yml, found ' + commands.length);
+  assert.match(commands[0], /--require=firebase\b/, 'the emulator e2e run lets the Firebase spec skip: ' + commands[0]);
+});
+
+test('the Pages deploy waits for CI, and publishes only a commit CI passed', function () {
+  // pages.yml ran on every push to main, beside CI rather than after it, and
+  // main is not a protected branch, so nothing it published had to have passed
+  // the browser or emulator suites. CI finishing is what wakes it now, and a
+  // gate job asks whether CI passed on the commit before the deploy job runs.
+  const strip = function (text) {
+    return text.split('\n').filter(function (line) { return !/^\s*#/.test(line); }).join('\n');
+  };
+  const pages = strip(fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'pages.yml'), 'utf8'));
+  const ci = strip(fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8'));
+  const on = /^on:\n((?:[ \t]+.*\n|\n)*)/m.exec(pages);
+  assert.ok(on, 'pages.yml has no `on:` block');
+  assert.doesNotMatch(on[1], /^\s+push:/m, 'pages.yml still deploys on push, beside CI instead of after it');
+  const unquote = function (s) { return s.trim().replace(/^(['"])(.*)\1$/, '$2'); };
+  const ciName = /^name:[ \t]*(.+?)[ \t]*$/m.exec(ci);
+  assert.ok(ciName, 'ci.yml has no top-level name');
+  // The workflows whose finishing wakes this one, written either way YAML
+  // allows a list: `workflows: [CI]`, or `- CI` lines under `workflows:`.
+  const run = /^([ \t]+)workflow_run:[ \t]*\n((?:\1[ \t]+.*\n|\n)*)/m.exec(on[1]);
+  assert.ok(run, 'pages.yml is not woken by another workflow finishing');
+  const list = /^([ \t]+)workflows:[ \t]*(?:\[([^\]\n]*)\][ \t]*\n|\n((?:\1[ \t]*-.*\n)+))/m.exec(run[2]);
+  assert.ok(list, 'pages.yml\'s workflow_run names no workflows');
+  const woken = (list[2] !== undefined ? list[2].split(',') : list[3].split('\n').map(function (line) {
+    return line.replace(/^[ \t]*-/, '');
+  })).map(unquote).filter(Boolean);
+  assert.ok(woken.indexOf(unquote(ciName[1])) !== -1,
+    'pages.yml is not woken by the "' + unquote(ciName[1]) + '" workflow, only by: ' + woken.join(', '));
+  // The gate's question, in whatever order its parameters come: CI's runs for
+  // exactly the commit about to go out, pushed to main, that passed. A pull
+  // request's run is not enough: it tests a merge with the base, not the commit.
+  const asked = /actions\/workflows\/ci\.yml\/runs\?([^"'\s]+)/.exec(pages);
+  assert.ok(asked, 'the gate never asks the API about CI\'s runs');
+  const query = new URLSearchParams(asked[1]);
+  assert.deepEqual(
+    { head_sha: (query.get('head_sha') || '').replace(/^\$\{(\w+)\}$/, '$$$1'), event: query.get('event'),
+      branch: query.get('branch'), status: query.get('status') },
+    { head_sha: '$GITHUB_SHA', event: 'push', branch: 'main', status: 'success' },
+    'the gate does not ask whether CI passed on the commit it publishes: ' + asked[1]);
+  assert.match(pages, /^\s+needs:\s*gate\s*$/m, 'the deploy job does not wait for the gate');
+  // Without this the deploy runs whatever the gate found, and a checkout of an
+  // empty ref checks out main's tip, so it would go out whether CI passed on
+  // it or not.
+  assert.match(pages, /^\s+if:\s*needs\.gate\.outputs\.sha\s*!=\s*''\s*$/m,
+    'the deploy job runs even when the gate found no commit CI passed');
+  assert.match(pages, /^\s+ref:\s*\$\{\{\s*needs\.gate\.outputs\.sha\s*\}\}\s*$/m,
+    'the deploy does not check out the commit the gate checked');
 });
 
 /* ------------------------------------------------------------------------
@@ -546,6 +704,56 @@ test('(g) every glyph the stylesheets generate has alternative text', function (
   // Fourteen today; a parser that stopped finding them would pass by checking nothing.
   assert.ok(glyphs >= 14, 'found only ' + glyphs + ' generated glyphs in the stylesheets');
   assert.equal(problems.length, 0, report('Generated glyphs a screen reader reads raw:', problems));
+});
+
+test('(h) every page that themes itself applies the stored theme from <head>, with app.js\'s key', function () {
+  // A theme chosen in Settings is applied by app.js, at the end of the body,
+  // and the body is painted before that runs: with dark chosen on a light OS,
+  // settings painted light at 52ms and turned dark at 123ms. theme-boot.js
+  // applies it from <head> instead, which only works on a page that loads it
+  // there and blocking (a defer or async copy can run after the paint it is
+  // there to precede), and only while it reads the key app.js writes and
+  // knows every theme app.js offers. 404.html runs no script and follows the
+  // OS alone. e2e/specs/06-layout.e2e.js watches the paint itself.
+  const problems = [];
+  PAGES.forEach(function (page) {
+    const head = scriptsByPart(page.html).head;
+    const minimal = Object.prototype.hasOwnProperty.call(MINIMAL_PAGES, page.name);
+    // On 404.html only external scripts are counted, as (b) counts them
+    // there: whether an inline body may exist on that page is (c)'s hash rule.
+    const srcs = head.map(function (tag) { return tag.attrs.src || '<inline>'; })
+      .filter(function (src) { return !minimal || src !== '<inline>'; });
+    const expected = minimal ? [] : HEAD_SCRIPTS;
+    if (srcs.join('|') !== expected.join('|')) {
+      problems.push(page.rel + ' loads [' + srcs.join(', ') + '] in <head>; expected [' + expected.join(', ') + ']');
+    }
+    head.forEach(function (tag) {
+      if ('defer' in tag.attrs || 'async' in tag.attrs) {
+        problems.push(page.rel + ':' + lineAt(page.html, tag.index) + ' loads "' + tag.attrs.src +
+          '" defer/async, so it may run after the first paint');
+      }
+    });
+  });
+
+  const app = fs.readFileSync(path.join(PUBLIC_DIR, 'js', 'app.js'), 'utf8');
+  const boot = fs.readFileSync(path.join(PUBLIC_DIR, 'js', 'theme-boot.js'), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  const key = /const THEME_KEY = '([^']+)';/.exec(app);
+  const themes = /const THEMES = \{([^}]*)\};/.exec(app);
+  assert.ok(key && themes, 'app.js no longer declares `const THEME_KEY = \'…\';` and `const THEMES = { … };`');
+  if (boot.indexOf("getItem('" + key[1] + "')") === -1) {
+    problems.push('theme-boot.js does not read app.js\'s THEME_KEY, "' + key[1] + '"');
+  }
+  const offered = themes[1].split(',').map(function (entry) { return entry.split(':')[0].trim(); })
+    .filter(function (name) { return name && name !== 'system'; });
+  assert.ok(offered.length >= 2, 'found only ' + offered.length + ' themes besides system in app.js THEMES');
+  offered.forEach(function (name) {
+    if (boot.indexOf("'" + name + "'") === -1) {
+      problems.push('theme-boot.js never applies "' + name + '", a theme app.js offers');
+    }
+  });
+
+  assert.equal(problems.length, 0, report('The stored theme would miss the first paint:', problems));
 });
 
 test('the plans page arrives with a placeholder for each usage row subscription.js draws', function () {

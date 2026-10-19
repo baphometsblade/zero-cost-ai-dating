@@ -187,6 +187,34 @@ function drain(errors, resource, status) {
   return removed;
 }
 
+/**
+ * Record every shape the shared header takes while a page loads, as an init
+ * script: it runs before any page script, so it sees the header app.js mounts
+ * first and every one that replaces it. A shape is whether the header offers
+ * the guest's "Sign in", whether it carries the signed-in links, and whether
+ * the tab bar is on the page. The observer reads the header after every
+ * batch of changes, and a batch always ends before the next frame is drawn,
+ * so every header that is painted is recorded, and some that never are:
+ * stricter than what a person could see, never looser.
+ * @returns {void}
+ */
+function recordHeaders() {
+  window.__zcHeaders = [];
+  let last = '';
+  new MutationObserver(function () {
+    const nav = document.querySelector('[data-zc-nav]');
+    if (!nav) return;
+    const shape = [
+      nav.querySelector('a[href$="auth.html"]') ? 'sign-in' : '',
+      nav.querySelector('.nav-links') ? 'links' : '',
+      document.querySelector('[data-zc-tabbar]') ? 'tab bar' : ''
+    ].filter(Boolean).join(' + ') || 'brand only';
+    if (shape === last) return;
+    last = shape;
+    window.__zcHeaders.push(shape);
+  }).observe(document, { childList: true, subtree: true });
+}
+
 /* --------------------------------------------------------------------------
    3. Fixtures
    -------------------------------------------------------------------------- */
@@ -466,7 +494,38 @@ module.exports = {
         swipeAgain ? swipeAgain.from + ' -> ' + swipeAgain.to : 'top card was ' + alsoTop);
 
       /* ---- out, and back in ---- */
-      await page.goto(base + '/settings.html', { waitUntil: 'domcontentloaded' });
+      // Every header this page shows on the way in is recorded, for the check
+      // after the auth gate below. The recorder stays for this page's later
+      // loads too, and is passive, so it changes nothing it watches.
+      await page.addInitScript(recordHeaders);
+      // And Firestore is held at the network until the first header is
+      // recorded. A restored session is only known once users/{uid} has been
+      // read, and app.js mounts the header when the document is parsed, which
+      // is usually before that read is back, but not always: a read that wins
+      // the race leaves nothing to see, and the check would pass on a page
+      // that shows the guest's header every time the read loses it. Held, the
+      // read cannot win, so the first mount is always made with the session
+      // still unknown. These are the two paths the proxy above sends to
+      // Firestore. A held request is let go with fallback(), not continue():
+      // unroute() below sends on any request it finds still held by itself,
+      // and a continue() that arrives after that throws "Route is already
+      // handled!" out of the handler, which stopped the whole run; the
+      // continue a fallback ends in is Playwright's own, which expects that.
+      const FIRESTORE_CALL = function (url) {
+        return url.pathname.indexOf('/v1/') === 0 || url.pathname.indexOf('/google.firestore.') === 0;
+      };
+      let releaseFirestore = null;
+      const firestoreHeld = new Promise(function (resolve) { releaseFirestore = resolve; });
+      await page.route(FIRESTORE_CALL, async function (route) { await firestoreHeld; await route.fallback(); });
+      try {
+        await page.goto(base + '/settings.html', { waitUntil: 'domcontentloaded' });
+        await page.waitForFunction(function () {
+          return !!window.__zcHeaders && window.__zcHeaders.length > 0;
+        }, null, { timeout: 10000 }).catch(function () {});
+      } finally {
+        releaseFirestore();
+        await page.unroute(FIRESTORE_CALL);
+      }
 
       // `main [data-signout]`, scoped, and the scope is the whole point. There are TWO
       // sign-out controls on this page: the one in the settings card, and the one
@@ -493,6 +552,26 @@ module.exports = {
         settled ? 'the sign-out hint is the one firebase mode writes'
           : 'the hint was never rewritten — requireAuth had not settled, or the page ' +
             'redirected out from under the click');
+
+      // Firebase restores a session asynchronously — the persisted credential,
+      // then users/{uid} — and app.js mounts the header as soon as the
+      // document is parsed, usually before the restore is over and, with
+      // Firestore held above, always. It drew the guest's header then: a "Sign
+      // in" button and no tab bar on a signed-in visitor's Settings page, for
+      // as long as the restore took, and a click on it went to the sign-in
+      // page, which sends a signed-in visitor on to the deck. Demo mode never
+      // showed it, because its session is known before the header is built.
+      // Nothing of the guest's may show until the auth state is known, and
+      // the signed-in header has to arrive.
+      await page.waitForFunction(function () {
+        return !!document.querySelector('[data-zc-tabbar]');
+      }, null, { timeout: 10000 }).catch(function () {});
+      const shapes = await page.evaluate(function () { return window.__zcHeaders || []; });
+      t.check('a signed-in visitor is never shown the guest header while the session is restored',
+        shapes.length > 0 &&
+          shapes.every(function (shape) { return shape.indexOf('sign-in') === -1; }) &&
+          shapes[shapes.length - 1] === 'links + tab bar',
+        shapes.join(' → ') || 'no header was ever mounted');
 
       await page.click('main [data-signout]');
       await page.waitForURL(h.pageUrl('index'));
@@ -590,11 +669,12 @@ module.exports = {
 
       /* ---- the finding ---- */
 
-      // Run last, because it deliberately leaves the account's document
-      // missing.
+      // Run after everything that reads this account's document, because it
+      // deliberately leaves it missing.
       //
       // updateUser's transaction is written to cope with a users document that
-      // is not there — `snap.exists ? snap.data() : { uid: uid }` — and then
+      // is not there — `snap.exists ? snap.data() : missingUserBase(uid)`, the
+      // uid and the signed-in account's email and name — and then
       // normalizeUser fills the gaps, including `lastActiveAt: null`. When this
       // spec was written, firestore.rules accepted that key only as a string,
       // so the write was refused and the branch could never do what it was
@@ -655,6 +735,45 @@ module.exports = {
         stale.length === 0,
         stale.length ? stale.length + ' stale commit(s): ' + stale[0] : 'no rejected commits');
 
+      // Settings deletes an account's data before its sign-in, and says so when
+      // only the first half lands, so a profile editor left open in another tab
+      // can still save into a users/{uid} that is gone, and updateUser builds it
+      // again from the patch. The editor sent only the fields that differed
+      // from what it had loaded, but profileComplete: true every time, so the
+      // document came back complete with no birthdate and no age, discovery
+      // published it with age null, and requireProfile, which reads nothing
+      // but that flag, would let it into the deck: a profile this editor's own
+      // validate() refuses. Here the document is removed behind the editor,
+      // which is that state without the rest of the deletion. Before the probe
+      // below, which needs the document gone again.
+      await page.goto(base + '/profile.html', { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#profile-main:not(.hidden)');
+      const birthdateShown = await page.inputValue('#input-birthdate');
+      await emulator(FIRESTORE, 'DELETE', DOCS + '/users/' + uid);
+      const orphanBio = 'Saved from an editor opened before its document went.';
+      await page.fill('#input-bio', orphanBio);
+      await page.click('#save-btn');
+      // Bounded, so a save that never lands is reported by the check below.
+      await page.waitForFunction(function () {
+        return !document.getElementById('save-btn').hasAttribute('aria-busy') &&
+          /^Saved/.test(document.getElementById('save-status').textContent.trim());
+      }, null, { timeout: 15000 }).catch(function () {});
+      const reborn = await awaitDoc('users/' + uid, function (doc) {
+        return !!doc.profile && doc.profile.bio === orphanBio;
+      });
+      const rebornPublic = await awaitDoc('discovery/' + uid, function (doc) {
+        return !!doc.profile && doc.profile.bio === orphanBio;
+      });
+      const claimed = function (doc) {
+        return !doc ? null : { complete: doc.profileComplete, birthdate: (doc.profile || {}).birthdate, age: (doc.profile || {}).age };
+      };
+      t.check('a profile save into a users/{uid} removed behind the editor claims a complete profile only with its birthdate',
+        birthdateShown !== '' && !!reborn && reborn.profile.bio === orphanBio && !!rebornPublic &&
+          (reborn.profileComplete !== true ||
+            (reborn.profile.birthdate === birthdateShown && typeof reborn.profile.age === 'number' && reborn.profile.age >= 18)) &&
+          (rebornPublic.profileComplete !== true || rebornPublic.profile.age === reborn.profile.age),
+        JSON.stringify({ users: claimed(reborn), discovery: claimed(rebornPublic), shown: birthdateShown }));
+
       await emulator(FIRESTORE, 'DELETE', DOCS + '/users/' + uid);
       const recreate = await page.evaluate(function (id) {
         return window.ZC.store.updateUser(id, { displayName: 'Recreated by updateUser' })
@@ -684,7 +803,8 @@ module.exports = {
       // session ending is not mistaken for another tab's doing, and that mark
       // used to outlive a failure. A sign-out in another tab afterwards then
       // changed nothing here, and the page stayed up as the account that had
-      // left. Run last, because it ends the session.
+      // left. Run after everything this account does, because it ends the
+      // session.
       const failed = await page.evaluate(function () {
         const fb = window.ZC.firebase.auth;
         const real = fb.signOut;
@@ -707,6 +827,76 @@ module.exports = {
         failed && failed.ok === false && movedTo.indexOf(base + '/') === 0 &&
           h.pageUrl('auth').test(movedTo) && /[?&]next=/.test(movedTo),
         JSON.stringify(failed) + ' · ' + movedTo);
+
+      /* ---- two accounts whose identity the app did not choose ---- */
+
+      // Both are made in the Auth emulator directly, the way a provider makes
+      // one, and then signed into through the form like any other account.
+      // The first carries the name Google would hand over for somebody called
+      // this: seventy characters, where firestore.rules allow a users/{uid}
+      // sixty. Its create was refused on every page load, so it never got a
+      // document, and onboarding ended at "We could not find your profile
+      // document" however many times it signed out and back in.
+      const longName = 'Maria Fernanda de los Angeles Garcia-Rodriguez Montenegro y Bustamante';
+      const longEmail = 'e2e-long-' + Date.now() + '@example.com';
+      const longMade = await emulator(AUTH, 'POST', '/identitytoolkit.googleapis.com/v1/accounts:signUp?key=emulator-api-key',
+        { email: longEmail, password: password, displayName: longName, returnSecureToken: true });
+      const longUid = longMade.body && longMade.body.localId;
+      await signInThroughForm(longEmail);
+      await page.waitForURL(h.pageUrl('profile'));
+      await page.waitForSelector('#profile-main:not(.hidden), #profile-error:not(.hidden)');
+      const longPage = await page.evaluate(function () {
+        const error = document.getElementById('profile-error');
+        return {
+          editor: !document.getElementById('profile-main').classList.contains('hidden'),
+          error: error.classList.contains('hidden') ? '' : (error.textContent || '').trim()
+        };
+      });
+      const longDoc = await awaitDoc('users/' + longUid);
+      t.check('an account whose provider name is longer than the rules allow still gets users/{uid}',
+        !!longUid && !!longDoc && longDoc.email === longEmail && longDoc.displayName === longName.slice(0, 40),
+        longDoc ? 'displayName=' + JSON.stringify(longDoc.displayName) : 'no document for ' + longUid);
+      t.check('and onboarding opens the editor for it, not a dead end',
+        longPage.editor && !longPage.error, JSON.stringify(longPage));
+      await page.evaluate(function () { return window.ZC.auth.signOut(); });
+
+      // The second has a finished profile whose stored email is not its
+      // account's: what updateUser's upsert used to leave behind (email ''),
+      // and what an address changed outside the app leaves. auth.js corrects
+      // it on every page load; the rules refused every correction, and the
+      // refusal swapped the stored profile for a blank one, so every page
+      // sent this finished account back through onboarding.
+      const staleEmail = 'e2e-stale-' + Date.now() + '@example.com';
+      const staleMade = await emulator(AUTH, 'POST', '/identitytoolkit.googleapis.com/v1/accounts:signUp?key=emulator-api-key',
+        { email: staleEmail, password: password, returnSecureToken: true });
+      const staleUid = staleMade.body && staleMade.body.localId;
+      const staleSeed = Object.assign(userDoc({ uid: staleUid, name: 'Stale Address', age: 31, gender: 'woman' }), { email: '' });
+      await emulator(FIRESTORE, 'PATCH', DOCS + '/users/' + staleUid, { fields: encodeFields(staleSeed) });
+      await signInThroughForm(staleEmail);
+      // The deck renders only once requireProfile has passed, and the profile
+      // editor only once it has not, so whichever appears first is the answer.
+      await page.waitForSelector('#deck-stack .swipe-card, #profile-main:not(.hidden), #profile-error:not(.hidden)');
+      const staleAt = page.url();
+      const staleDoc = await awaitDoc('users/' + staleUid, function (doc) { return doc.email === staleEmail; });
+      t.check('a finished account stored with the wrong email reaches the deck, not onboarding',
+        h.pageUrl('dashboard').test(staleAt), staleAt.replace(base, ''));
+      t.check('and the stored email is corrected to the account\'s own',
+        !!staleDoc && staleDoc.email === staleEmail && staleDoc.profileComplete === true,
+        staleDoc ? 'email=' + JSON.stringify(staleDoc.email) : 'no document');
+
+      /**
+       * Sign in through auth.html as an account made in the Auth emulator.
+       * @param {string} address its email; the password is the spec's own
+       * @returns {Promise<void>}
+       */
+      async function signInThroughForm(address) {
+        await page.goto(base + '/auth.html', { waitUntil: 'domcontentloaded' });
+        await page.waitForSelector('#auth-form');
+        await page.fill('#input-email', address);
+        await page.fill('#input-password', password);
+        await page.click('#submit-btn');
+        await page.waitForURL(function (url) { return !h.pageUrl('auth').test(url.href); });
+      }
     } finally {
       await server.stop();
     }

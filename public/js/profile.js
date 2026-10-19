@@ -330,32 +330,63 @@
   const chipInputs = {};
   const chipLabels = {};
   let tagOrder = [];
-  let baseline = '';
+  // The stored value of every field, as snapshot() writes it, as of the last
+  // load or save. Kept field by field because a save sends only the fields
+  // that differ from it, and the birthdate, which goes with every save (see
+  // buildPatch). A field is sent whole: the five personality sliders are one
+  // field, as are the interests and the photos, so when two profile tabs each
+  // move a different slider, the later save puts the earlier one's slider
+  // back.
+  let baseline = {};
   let savedText = 'Everything here is saved.';
   let saving = false;
   let leaving = false;
+  // Whether the form has been painted from a stored document yet.
+  let painted = false;
   const onboarding = util.qs('onboarding') === '1';
 
   /**
-   * A stable string of everything the Save button would write. Comparing it
-   * with the copy taken at load is all the unsaved-changes tracking we need.
-   * @returns {string}
+   * A stable string for each field the Save button can write, normalised the
+   * way it is written. Comparing it with the baseline is all the unsaved-changes
+   * tracking we need, and it is also how a save knows which fields to send.
+   * @param {Object} [source] values shaped like `state`; `state` when omitted
+   * @returns {Object} field name to JSON string
    */
-  function snapshot() {
-    return JSON.stringify({
-      displayName: state.displayName.trim(),
-      birthdate: state.birthdate,
-      gender: state.gender,
-      pronouns: state.pronouns.trim(),
-      bio: state.bio.trim(),
-      interests: state.interests,
-      personality: state.personality,
-      coords: state.coords,
-      locationLabel: state.locationLabel.trim(),
-      photos: state.photos,
-      showAge: state.showAge,
-      showDistance: state.showDistance
-    });
+  function snapshot(source) {
+    const s = source || state;
+    const values = {
+      displayName: s.displayName.trim(),
+      birthdate: s.birthdate,
+      gender: s.gender,
+      pronouns: s.pronouns.trim(),
+      bio: s.bio.trim(),
+      interests: s.interests,
+      personality: s.personality,
+      coords: s.coords,
+      locationLabel: s.locationLabel.trim(),
+      photos: s.photos,
+      showAge: s.showAge,
+      showDistance: s.showDistance
+    };
+    const out = {};
+    Object.keys(values).forEach(function (key) { out[key] = JSON.stringify(values[key]); });
+    return out;
+  }
+
+  /**
+   * The fields of a snapshot that differ from the baseline: the ones a save
+   * sends, besides the birthdate that goes with the flag on the save that
+   * completes a profile (see buildPatch). The coordinates and the label are
+   * written together, as
+   * `profile.location`, so a change to either sends both.
+   * @param {Object} current a snapshot()
+   * @returns {string[]} field names
+   */
+  function fieldsToSend(current) {
+    const keys = Object.keys(current).filter(function (key) { return current[key] !== baseline[key]; });
+    if (keys.indexOf('coords') !== -1 && keys.indexOf('locationLabel') === -1) keys.push('locationLabel');
+    if (keys.indexOf('locationLabel') !== -1 && keys.indexOf('coords') === -1) keys.push('coords');
+    return keys;
   }
 
   /**
@@ -363,7 +394,7 @@
    * @returns {void}
    */
   function markDirty() {
-    state.dirty = snapshot() !== baseline;
+    state.dirty = fieldsToSend(snapshot()).length > 0;
     const text = state.dirty ? 'Unsaved changes.' : savedText;
     // Only write when it actually changed: this is a live region, and it runs
     // on every keystroke.
@@ -376,77 +407,109 @@
      ------------------------------------------------------------------------ */
 
   /**
-   * Copy a UserDoc into the editor's state, dropping anything that no longer
-   * matches the contract (unknown interest slugs, non-https photos).
+   * The editable fields of a UserDoc, shaped like `state`, dropping anything
+   * that no longer matches the contract (unknown interest slugs, non-https
+   * photos).
+   * @param {Object} doc UserDoc
+   * @returns {Object} the fields snapshot() reads
+   */
+  function fromDoc(doc) {
+    const user = doc || {};
+    const profile = user.profile || {};
+    const personality = profile.personality || {};
+    const known = ZC.INTEREST_BY_SLUG || {};
+    const out = {};
+
+    out.displayName = String(user.displayName || '');
+    out.birthdate = typeof profile.birthdate === 'string' ? profile.birthdate : '';
+    out.gender = GENDERS[profile.gender] ? profile.gender : 'other';
+    out.pronouns = String(profile.pronouns || '');
+    out.bio = String(profile.bio || '').slice(0, BIO_MAX);
+
+    out.interests = (Array.isArray(profile.interests) ? profile.interests : [])
+      .filter(function (slug) { return typeof slug === 'string' && known[slug]; })
+      .slice(0, MAX_INTERESTS);
+
+    out.personality = {};
+    AXES.forEach(function (axis) {
+      const raw = Number(personality[axis.key]);
+      // A missing axis means "no opinion", which is the middle, not zero.
+      out.personality[axis.key] = isFinite(raw) ? Math.round(util.clamp(raw, 0, 100)) : 50;
+    });
+
+    const location = profile.location;
+    if (location && isFinite(Number(location.lat)) && isFinite(Number(location.lng))) {
+      out.coords = { lat: Number(location.lat), lng: Number(location.lng) };
+      out.locationLabel = String(location.label || '');
+    } else {
+      out.coords = null;
+      out.locationLabel = '';
+    }
+
+    out.photos = (Array.isArray(profile.photos) ? profile.photos : [])
+      .map(function (url) { return typeof url === 'string' ? url.trim() : ''; })
+      .filter(function (url) { return /^https:\/\//i.test(url); })
+      .slice(0, MAX_PHOTOS);
+
+    out.showAge = profile.showAge !== false;
+    out.showDistance = profile.showDistance !== false;
+    return out;
+  }
+
+  /**
+   * Copy a UserDoc into the editor's state.
    * @param {Object} doc UserDoc
    * @returns {void}
    */
   function readDoc(doc) {
     const user = doc || {};
-    const profile = user.profile || {};
-    const personality = profile.personality || {};
-    const known = ZC.INTEREST_BY_SLUG || {};
-
     state.doc = user;
     state.uid = user.uid || state.uid;
-    state.displayName = String(user.displayName || '');
-    state.birthdate = typeof profile.birthdate === 'string' ? profile.birthdate : '';
-    state.gender = GENDERS[profile.gender] ? profile.gender : 'other';
-    state.pronouns = String(profile.pronouns || '');
-    state.bio = String(profile.bio || '').slice(0, BIO_MAX);
-
-    state.interests = (Array.isArray(profile.interests) ? profile.interests : [])
-      .filter(function (slug) { return typeof slug === 'string' && known[slug]; })
-      .slice(0, MAX_INTERESTS);
-
-    AXES.forEach(function (axis) {
-      const raw = Number(personality[axis.key]);
-      // A missing axis means "no opinion", which is the middle, not zero.
-      state.personality[axis.key] = isFinite(raw) ? Math.round(util.clamp(raw, 0, 100)) : 50;
-    });
-
-    const location = profile.location;
-    if (location && isFinite(Number(location.lat)) && isFinite(Number(location.lng))) {
-      state.coords = { lat: Number(location.lat), lng: Number(location.lng) };
-      state.locationLabel = String(location.label || '');
-    } else {
-      state.coords = null;
-      state.locationLabel = '';
-    }
-
-    state.photos = (Array.isArray(profile.photos) ? profile.photos : [])
-      .map(function (url) { return typeof url === 'string' ? url.trim() : ''; })
-      .filter(function (url) { return /^https:\/\//i.test(url); })
-      .slice(0, MAX_PHOTOS);
-
-    state.showAge = profile.showAge !== false;
-    state.showDistance = profile.showDistance !== false;
+    Object.assign(state, fromDoc(user));
   }
 
   /**
-   * Write the state into every control. Used on load and on discard.
-   * @returns {void}
+   * Every control the form is painted into, with what the state puts there.
+   * Each change the person makes is written into the state as it happens, and
+   * this page sets a control only from the state, so the two only part when
+   * something else sets one, as the browser does on Back.
+   * @returns {Array<Array>} [control, property, value, field] for each, where
+   *   field is the snapshot() key the value comes from
    */
-  function paintForm() {
-    refs.name.value = state.displayName;
-    refs.birthdate.value = state.birthdate;
-    refs.gender.value = state.gender;
-    refs.pronouns.value = state.pronouns;
-    refs.bio.value = state.bio;
-    refs.location.value = state.locationLabel;
-    refs.showAge.checked = state.showAge;
-    refs.showDistance.checked = state.showDistance;
+  function controlValues() {
+    const values = [
+      [refs.name, 'value', state.displayName, 'displayName'],
+      [refs.birthdate, 'value', state.birthdate, 'birthdate'],
+      [refs.gender, 'value', state.gender, 'gender'],
+      [refs.pronouns, 'value', state.pronouns, 'pronouns'],
+      [refs.bio, 'value', state.bio, 'bio'],
+      [refs.city, 'value', citySelectValue(), 'locationLabel'],
+      [refs.location, 'value', state.locationLabel, 'locationLabel'],
+      [refs.showAge, 'checked', state.showAge, 'showAge'],
+      [refs.showDistance, 'checked', state.showDistance, 'showDistance']
+    ];
 
     AXES.forEach(function (axis) {
       const slider = id('range-' + axis.key);
-      if (slider) slider.value = String(state.personality[axis.key]);
+      if (slider) values.push([slider, 'value', String(state.personality[axis.key]), 'personality']);
     });
 
     tagOrder.forEach(function (slug) {
-      if (chipInputs[slug]) chipInputs[slug].checked = state.interests.indexOf(slug) !== -1;
+      if (chipInputs[slug]) values.push([chipInputs[slug], 'checked', state.interests.indexOf(slug) !== -1, 'interests']);
     });
+    return values;
+  }
 
-    syncCitySelect();
+  /**
+   * Write the state into every control but the photo-link box, which holds
+   * only what is being typed before Add, and clear every error. Used on load
+   * and on discard, where all of it is meant to go back to the stored
+   * document; a save that takes up fields changed elsewhere writes only those
+   * (see rebase).
+   * @returns {void}
+   */
+  function paintForm() {
+    controlValues().forEach(function (entry) { entry[0][entry[1]] = entry[2]; });
     applyInterestState();
     renderPhotos();
     updateBioCount();
@@ -746,16 +809,25 @@
   }
 
   /**
-   * Select the bundled city that matches the saved label, if any.
-   * @returns {void}
+   * The city picker's value for the saved label: the bundled city it names,
+   * or '' for none.
+   * @returns {string}
    */
-  function syncCitySelect() {
+  function citySelectValue() {
     const label = state.locationLabel.trim().toLowerCase();
     let match = '';
     CITIES.forEach(function (city, index) {
       if (city.label.toLowerCase() === label) match = String(index);
     });
-    refs.city.value = match;
+    return match;
+  }
+
+  /**
+   * Select the bundled city that matches the saved label, if any.
+   * @returns {void}
+   */
+  function syncCitySelect() {
+    refs.city.value = citySelectValue();
   }
 
   /**
@@ -1079,10 +1151,19 @@
      ------------------------------------------------------------------------ */
 
   /**
-   * Build the patch ZC.store.updateUser merges into the user document.
+   * Build the patch ZC.store.updateUser merges into the user document: only
+   * the fields that differ from the baseline, and the birthdate, which goes
+   * with profileComplete (see below). This used to be every field the
+   * editor had loaded, and the store's merge lets a patch win over whatever is
+   * stored, so with this page open in one tab and a rename saved from Settings
+   * in another, a save of the bio here wrote the old name back. A field left
+   * out is `undefined`, which the store's merge skips, so it stays as stored.
    * @returns {Object} partial UserDoc
    */
   function buildPatch() {
+    const send = fieldsToSend(snapshot());
+    const has = function (key) { return send.indexOf(key) !== -1; };
+
     const personality = {};
     AXES.forEach(function (axis) {
       personality[axis.key] = Math.round(util.clamp(state.personality[axis.key], 0, 100));
@@ -1103,32 +1184,101 @@
       ? { label: state.locationLabel.trim(), lat: state.coords.lat, lng: state.coords.lng }
       : null;
 
+    // Reaching a valid save means the account has a name and a verified 18+
+    // birthdate, which is exactly what requireProfile() waits for, so the save
+    // that finishes a profile says so — and carries the birthdate and its age
+    // with the flag, because the flag is a claim about them. Once the document
+    // this page holds is complete, the flag is left out and the birthdate goes
+    // only when it changed, like every other field. Sending them on every save
+    // instead put this tab's birthdate back over one changed since in another.
+    // A field left out stays as stored, and when users/{uid} is gone nothing is:
+    // a save from an editor opened before the data was deleted builds the
+    // document again from this patch and the signed-in account's uid, email and
+    // name (missingUserBase in data-store.js). The flag used to go every time,
+    // so that rebuilt document said profileComplete: true, which is all
+    // requireProfile() reads, with no birthdate and no age, and discovery/{uid}
+    // was published that way. Left out, the rebuilt document is incomplete,
+    // and the next page load sends the person through onboarding to fill it.
+    const completing = !(state.doc && state.doc.profileComplete);
+    const sendBirthdate = completing || has('birthdate');
+
     return {
-      displayName: state.displayName.trim(),
-      // Reaching a valid save means the account has a name and a verified
-      // 18+ birthdate, which is exactly what requireProfile() waits for.
-      profileComplete: true,
+      displayName: has('displayName') ? state.displayName.trim() : undefined,
+      profileComplete: completing ? true : undefined,
       profile: {
-        birthdate: state.birthdate || null,
-        age: state.birthdate ? util.ageFromBirthdate(state.birthdate) : null,
-        gender: state.gender,
-        pronouns: state.pronouns.trim(),
-        bio: state.bio.trim(),
-        photos: state.photos.slice(),
-        // Left out entirely when the interest list did not load. Loading filters
-        // the stored interests through that list, so without it `state.interests`
+        birthdate: sendBirthdate ? state.birthdate || null : undefined,
+        age: sendBirthdate ? (state.birthdate ? util.ageFromBirthdate(state.birthdate) : null) : undefined,
+        gender: has('gender') ? state.gender : undefined,
+        pronouns: has('pronouns') ? state.pronouns.trim() : undefined,
+        bio: has('bio') ? state.bio.trim() : undefined,
+        photos: has('photos') ? state.photos.slice() : undefined,
+        // Left out whenever the interest list did not load. Loading filters the
+        // stored interests through that list, so without it `state.interests`
         // is empty — not because the person has none, but because nothing here
         // could recognise them — and writing it back erased every interest they
         // had, on a save of their bio, beside a form saying interests "cannot be
-        // edited right now". `undefined` is skipped by the store's merge, so the
-        // stored list stays exactly as it was.
-        interests: vocabularyLoaded() ? state.interests.slice() : undefined,
-        personality: personality,
-        location: location,
-        showAge: !!state.showAge,
-        showDistance: !!state.showDistance
+        // edited right now". Without the list there are no chips to change, so
+        // the field cannot differ from the baseline either; the check stays so
+        // that this never rests on that alone.
+        interests: has('interests') && vocabularyLoaded() ? state.interests.slice() : undefined,
+        personality: has('personality') ? personality : undefined,
+        location: has('coords') ? location : undefined,
+        showAge: has('showAge') ? !!state.showAge : undefined,
+        showDistance: has('showDistance') ? !!state.showDistance : undefined
       }
     };
+  }
+
+  /**
+   * Take a saved document as the new baseline. For the fields this save sent,
+   * the baseline is the value sent, not the one the store returned. For every
+   * other field it is the document as it now stands, which is not always what
+   * this page loaded: a rename saved from Settings in another tab lands in
+   * between. Those are taken into the form as well, unless they were edited
+   * while the save was in flight, so that "Saved just now." is true of every
+   * box on screen and Discard goes back to what is actually stored.
+   *
+   * Only the controls of the fields taken up are written, only where they
+   * disagree with the state, as the pageshow handler does it, and no error is
+   * cleared. Only the button that started a save is disabled while it is in
+   * flight, so the person can be part-way through something else when it
+   * lands. This used to repaint the whole form, which emptied a date typed
+   * halfway — writing '' into one clears it, though it already reads as '' —
+   * and wiped the error under a photo link that Add had just refused, leaving
+   * the link in its box with nothing said about it.
+   * @param {Object} sent the snapshot() the patch was built from
+   * @param {Object} updated the UserDoc the store returned
+   * @returns {void}
+   */
+  function rebase(sent, updated) {
+    const send = fieldsToSend(sent);
+    const fresh = fromDoc(updated);
+    const stored = snapshot(fresh);
+    const now = snapshot();
+    const next = {};
+    const moved = [];
+    Object.keys(sent).forEach(function (key) {
+      if (send.indexOf(key) !== -1) {
+        next[key] = sent[key];
+        return;
+      }
+      next[key] = stored[key];
+      if (stored[key] !== baseline[key] && now[key] === baseline[key]) {
+        state[key] = fresh[key];
+        moved.push(key);
+      }
+    });
+    baseline = next;
+
+    const took = function (key) { return moved.indexOf(key) !== -1; };
+    controlValues().forEach(function (entry) {
+      if (took(entry[3]) && entry[0][entry[1]] !== entry[2]) entry[0][entry[1]] = entry[2];
+    });
+    if (took('interests')) applyInterestState();
+    if (took('photos')) renderPhotos();
+    if (took('bio')) updateBioCount();
+    if (took('personality')) updateAxisOutputs();
+    if (took('coords')) updateLocationStatus();
   }
 
   /**
@@ -1165,11 +1315,14 @@
       const sent = snapshot();
       const patch = buildPatch();
       const updated = await ZC.store.updateUser(state.uid, patch);
-      if (updated) state.doc = updated;
-      baseline = sent;
+      if (updated) {
+        state.doc = updated;
+        rebase(sent, updated);
+      } else {
+        baseline = sent;
+      }
       savedText = 'Saved just now.';
-      markDirty();
-      renderHero();
+      refreshAll();
       // Let the rest of the app (nav, deck, matches) see the new document.
       if (ZC.auth && typeof ZC.auth.refresh === 'function') await ZC.auth.refresh();
       toast(opts.savedMessage || 'Profile saved.', 'success');
@@ -1336,6 +1489,35 @@
       event.preventDefault();
       event.returnValue = '';
     });
+
+    // Back and Forward. Chromium puts the form's controls back the way they
+    // were left — all but pronouns, which is autocomplete=off — after the
+    // `load` event and before this one, and fires no input event. In demo mode
+    // the form has been painted from the stored document by then, so the boxes
+    // showed text the editor did not hold: "Everything here is saved." beside
+    // an abandoned edit, and a Save that wrote the stored text and said "Saved
+    // just now." over it. Each control is set back to the editor's state rather
+    // than read into it, because a restored box is not always an edit: it can
+    // be the name this page showed before a rename was saved in Settings, and
+    // taking it up would save the old name back. Leaving an unsaved edit behind
+    // is what the "Leave site?" prompt above asks about. The counters, slider
+    // read-outs, preview and save line are drawn from the state, so they were
+    // right all along and need nothing.
+    //
+    // Only the controls that disagree with the state are touched, and the
+    // errors are left alone. This event ends every load, not only Back, and
+    // this page's `load` waits for the person's photos, so they can be using
+    // the editor before it: repainting the whole form here would wipe the
+    // error a Save had just shown and a date typed halfway, which reads as ''
+    // just as the state does. The photo link box comes back too and is left as
+    // it is: nothing in it counts until Add. A page restored whole from the
+    // back/forward cache kept its state along with its controls.
+    window.addEventListener('pageshow', function (event) {
+      if (event.persisted || !painted) return;
+      controlValues().forEach(function (entry) {
+        if (entry[0][entry[1]] !== entry[2]) entry[0][entry[1]] = entry[2];
+      });
+    });
   }
 
   /**
@@ -1436,6 +1618,7 @@
       }
       readDoc(doc);
       paintForm();
+      painted = true;
       baseline = snapshot();
       savedText = 'Everything here is saved.';
       markDirty();

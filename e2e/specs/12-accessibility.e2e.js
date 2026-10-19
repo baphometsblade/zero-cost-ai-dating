@@ -330,6 +330,146 @@ module.exports = {
     t.check('and the swipe is spoken, so the region is written to and not merely present',
       spoken.length > 0 && spoken !== status.text, JSON.stringify(spoken.slice(0, 60)));
 
+    /* ---- the full explanation is read with the arrow keys ---- */
+
+    // "I" opens "Why this card, in full" and puts the focus in it, and the page
+    // is then taller than the screen, so the arrows are how a keyboard reads
+    // it. ArrowDown, which the deck does not bind, scrolled. ArrowUp is the
+    // deck's super like, and it spent the free plan's one a day on the person
+    // being read about. Whether the key was left to the browser is read in the
+    // window's own listener, which runs after the deck's: that answer does not
+    // depend on how quickly the store would have let a super like through.
+    await page.waitForFunction(function () {
+      return /likes left today/.test((document.getElementById('usage-hint') || {}).textContent || '');
+    }, null, { timeout: 5000 }).catch(function () {});
+    await page.focus('#deck-stack .swipe-card');
+    const reading = await page.evaluate(function () {
+      return document.querySelector('#deck-stack .swipe-card').getAttribute('aria-label');
+    });
+    await page.keyboard.press('i');
+    const panelOpen = await page.waitForSelector('#deck-details:not(.hidden)', { timeout: 5000 })
+      .then(function () { return true; }, function () { return false; });
+    const hintBefore = await page.textContent('#usage-hint');
+    await page.evaluate(function () {
+      window.__zcArrowUp = null;
+      window.addEventListener('keydown', function (event) {
+        if (event.key === 'ArrowUp') window.__zcArrowUp = { prevented: event.defaultPrevented };
+      });
+    });
+    await page.keyboard.press('ArrowUp');
+    const readOn = await page.evaluate(function () {
+      const card = document.querySelector('#deck-stack .swipe-card:not([data-exiting])');
+      const panel = document.getElementById('deck-details');
+      return {
+        key: window.__zcArrowUp,
+        focusInPanel: !!(panel && panel.contains(document.activeElement)),
+        top: card ? card.getAttribute('aria-label') : null,
+        hint: (document.getElementById('usage-hint') || {}).textContent || ''
+      };
+    });
+    t.check('ArrowUp inside the full explanation is left to the browser to scroll with, and spends nothing',
+      panelOpen && readOn.focusInPanel && !!readOn.key && readOn.key.prevented === false &&
+        readOn.top === reading && readOn.hint === hintBefore,
+      JSON.stringify({ panelOpen: panelOpen, key: readOn.key, focusInPanel: readOn.focusInPanel }) +
+        (readOn.top === reading ? '' : ' top: ' + reading + ' -> ' + readOn.top) +
+        (readOn.hint === hintBefore ? '' : ' hint: ' + hintBefore + ' -> ' + readOn.hint));
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('#deck-details', { state: 'hidden', timeout: 5000 }).catch(function () {});
+    await h.closeBurst(page);
+
+    /* ---- a button that its own press disables keeps the keyboard on the deck ---- */
+
+    // Spending the day's last super like disables the Super button, and a
+    // disabled button cannot hold the focus: Chromium drops it on <body> the
+    // moment the button is disabled, and a screen reader loses its place with
+    // it, in the middle of the deck. Somebody who has already liked this
+    // account would raise the match overlay, which takes the focus for itself,
+    // so this would fail whatever the deck did; the card on top is one of the
+    // others first.
+    const likers = await page.evaluate(function () {
+      return window.ZC.store.getLikesReceived(window.ZC.auth.current.uid).then(function (list) {
+        return list.map(function (doc) { return doc.uid; });
+      });
+    });
+    for (let i = 0; i < 10; i += 1) {
+      const onTop = await page.evaluate(function () {
+        const node = document.querySelector('#deck-stack .swipe-card:not([data-exiting])');
+        return node ? node.dataset.uid : null;
+      });
+      if (!onTop || likers.indexOf(onTop) === -1) break;
+      await h.pressDeckKey(page, 'ArrowLeft', await h.topCardName(page));
+    }
+    const superFrom = await h.topCardName(page);
+    await page.focus('#btn-super');
+    // Pressed from the button itself, with the day's super like still there to
+    // spend: a button that was disabled already could not be focused, and
+    // would leave this to measure wherever the focus happened to be.
+    const superReady = await page.evaluate(function () {
+      const button = document.getElementById('btn-super');
+      return !button.disabled && document.activeElement === button;
+    });
+    await page.keyboard.press('Enter');
+    const superMoved = await page.waitForFunction(function (name) {
+      const card = document.querySelector('#deck-stack .swipe-card:not([data-exiting])');
+      const on = card && card.querySelector('.swipe-name');
+      return !on || on.textContent.trim() !== name;
+    }, superFrom, { timeout: 5000 }).then(function () { return true; }, function () { return false; });
+    const afterSuper = await page.evaluate(function () {
+      const card = document.querySelector('#deck-stack .swipe-card:not([data-exiting])');
+      const active = document.activeElement;
+      return {
+        disabled: document.getElementById('btn-super').disabled,
+        onTopCard: !!card && active === card,
+        active: !active || active === document.body ? 'BODY' : active.tagName + (active.id ? '#' + active.id : ''),
+        burst: !!document.querySelector('.match-burst')
+      };
+    });
+    t.check('spending the last super like from its button leaves the focus on the next card, not on the document',
+      superReady && superMoved && afterSuper.disabled && afterSuper.onTopCard && !afterSuper.burst,
+      JSON.stringify(Object.assign({ pressedFromAnEnabledButton: superReady, deckMoved: superMoved }, afterSuper)));
+    await h.closeBurst(page);
+
+    // Retry rebuilds the deck from nothing, and on the way it shows a skeleton
+    // with no control in it: the button that had the focus is gone, and the
+    // render that brought the cards back did not know anybody had been there.
+    // The deck's first read is made to fail once, from before the page script
+    // runs and only when the address asks for it, so nothing else here sees it.
+    await page.addInitScript(function () {
+      if (!/[?&]zcdeckfail=1(&|$)/.test(window.location.search)) return;
+      document.addEventListener('DOMContentLoaded', function () {
+        const store = window.ZC && window.ZC.store;
+        if (!store) return;
+        const real = store.listCandidates;
+        let failed = false;
+        store.listCandidates = function () {
+          if (failed) return real.apply(store, arguments);
+          failed = true;
+          return Promise.reject(new Error('e2e: the first deck read is made to fail'));
+        };
+      });
+    });
+    ctx.session.expectConsoleError(/The deck failed to load/);
+    await page.goto(ctx.base + '/dashboard.html?zcdeckfail=1', { waitUntil: 'domcontentloaded' });
+    const retry = page.locator('#deck-stack button', { hasText: 'Retry' });
+    const failedFirst = await retry.waitFor({ timeout: 5000 }).then(function () { return true; }, function () { return false; });
+    if (failedFirst) {
+      await retry.focus();
+      await page.keyboard.press('Enter');
+      await page.waitForSelector('#deck-stack .swipe-card', { timeout: 5000 }).catch(function () {});
+    }
+    ctx.session.expectConsoleError(null);
+    const afterRetry = await page.evaluate(function () {
+      const card = document.querySelector('#deck-stack .swipe-card:not([data-exiting])');
+      const active = document.activeElement;
+      return {
+        card: !!card,
+        onTopCard: !!card && active === card,
+        active: !active || active === document.body ? 'BODY' : active.tagName + (active.id ? '#' + active.id : '')
+      };
+    });
+    t.check('Retry, pressed from the keyboard, leaves the focus on the deck it brought back',
+      failedFirst && afterRetry.onTopCard, JSON.stringify(Object.assign({ errorStateShown: failedFirst }, afterRetry)));
+
     /* ---- the pane swap that was stranding people ---- */
 
     await page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
@@ -397,6 +537,203 @@ module.exports = {
       t.check('and specifically on the composer, which is what you came to do',
         inThread.id === 'chat-input', JSON.stringify(inThread.id));
     }
+
+    // The new-matches strip opens the same conversations as the rows, and was a
+    // bare link: Enter on it loaded the whole page again, which then took the
+    // `?m=` it arrived with for a link somebody followed and left focus on
+    // <body>. The marker is set on this document, so it survives only a pane
+    // swap; a reload starts a document without it.
+    await page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#new-matches .new-match');
+    await page.evaluate(function () { window.__zcStripDocument = true; });
+    await page.locator('#new-matches .new-match').first().focus();
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('#chat-input', { state: 'visible' });
+    const fromStrip = await page.evaluate(function () {
+      const node = document.activeElement;
+      return {
+        sameDocument: window.__zcStripDocument === true,
+        focus: !node || node === document.body ? 'body' : (node.id ? '#' + node.id : node.tagName.toLowerCase())
+      };
+    });
+    t.check('opening a new match from the strip swaps the pane in place and puts focus on the composer',
+      fromStrip.sameDocument && fromStrip.focus === '#chat-input', JSON.stringify(fromStrip));
+
+    /* ---- focus is never scrolled under the header or the tab bar ---- */
+
+    // The header is sticky and the phone's tab bar is fixed, and both are
+    // translucent and blurred. When Tab or Shift+Tab moves focus to a control
+    // off screen, the browser scrolls it flush to the edge of the viewport —
+    // which is where the bar is — unless the page says how much of that edge
+    // is taken. Nothing did, and the focused control landed entirely under a
+    // bar, a smear behind its icons (WCAG 2.2, 2.4.11 Focus Not Obscured).
+    // Measured by this walk: on a phone, 16 of the 184 stops it makes — 7 of
+    // them under the tab bar going forwards, 9 under the header going
+    // backwards — and on a desktop, 7 of the profile's under the header going
+    // backwards.
+    //
+    // Under reduced motion, so each scroll lands before the press returns and
+    // is read without waiting for it: html's smooth scrolling ends where the
+    // instant one does, but only later. Both pages are walked both ways,
+    // because the header hides what Shift+Tab reaches and the tab bar what
+    // Tab reaches.
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    const buried = [];
+    let walked = 0;
+    for (const name of ['settings.html', 'profile.html']) {
+      for (const key of ['Tab', 'Shift+Tab']) {
+        await page.goto(ctx.base + '/' + name, { waitUntil: 'domcontentloaded' });
+        await page.waitForSelector(name === 'profile.html' ? '#profile-main:not(.hidden) #interest-groups input' : '#theme-group');
+        await page.waitForSelector('[data-zc-nav] .nav-links', { state: 'attached' });
+        // Forwards starts from the top of the page; backwards from the last
+        // control in <main>, with the page scrolled to its end.
+        await page.evaluate(function (backwards) {
+          if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+          if (!backwards) {
+            window.scrollTo(0, 0);
+            return;
+          }
+          window.scrollTo(0, document.scrollingElement.scrollHeight);
+          const controls = Array.prototype.filter.call(
+            document.querySelectorAll('main a[href], main button:not([disabled]), main input:not([disabled]), main select, main textarea'),
+            function (node) { return node.getClientRects().length > 0; });
+          controls[controls.length - 1].focus();
+        }, key === 'Shift+Tab');
+        let stops = 0;
+        for (let i = 0; i < 160; i += 1) {
+          await page.keyboard.press(key);
+          const stop = await page.evaluate(function () {
+            const node = document.activeElement;
+            const main = document.querySelector('main');
+            if (!node || !main || !main.contains(node)) return null;
+            // A chip's or a switch's input is hidden inside its label, and
+            // the label is what a person sees take focus.
+            const box = (node.tagName === 'INPUT' && node.closest('label')) || node;
+            const rect = box.getBoundingClientRect();
+            const under = [['header', '[data-zc-nav]'], ['tab bar', '[data-zc-tabbar]']].filter(function (bar) {
+              const element = document.querySelector(bar[1]);
+              if (!element || getComputedStyle(element).display === 'none') return false;
+              const edge = element.getBoundingClientRect();
+              return rect.top >= edge.top - 0.5 && rect.bottom <= edge.bottom + 0.5;
+            }).map(function (bar) { return bar[0]; });
+            return {
+              label: (node.getAttribute('aria-label') || (box.textContent || '').trim() || node.name || node.id || node.tagName)
+                .replace(/\s+/g, ' ').slice(0, 30),
+              top: Math.round(rect.top),
+              bottom: Math.round(rect.bottom),
+              under: under[0] || ''
+            };
+          });
+          // Out of <main>: through the header or the tab bar on the way in,
+          // or past the last control on the way out.
+          if (!stop) {
+            if (stops > 0) break;
+            continue;
+          }
+          stops += 1;
+          if (stop.under) {
+            buried.push(name + ' ' + key + ': "' + stop.label + '" at y ' + stop.top + '..' + stop.bottom + ' under the ' + stop.under);
+          }
+        }
+        walked += stops;
+      }
+    }
+    // Walked both ways, settings and the profile make 184 stops in <main>; a
+    // walk that found far fewer stopped early and would pass by looking at
+    // nothing.
+    t.check('no control the keyboard reaches is scrolled to where the header or the tab bar covers it',
+      walked >= 150 && buried.length === 0,
+      walked + ' stops walked, ' + buried.length + ' covered' + (buried.length ? ': ' + buried.slice(0, 3).join('; ') : ''));
+
+    // That offset is for <main>'s controls, and the walk above records only
+    // those. The header's own controls sit inside the band it keeps clear and
+    // never leave the screen, so while it applied to them as well the browser
+    // took every one of them for covered: Shift+Tab out of <main> on a page
+    // scrolled part-way down moved the page up about 400px for each header
+    // link it reached, all of them in view all along. So each page starts
+    // part-way down and is walked backwards out of <main> through the header,
+    // and no stop there may move it. Then the focus steps into the header and
+    // straight back to a control parked under the header, and that step has
+    // to bring it out: lifting the offset for the header must not lift it for
+    // <main> as well.
+    const jumped = [];
+    const returns = [];
+    let headerStops = 0;
+    let lowestStart = Infinity;
+    for (const name of ['settings.html', 'profile.html']) {
+      await page.goto(ctx.base + '/' + name, { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector(name === 'profile.html' ? '#profile-main:not(.hidden) #interest-groups input' : '#theme-group');
+      await page.waitForSelector('[data-zc-nav] .nav-links', { state: 'attached' });
+      // Part-way down, with the focus on the first control in <main> and
+      // nothing scrolled to show it.
+      const start = await page.evaluate(function () {
+        if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+        window.scrollTo(0, Math.min(900, document.scrollingElement.scrollHeight - window.innerHeight));
+        Array.prototype.find.call(
+          document.querySelectorAll('main a[href], main button:not([disabled]), main input:not([disabled]), main select, main textarea'),
+          function (node) { return node.getClientRects().length > 0; }).focus({ preventScroll: true });
+        return Math.round(window.scrollY);
+      });
+      lowestStart = Math.min(lowestStart, start);
+      let stops = 0;
+      for (let i = 0; i < 20; i += 1) {
+        await page.keyboard.press('Shift+Tab');
+        const stop = await page.evaluate(function () {
+          const node = document.activeElement;
+          const nav = document.querySelector('[data-zc-nav]');
+          if (!node || !nav || !nav.contains(node)) return null;
+          return {
+            label: (node.getAttribute('aria-label') || (node.textContent || '').trim() || node.tagName).replace(/\s+/g, ' ').slice(0, 30),
+            y: Math.round(window.scrollY)
+          };
+        });
+        if (!stop) {
+          if (stops > 0) break;
+          continue;
+        }
+        stops += 1;
+        if (stop.y !== start) jumped.push(name + ': "' + stop.label + '" moved the page from y ' + start + ' to ' + stop.y);
+      }
+      headerStops += stops;
+
+      // The same control, 10px from the top of the screen: inside the
+      // viewport, so only the offset says it has to move.
+      const parked = await page.evaluate(function () {
+        if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+        const first = Array.prototype.find.call(
+          document.querySelectorAll('main a[href], main button:not([disabled]), main input:not([disabled]), main select, main textarea'),
+          function (node) { return node.getClientRects().length > 0; });
+        first.setAttribute('data-zc-parked', '');
+        const box = (first.tagName === 'INPUT' && first.closest('label')) || first;
+        window.scrollBy(0, box.getBoundingClientRect().top - 10);
+        first.focus({ preventScroll: true });
+        return Math.round(box.getBoundingClientRect().top);
+      });
+      await page.keyboard.press('Shift+Tab');
+      await page.keyboard.press('Tab');
+      returns.push(await page.evaluate(function (parkedAt) {
+        const first = document.querySelector('[data-zc-parked]');
+        first.removeAttribute('data-zc-parked');
+        const back = document.activeElement === first;
+        const top = ((first.tagName === 'INPUT' && first.closest('label')) || first).getBoundingClientRect().top;
+        const edge = document.querySelector('[data-zc-nav]').getBoundingClientRect().bottom;
+        return {
+          ok: back && parkedAt < edge && top >= edge - 0.5,
+          text: (back ? 'back' : 'not back') + ' on the control parked at y ' + parkedAt + ', now at ' + Math.round(top) +
+            ', the header ending at ' + Math.round(edge)
+        };
+      }, parked));
+    }
+    await page.emulateMedia({ reducedMotion: null });
+    // A page that started at the top could not be scrolled up by anything,
+    // and a walk that never reached the header looked at nothing.
+    t.check('focus moved into the sticky header leaves a page scrolled part-way down where it was',
+      lowestStart >= 300 && headerStops >= 2 && jumped.length === 0,
+      headerStops + ' header stops from y >= ' + lowestStart + ', ' + jumped.length + ' moved the page' +
+        (jumped.length ? ': ' + jumped.slice(0, 3).join('; ') : ''));
+    t.check('and focus moved back out of it into <main> is still kept clear of the header',
+      returns.length === 2 && returns.every(function (r) { return r.ok; }),
+      returns.map(function (r) { return r.text; }).join('; '));
 
     /* ---- the daily-limit banner: said once, not once a second ---- */
 

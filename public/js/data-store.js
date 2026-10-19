@@ -150,6 +150,16 @@
   const LIMIT_FIELDS = { likes: 'likesPerDay', superLikes: 'superLikesPerDay', rewinds: 'rewinds' };
 
   /**
+   * The longest display name firestore.rules accepts, on users/{uid} and on
+   * discovery/{uid} alike. The editors stop at 40, but a provider does not:
+   * Google hands over the account's own name, and a longer one made the
+   * account's create refused on every page load. normalizeUser cuts to this,
+   * so neither adapter can store a name the other could not, and
+   * tests/limits.test.js compares it with both rules.
+   */
+  const DISPLAY_NAME_MAX = 60;
+
+  /**
    * The canonical UserDoc with sane defaults. Treat it as read-only — every
    * writer merges a copy of it so all agents agree on the shape.
    */
@@ -261,6 +271,27 @@
     return out;
   }
 
+  /**
+   * A string cut to at most `max` UTF-16 units, at a character boundary.
+   * UTF-16 units are what firestore.rules' `size()` counts, measured against
+   * the emulator: thirty emoji, sixty units, were accepted under a cap of 60
+   * and thirty-one were refused. slice() alone can keep half of a surrogate
+   * pair, so the cut walks whole characters instead.
+   * @param {*} value text; null and undefined become ''
+   * @param {number} max the most UTF-16 units to keep
+   * @returns {string}
+   */
+  function clampText(value, max) {
+    const text = value === null || value === undefined ? '' : String(value);
+    if (text.length <= max) return text;
+    let out = '';
+    for (const ch of text) {
+      if (out.length + ch.length > max) break;
+      out += ch;
+    }
+    return out;
+  }
+
   function toIso(value) {
     const d = util.toDate ? util.toDate(value) : (value ? new Date(value) : null);
     return d ? d.toISOString() : null;
@@ -278,6 +309,7 @@
   function normalizeUser(doc) {
     const user = deepMerge(DEFAULT_USER, isPlainObject(doc) ? doc : {});
     user.uid = String(user.uid || '');
+    user.displayName = clampText(user.displayName, DISPLAY_NAME_MAX);
     user.plan = user.plan === 'premium' ? 'premium' : 'free';
     user.profileComplete = !!user.profileComplete;
     if (!Array.isArray(user.profile.photos)) user.profile.photos = [];
@@ -350,6 +382,28 @@
     const by = amount === undefined ? 1 : Number(amount) || 0;
     usage[field] = Math.max(0, usage[field] + by);
     return usage;
+  }
+
+  /**
+   * What updateUser merges a patch into when users/{uid} does not exist yet.
+   *
+   * Settings and Plans need a signed-in account, not a stored document, so
+   * they save through updateUser while auth.js holds an in-memory stand-in for
+   * a document its create could not write. Starting from `{ uid }` alone stored
+   * email '' and displayName '', and while firestore.rules froze email that ''
+   * could never be put right: auth.js's correction was refused on every later
+   * page load, and the refusal sent the account back through onboarding. The
+   * rules now accept a correction to the caller's own address, but a document
+   * written with it to begin with never needs one. The signed-in account's
+   * identity is what createUser would have been given; any other uid gets
+   * nothing from it.
+   * @param {string} uid the document being written
+   * @returns {Object} the base for the merge
+   */
+  function missingUserBase(uid) {
+    const current = ZC.auth && ZC.auth.current;
+    if (!current || current.uid !== uid) return { uid: uid };
+    return { uid: uid, email: current.email || '', displayName: current.displayName || '' };
   }
 
   /** A stand-in doc for a match whose other half is missing from storage. */
@@ -1076,7 +1130,7 @@
 
     async updateUser(uid, patch) {
       const users = readUsers();
-      const base = users[uid] || { uid: uid };
+      const base = users[uid] || missingUserBase(uid);
       const user = normalizeUser(deepMerge(base, patch || {}));
       user.uid = String(uid);
       user.updatedAt = nowIso();
@@ -1145,7 +1199,9 @@
       const existing = isPlainObject(swipes[id]) ? swipes[id] : null;
 
       // Mirror the Firestore adapter, where the rules make swipes create-or-delete only:
-      // an already-recorded decision stands and re-recording it writes nothing.
+      // an already-recorded decision stands, re-recording it writes no swipe, and the
+      // answer says so through `decidedEarlier`. The match check below still runs on
+      // the decision that stands.
       let effective = act;
       if (existing) {
         effective = normalizeAction(existing.action);
@@ -1180,7 +1236,8 @@
       // — a caller that read it that way would put the card back over a decision
       // already recorded, and the rules forbid overwriting one.
       try {
-        return demoMatchFor(fromUid, toUid, effective, swipes);
+        const outcome = demoMatchFor(fromUid, toUid, effective, swipes);
+        return existing ? decidedEarlier(outcome, effective) : outcome;
       } catch (err) {
         throw storedSwipeFailure(err);
       }
@@ -1890,24 +1947,39 @@
   }
 
   /**
-   * The last `usage` the SDK already holds for a user, without touching the
-   * network. Only reached when a bump's transaction failed before its read
-   * landed — offline, in practice. Without it the optimistic answer would
-   * restart the day at 1 for someone who had already spent twelve likes,
-   * which is a worse lie than "the last count we saw, plus this swipe".
-   * @param {Object} ref the users/{uid} document reference
-   * @returns {Promise<Object|null>} the cached usage record, or null when the
-   *   SDK has never seen this document
+   * The last `usage` this page saw stored for each user, by uid. Only read
+   * when a bump's transaction failed before its read landed — offline, in
+   * practice. Without it the optimistic answer would restart the day at 1 for
+   * someone who had already spent twelve likes, which is a worse lie than "the
+   * last count we saw, plus this swipe".
+   *
+   * Remembered here rather than asked of the SDK's cache, which is what this
+   * used to do, and which had nothing to answer with on the SDK the pages
+   * load. Measured against the emulator: after a server `get()` of
+   * users/{uid}, compat 10.12.2 — the version every page loads from gstatic —
+   * rejects `get({ source: 'cache' })` with `unavailable`, because its memory
+   * cache holds a document only while a listener is attached to it, and
+   * nothing in this file listens to users/{uid}. 12.18 and 12.19 answer from
+   * the earlier read. The store suite ran on 12.18, so the fallback passed
+   * there, while on 10.12.2 the same offline bump answered 1 for someone who
+   * had spent twelve. A map depends on no SDK, and lasts as long as that
+   * memory cache does here, with no persistence enabled: one page, which in
+   * this app is one navigation.
    */
-  async function cachedUsage(ref) {
-    try {
-      const snap = await ref.get({ source: 'cache' });
-      return snap.exists ? (snap.data() || {}).usage || null : null;
-    } catch (err) {
-      // Nothing cached. The caller then answers for a fresh day, which is
-      // genuinely all it knows.
-      return null;
-    }
+  const knownUsage = new Map();
+
+  /**
+   * Remember a usage record this page read from, or committed to, users/{uid}.
+   * `getUser` is the read `getUsage`, `canSpend` and `canSpendAll` go through,
+   * and a committed bump is newer than any read before it. A copy, because the
+   * record itself goes back to the caller (`getUser`'s `user.usage`, the
+   * committed bump's return value), and what a caller does to it must not
+   * change what the offline answer counts on from.
+   * @param {string} uid user id
+   * @param {Object|null} usage the stored usage record
+   */
+  function noteUsage(uid, usage) {
+    if (uid && usage) knownUsage.set(String(uid), cloneDeep(usage));
   }
 
   /* ----------------------------------------------------------------------
@@ -2463,6 +2535,30 @@
   }
 
   /**
+   * Mark a recordSwipe answer as one that found the pair already decided, so
+   * wrote no swipe, and name the decision that stands.
+   *
+   * That is not the same as writing nothing. The match check still runs on
+   * that decision, and a mutual pair whose match document is missing (what a
+   * failed match check leaves behind) gets it now, with `created: true` in the
+   * same answer.
+   *
+   * Both adapters answer through this one function, so the shape cannot drift
+   * between them. The deck needs the word: it announces a swipe before the
+   * store has answered, and it counts a like and folds it into the learning
+   * map afterwards. For a swipe that was never recorded, both of those used to
+   * happen anyway.
+   * @param {{matched:boolean, matchId:string|null, created:boolean}} outcome the match answer
+   * @param {string} action the action already stored, which is the one that stands
+   * @returns {Object} the same answer, with `existing: true` and that `action`
+   */
+  function decidedEarlier(outcome, action) {
+    outcome.existing = true;
+    outcome.action = action;
+    return outcome;
+  }
+
+  /**
    * The half of recordSwipe that runs once the swipe itself is stored: is this
    * mutual, and if so does the match document exist yet.
    * @param {string} fromUid the swiper
@@ -2500,7 +2596,9 @@
 
     async getUser(uid) {
       if (!uid) return null;
-      return docToUser(await db().collection('users').doc(uid).get());
+      const user = docToUser(await db().collection('users').doc(uid).get());
+      if (user) noteUsage(uid, user.usage);
+      return user;
     },
 
     async createUser(uid, partial) {
@@ -2553,7 +2651,7 @@
       const shadow = db().collection('discovery').doc(String(uid));
       return db().runTransaction(async function (tx) {
         const snap = await tx.get(ref);
-        const base = snap.exists ? snap.data() || {} : { uid: uid };
+        const base = snap.exists ? snap.data() || {} : missingUserBase(uid);
         const merged = normalizeUser(deepMerge(base, patch || {}));
         merged.uid = String(uid);
         if (!merged.createdAt) merged.createdAt = nowIso();
@@ -2731,8 +2829,10 @@
       // Swipes are immutable: the rules allow create and delete but never update, and a
       // set() over an existing document counts as an update. Re-recording the same pair
       // (two tabs on one deck, or a retry whose first write actually landed) therefore
-      // writes nothing and simply re-reports the outcome. Changing your mind goes through
-      // undoSwipe, which deletes the document so the next record creates it afresh.
+      // writes no swipe, runs the match check again on the decision that stands, and
+      // says the pair was decided already: see `decidedEarlier`. Changing your mind
+      // goes through undoSwipe, which deletes the document so the next record creates
+      // it afresh.
       let effective = act;
       if (existing.exists) {
         effective = normalizeAction((existing.data() || {}).action);
@@ -2759,11 +2859,12 @@
       // line above it and of nothing after.
       //
       // The distinction is not cosmetic. Putting the card back invites a second,
-      // contradictory decision, and a recorded swipe stands — the store would
-      // keep the first one and silently drop the second, leaving the deck
-      // showing a choice the account no longer has.
+      // contradictory decision, and a recorded swipe stands — the store keeps
+      // the first one and answers the second with the decision on record, so
+      // the deck would be showing a choice the account no longer has.
       try {
-        return await recordMatchFor(fromUid, toUid, effective);
+        const outcome = await recordMatchFor(fromUid, toUid, effective);
+        return existing.exists ? decidedEarlier(outcome, effective) : outcome;
       } catch (err) {
         throw storedSwipeFailure(err);
       }
@@ -3188,7 +3289,7 @@
       let seen = null;
       let read = false;
       try {
-        return await db().runTransaction(async function (tx) {
+        const committed = await db().runTransaction(async function (tx) {
           const snap = await tx.get(ref);
           seen = snap.exists ? (snap.data() || {}).usage : null;
           read = true;
@@ -3196,12 +3297,14 @@
           tx.update(ref, { usage: usage });
           return usage;
         });
+        noteUsage(uid, committed);
+        return committed;
       } catch (err) {
         // Transactions need a server round-trip, so they fail offline. A
         // counter that did not persist must never take the deck down: warn,
         // hand back the optimistic figure, carry on.
         console.warn('[zc.store] Could not persist usage.', err);
-        if (!read) seen = await cachedUsage(ref);
+        if (!read) seen = knownUsage.get(String(uid)) || null;
         return nextUsage(seen, field, by, today);
       }
     },
@@ -4066,11 +4169,16 @@
 
     /**
      * Write a swipe and create the match when the like is mutual. Idempotent:
-     * re-recording the same swipe never produces a second match.
+     * re-recording the same swipe never produces a second match. A pair that
+     * already has a decision keeps it, whatever `action` says: no swipe is
+     * written, and the answer carries `existing: true` and the `action` that
+     * stands. The match check still runs on that action, so a mutual pair
+     * whose match document is missing gets it then.
      * @param {string} fromUid swiper
      * @param {string} toUid swiped
      * @param {'like'|'pass'|'super'} action what they did
-     * @returns {Promise<{matched:boolean, matchId:string|null, created:boolean}>}
+     * @returns {Promise<{matched:boolean, matchId:string|null, created:boolean,
+     *   existing?:boolean, action?:string}>}
      */
     async recordSwipe(fromUid, toUid, action) {
       await ready;

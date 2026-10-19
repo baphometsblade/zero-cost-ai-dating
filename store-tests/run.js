@@ -8,7 +8,8 @@
      npm run test:store
 
    Exit codes: 0 all passed · 1 a check failed · 2 usage/crash ·
-   3 the testing packages are not installed (see harness.INSTALL_HINT).
+   3 the testing packages are not installed (see harness.INSTALL_HINT), or
+   ZC_STORE_SDK holds a compat SDK the pages do not load (see context.js).
    ========================================================================== */
 'use strict';
 
@@ -153,6 +154,14 @@ async function main() {
     return 2;
   }
 
+  // A pinned compat SDK that is not the pages' version is an install problem,
+  // and is said before anything boots. See context.sdkProblem.
+  const sdkProblem = context.sdkProblem();
+  if (sdkProblem) {
+    process.stderr.write(sdkProblem + '\n');
+    return 3;
+  }
+
   // A denial or an aborted transaction is logged by the SDK as an error, and
   // this suite provokes both on purpose.
   if (typeof firestoreSdk.setLogLevel === 'function') firestoreSdk.setLogLevel('silent');
@@ -164,8 +173,10 @@ async function main() {
   // nothing about atomicity. The separate project below carries the *real*
   // firestore.rules. 04-rules-accept, 13-messaging and 14-reports replay what
   // the store stored against it, as the account that wrote it; 08-conversation
-  // points the shipped undoSwipe at it as a signed-in user; and 19-write-cost
-  // opens a listener on it that the rules refuse to a signed-out caller.
+  // points the shipped undoSwipe at it as a signed-in user, and 04-rules-accept
+  // also points createUser and updateUser at it as an account with an email on
+  // its token; and 19-write-cost opens a listener on it that the rules refuse
+  // to a signed-out caller.
   const env = await testing.initializeTestEnvironment({
     projectId: harness.PROJECT_ID,
     firestore: { rules: harness.OPEN_RULES, host: address.host, port: address.port }
@@ -184,6 +195,15 @@ async function main() {
     await rulesEnv.cleanup();
     return 3;
   }
+
+  // Which SDK this run certifies. Two majors behave differently under the
+  // store (context.js says how), so a run on any version but the pages' is
+  // evidence about that version, and the log should not leave it to be guessed.
+  const shipped = context.shippedSdkVersion();
+  process.stdout.write('data-store.js driven through the firebase compat SDK ' + ctx.firebase.SDK_VERSION +
+    (ctx.firebase.SDK_VERSION === shipped
+      ? ', the version the pages load\n'
+      : '; the pages load ' + shipped + ' — set ZC_STORE_SDK to run on theirs (store-tests/context.js)\n'));
 
   const admin = adminAccess(env, firestoreSdk);
   const results = [];

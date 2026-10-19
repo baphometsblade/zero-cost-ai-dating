@@ -16,7 +16,7 @@ const BASE = new URL('./', self.location).pathname;
 
 // Bump the version to retire every previously cached asset on next activate.
 // v4: every earlier shell stored REDIRECTED responses on Firebase Hosting (see
-// `unredirected` below), so none of it may be served again.
+// `rebuilt` below), so none of it may be served again.
 // v5: v4 shells were precached through the browser's HTTP cache, which held
 // scripts for an hour against pages it did not, so one may mix two deploys.
 //
@@ -47,6 +47,7 @@ const CORE = [
   'manifest.webmanifest',
   'css/style.css',
   'css/components.css',
+  'js/theme-boot.js',
   'js/firebase-config.js',
   'js/utils.js',
   'js/seed-data.js',
@@ -62,7 +63,10 @@ const CORE = [
 ];
 
 /**
- * The same response, minus the fact that it was redirected.
+ * The response read in full and built again from its bytes: never redirected,
+ * and holding no connection open. Everything this worker stores goes through
+ * here, what the install stores and what a visit writes over it alike, so the
+ * copy an offline request is served is the same shape whichever wrote it last.
  *
  * Firebase Hosting runs with `cleanUrls: true`, which answers every request for
  * `something.html` with a 301 to `something`. So every page in CORE reaches this
@@ -74,29 +78,18 @@ const CORE = [
  * 200, which Hosting never does; `e2e/harness.js` now redirects the way Hosting
  * does, and `e2e/specs/07-offline.e2e.js` fails against the old worker.
  *
- * Rebuilding the response from its body gives the same status, headers and
- * bytes with a URL list of one. A response that was not redirected is returned
- * as it is — GitHub Pages serves `.html` directly, so there nothing changes.
+ * Rebuilding the response from its body gives the same status and bytes with
+ * a URL list of one, and the same headers less the two dropped below.
  * @param {Response} response a fetched response
- * @returns {Promise<Response>} one that is safe to hand to a navigation
- */
-function unredirected(response) {
-  return response.redirected ? rebuilt(response) : Promise.resolve(response);
-}
-
-/**
- * The response read in full and built again from its bytes: never redirected,
- * and holding no connection open.
- * @param {Response} response
- * @returns {Promise<Response>}
+ * @returns {Promise<Response>} one that is safe to store and to hand to a navigation
  */
 function rebuilt(response) {
   return response.blob().then(function (body) {
     // `blob()` hands back the DECODED bytes, so the headers that described the
     // bytes on the wire no longer describe this body. Copied as they were, the
     // stored page said `content-encoding: gzip` and `content-length: 2892` over
-    // 9,119 bytes of plain HTML — measured, with the e2e server gzipping the
-    // way Hosting does. Chromium serves that anyway; nothing here should depend
+    // 9,119 bytes of plain HTML — measured against a server gzipping the way
+    // Hosting does. Chromium serves that anyway; nothing here should depend
     // on every engine being as forgiving, so the two are dropped and the
     // browser takes the length from the body itself.
     const headers = new Headers(response.headers);
@@ -108,6 +101,27 @@ function rebuilt(response) {
       headers: headers
     });
   });
+}
+
+/**
+ * The name a page is cached under, from the URL a navigation asked for.
+ *
+ * The address bar need not say `matches.html`: on Firebase Hosting cleanUrls
+ * answers each page at its clean URL (`/matches`) and the landing page at '/',
+ * and on GitHub Pages the app lives under the project subpath, which is its
+ * landing page.
+ * Strip BASE, then map what is left back to its file ('' -> index.html,
+ * 'matches' -> matches.html); a query string is no part of the name.
+ * Both halves of the fetch handler go through this — the write a visit makes
+ * and the lookup an offline navigation makes — so the two cannot disagree.
+ * @param {URL} url the navigation's URL
+ * @returns {string} a path relative to BASE, as CORE names it
+ */
+function pageKey(url) {
+  const rel = url.pathname.indexOf(BASE) === 0
+    ? url.pathname.slice(BASE.length)
+    : url.pathname.replace(/^\/+/, '');
+  return rel === '' ? 'index.html' : rel.replace(/\.html$/, '') + '.html';
 }
 
 self.addEventListener('install', function (event) {
@@ -179,9 +193,28 @@ self.addEventListener('fetch', function (event) {
   event.respondWith(
     fetch(request).then(function (response) {
       if (response && response.ok) {
-        // Stored without its redirect for the same reason as the precache: a
-        // live visit to `/matches.html` arrives redirected, and this copy is the
-        // one an offline visit to `/matches` would be served.
+        // A page is stored under its file name, the one an offline navigation
+        // looks it up by, not under the URL the visit asked for. On Firebase
+        // Hosting those are never the same: cleanUrls answers each page at its
+        // clean URL, `/matches`, and the copy a visit wrote under that was one
+        // nothing read. Offline, the page stayed the one the worker installed
+        // with, while every visit refreshed the scripts it runs: after any
+        // deploy that left sw.js alone, the install's page ran the newer
+        // scripts. GitHub Pages names the file, but its landing page and any
+        // query string parted the two names there too.
+        const key = request.mode === 'navigate' ? pageKey(url) : request;
+        // Stored rebuilt, as the install stores it, whether it was redirected
+        // or not. On Hosting anything fetched by its `.html` name arrives
+        // redirected, and under that name it is the copy an offline navigation
+        // is served. A navigation never arrives redirected: its redirect mode
+        // is manual, so the worker is handed the 301 itself — not ok, so not
+        // stored — and the browser follows it with a second navigation, to
+        // `/matches`. Rebuilding only what was redirected, then, stored that
+        // page as it came off the wire, with the headers of its compressed
+        // bytes: measured in Chromium against a server gzipping the way
+        // Hosting does, one online visit replaced the install's clean matches
+        // page with one saying "gzip, 3238 bytes" over 10,014 bytes of HTML,
+        // and matches.js and style.css went the same way.
         //
         // `return cache.put(...)`: the write's promise used to be dropped inside
         // the callback, so the `.catch` below caught only `caches.open` and a
@@ -189,27 +222,16 @@ self.addEventListener('fetch', function (event) {
         const copy = response.clone();
         caches.open(CACHE)
           .then(function (cache) {
-            return unredirected(copy).then(function (clean) { return cache.put(request, clean); });
+            return rebuilt(copy).then(function (clean) { return cache.put(key, clean); });
           })
           .catch(function () {});
       }
       return response;
     }).catch(function () {
-      // Navigations are cached under their file names, but the address bar
-      // says BASE, BASE + 'matches', … — on Firebase Hosting because cleanUrls
-      // drops the .html, on GitHub Pages because the app lives under the
-      // project subpath. Strip BASE first, then map what is left back to its
-      // page ('' -> index.html, 'matches' -> matches.html) so offline
-      // navigation serves the right shell on either host, never the 404 page
-      // for a page that is actually cached.
+      // A navigation is answered with its page, or with the 404 page when that
+      // page is not cached — never with a network error for a page that is.
       if (request.mode === 'navigate') {
-        const rel = url.pathname.indexOf(BASE) === 0
-          ? url.pathname.slice(BASE.length)
-          : url.pathname.replace(/^\/+/, '');
-        const page = rel === ''
-          ? 'index.html'
-          : rel.replace(/\.html$/, '') + '.html';
-        return caches.match(page).then(function (hit) {
+        return caches.match(pageKey(url)).then(function (hit) {
           return hit || caches.match('404.html');
         });
       }

@@ -63,11 +63,10 @@ const OPEN_RULES = [
 
 /**
  * Record one billed read against the tally, empty results included — unless
- * the client's cache answered it. A `get` with `{ source: 'cache' }` — which
- * `cachedUsage` in data-store.js makes — never reaches Firestore and resolves
- * with `metadata.fromCache` set, so nothing was billed, and this used to
- * count it all the same. Any read whose snapshot says it came from the cache
- * is passed over alike.
+ * the client's cache answered it. A `get` with `{ source: 'cache' }` never
+ * reaches Firestore and resolves with `metadata.fromCache` set, so nothing was
+ * billed, and this used to count it all the same. Any read whose snapshot says
+ * it came from the cache is passed over alike.
  * @param {Object} tally accumulator
  * @param {Object} snap the snapshot that came back
  */

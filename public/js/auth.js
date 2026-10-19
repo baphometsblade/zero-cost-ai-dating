@@ -406,8 +406,18 @@
       const patch = {};
       if (fields.email && existing.email !== fields.email) patch.email = fields.email;
       if (fields.displayName && !existing.displayName) patch.displayName = fields.displayName;
-      if (Object.keys(patch).length) return await ZC.store.updateUser(uid, patch);
-      return existing;
+      if (!Object.keys(patch).length) return existing;
+      try {
+        return await ZC.store.updateUser(uid, patch);
+      } catch (err) {
+        // The document was read; only the correction failed. Falling through
+        // to the in-memory stand-in below swapped a finished profile for a
+        // blank one with profileComplete false, so every guarded page sent the
+        // account back through onboarding while its stored profile was
+        // complete. The next page load asks again.
+        console.warn('[zc.auth] Could not correct the profile\'s email or name; using it as stored.', err);
+        return existing;
+      }
     } catch (err) {
       console.warn('[zc.auth] Could not reach the profile store; using an in-memory copy.', err);
       return fallbackDoc(uid, fields);
@@ -500,8 +510,29 @@
     return {
       uid: user.uid,
       email: (seed && seed.email) || user.email || '',
-      displayName: (seed && seed.displayName) || user.displayName || ''
+      displayName: (seed && seed.displayName) || providerName(user.displayName)
     };
+  }
+
+  /**
+   * A name the sign-in provider chose, cut to what the editors accept.
+   *
+   * Google hands over the account's own name, whatever its length, and
+   * firestore.rules refuses a users/{uid} whose name is over 60 characters:
+   * the create was refused on every page load, so the account never got a
+   * document and onboarding could not start. A name typed here never needs
+   * this, because the forms stop at NAME_MAX. Cut in UTF-16 units, which is
+   * how the forms count, at a character boundary rather than through one.
+   * @param {*} name firebase.User#displayName
+   * @returns {string}
+   */
+  function providerName(name) {
+    let out = '';
+    for (const ch of String(name || '').trim()) {
+      if (out.length + ch.length > NAME_MAX) break;
+      out += ch;
+    }
+    return out.trim();
   }
 
   /**

@@ -138,8 +138,12 @@
     return value;
   }
 
-  // Applied as early as a classic script can: the file runs at the end of the
-  // body, so this lands before the first paint in practice.
+  // Not before the first paint: this file runs at the end of the body, and the
+  // browser paints the parsed body without waiting for it. This line used to
+  // claim otherwise, and with dark chosen on a light OS, settings painted light
+  // at 52ms and turned dark here at 123ms. js/theme-boot.js sets the stored
+  // theme from <head> now, so this applies what is already showing — and it is
+  // still the one place that normalises the stored value and writes it back.
   applyTheme(readStoredTheme() || 'system');
 
   /* ------------------------------------------------------------------------
@@ -197,20 +201,24 @@
 
   /**
    * The sticky top bar. Signed-in visitors get the app links plus sign-out;
-   * everyone else gets a single always-visible "Sign in" button (the desktop
-   * `.nav-links` row is hidden on phones, so guests must not depend on it).
+   * guests get a single always-visible "Sign in" button (the desktop
+   * `.nav-links` row is hidden on phones, so guests must not depend on it);
+   * and while the auth state is not yet known, there is only the brand.
    * @param {string} active key of the current page
    * @param {boolean} signedIn whether someone is signed in
+   * @param {boolean} [unknown] true while it is not yet known whether anyone is signed in
    * @returns {HTMLElement}
    */
-  function buildNav(active, signedIn) {
+  function buildNav(active, signedIn, unknown) {
     const brand = el('a', {
       class: 'nav-brand',
       attrs: { href: url(signedIn ? 'dashboard.html' : 'index.html') }
     }, ['Zero Cost Dating']);
 
     let right;
-    if (signedIn) {
+    if (unknown) {
+      right = null;
+    } else if (signedIn) {
       right = el('nav', { class: 'nav-links', attrs: { 'aria-label': 'Primary' } }, [
         NAV_ITEMS.map(function (item) { return navLink(item, active); }),
         el('button', {
@@ -229,7 +237,7 @@
       class: 'nav',
       dataset: { zcNav: '' },
       attrs: { role: 'banner' }
-    }, [el('div', { class: 'nav-inner' }, [brand, right])]);
+    }, [el('div', { class: 'nav-inner' }, right ? [brand, right] : [brand])]);
   }
 
   /**
@@ -257,13 +265,25 @@
     if (!document.body) return null;
     const active = activeKey || currentPage();
     const signedIn = !!signedInDoc();
+    // Nobody signed in YET is not nobody signed in. Firebase restores a
+    // session asynchronously, the persisted credential and then users/{uid},
+    // and the first mount, made once the document is parsed, usually comes
+    // before that is done. It drew the guest's "Sign in" and no tab bar then,
+    // on a signed-in visitor's page, until the restore finished and
+    // applyAuthState drew it again (e2e/specs/10-firebase.e2e.js holds
+    // Firestore back so that the first mount always comes first, and records
+    // each header the page shows). So until the first auth state is heard,
+    // the header is the brand alone. A demo session is known before the
+    // first mount, and on a demo page with nobody signed in the guest's
+    // header replaces this one before the next frame is drawn.
+    const unknown = !signedIn && !authHeard;
 
     // Drop anything a previous mount left behind.
     $$('[data-zc-nav], [data-zc-tabbar]').forEach(function (node) {
       if (node.parentNode) node.parentNode.removeChild(node);
     });
 
-    const header = buildNav(active, signedIn);
+    const header = buildNav(active, signedIn, unknown);
     const slot = $('[data-nav]');
     if (slot) {
       while (slot.firstChild) slot.removeChild(slot.firstChild);
@@ -317,7 +337,12 @@
 
   /**
    * Update the nav counters. Unread messages land on Matches; likes waiting
-   * for an answer land on Discover, because that is where you act on them.
+   * for an answer land on Discover, because that is where you answer them.
+   * The likes count is everyone waiting, with block lists the only filter: in
+   * firebase mode it is kept without reading any liker's profile, so it has
+   * nothing to apply the deck's filters to, and the demo adapter counts the
+   * same way. So it includes likers the deck will not show; the who-liked-you
+   * panel on the matches page lists the same people and says which they are.
    * @param {{matches?:number, unread?:number, likes?:number, dashboard?:number}} counts
    * @returns {{matches:number, dashboard:number}} the counts now displayed
    */
@@ -672,6 +697,7 @@
    * @returns {void}
    */
   function applyAuthState(doc) {
+    authHeard = true;
     const page = currentPage();
     mountNav(page);
     const preferred = doc && doc.preferences && doc.preferences.theme;
@@ -689,6 +715,10 @@
   }
 
   let initialised = false;
+
+  // Set by the first applyAuthState: the readiness promise or an auth change,
+  // whichever comes first, is the first time anyone knows who is signed in.
+  let authHeard = false;
 
   /**
    * Register the service worker (network-first static cache; makes demo mode

@@ -83,13 +83,16 @@ Rules that keep the graph acyclic:
 | `data-store.js` | `ZC.store` | The one data API. Both adapters live here. |
 | `matching-engine.js` | `ZC.matching` | Ranking, reasons, learning, icebreakers. |
 | `auth.js` | `ZC.auth` | Sign-up/in/out, page guards, humanised error text, demo credential store. |
+| `theme-boot.js` | — | Reads the stored theme and sets `<html data-theme>` from `<head>`, before the first paint. Reads only; `app.js` owns the theme. |
 | `app.js` | `ZC.app` | Shared nav and tab bar, theme application, toast host, live unread badges, `onReady`. |
 
 ---
 
 ## 2. Load order, and why it is fixed
 
-Every page ends its `<body>` with the same block, in this order, plus at most one page script:
+Every page but `404.html` loads one script in its `<head>`, `js/theme-boot.js`, which puts the
+theme chosen in Settings on `<html>` before the body is painted. Every page then ends its
+`<body>` with the same block, in this order, plus at most one page script:
 
 ```html
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js" crossorigin="anonymous"></script>
@@ -230,10 +233,10 @@ no part of the app reads; `tests/projection.test.js` compares each list with the
 client writes into that map. For a while only the top level and `personality` were closed.
 Closing the rest cost evaluation budget the validator did not have — a request may evaluate at
 most 1000 expressions — and it was bought back without loosening anything, by dropping type
-tests the operation after each already enforces and by asking `identityUnchanged` one question
-of the diff instead of three comparisons. `rules-tests/specs/08-budget.rules.js` measures the
-costliest document the store writes on both create and update, and fails below five clauses
-of headroom on either.
+tests the operation after each already enforces and by asking `identityUnchanged` about one
+diff of the document instead of making three comparisons. `rules-tests/specs/08-budget.rules.js`
+measures the costliest document the store writes on create, on a routine update and on the
+update that corrects a stored email, and fails below five clauses of headroom on any of them.
 
 ### `discovery/{uid}` — the public projection (Firebase mode)
 
@@ -445,8 +448,9 @@ when the promise resolves rather than when the call is made, and a transaction's
 replayed on contention, so each attempt buffers its own writes and only the one that
 committed is added. Counting where `tx.set` is called reports twenty concurrent bumps as
 forty, measured. `store-tests/specs/19-write-cost.store.js` pins a pass at 2, an ordinary
-like at 3, a mutual like at 4, a message at 2 and a profile save at 2 — with the documents
-named, because three writes to the wrong places is also three writes.
+like at 3, a mutual like at 4, a like on a pair already passed at 0, a swipe on a decided
+mutual pair that has lost its match at 1 (the match), a message at 2 and a profile save at 2
+— with the documents named, because three writes to the wrong places is also three writes.
 
 The counter follows a reference along each of these routes — a snapshot's `ref`, `docs`,
 `forEach` or `docChanges()`, a listener's delivery however the listener was registered, a
@@ -532,7 +536,12 @@ asserted and the other remembered.
 
 - `recordSwipe(from, to, action)` writes `swipes/{from}_{to}`; if the reciprocal swipe exists
   and both are positive (`like`/`super`), it creates `matches/{sortedPair}` and returns
-  `{ matched: true, matchId }`. Idempotent in both adapters.
+  `{ matched: true, matchId }`. Idempotent in both adapters. A pair that already has a
+  decision keeps it: no swipe is written and the one on record is not overwritten, and the
+  answer adds `existing: true` and the `action` that stands, so the deck neither counts nor
+  learns from a swipe that was never recorded (unless it is its own retry of a write that
+  came back failed yet landed). The match check still runs on the decision that stands, so a
+  mutual pair whose match document is missing gets it then.
 - `reconcileMatches(uid)` finishes a match check that was started and never answered. The
   facade notes the pair in `localStorage` before calling the adapter, clears the note on any
   settled outcome, and keeps it only for a rejection that says the swipe itself landed;
@@ -648,11 +657,15 @@ Weights, component formulas and the reason thresholds are documented in the
 ## 7. Pages and the shell
 
 `app.js` runs on every page. It mounts the toast host, applies the saved theme to
-`<html data-theme>`, renders the shared nav and bottom tab bar, wires sign-out, and keeps the
+`<html data-theme>` (`theme-boot.js` has already set it from `<head>`, because `app.js` runs
+after the first paint), renders the shared nav and bottom tab bar, wires sign-out, and keeps the
 unread badges live through `ZC.store.listenMatches` — plus `listenLikesReceived` on the premium
 plan — held by `syncBadgeListeners()` and released by `stopBadgePolling()`. On Firestore those
 are `onSnapshot` streams that bill their first delivery and then only what changes; in demo mode
-they ride the store's shared 1.5 s storage poll.
+they ride the store's shared 1.5 s storage poll. Until the first auth state is known, the
+header is the brand alone: a session Firebase is still restoring is never shown the guest's
+"Sign in", and in Firebase mode a guest also sees the brand alone until Firebase reports, at
+most until `auth.js`'s 8-second backstop.
 
 This section used to describe a 20-second badge poll gated on `document.visibilityState`, "so a
 backgrounded tab costs nothing". Both halves are gone: §6 was updated when the listeners landed
@@ -771,10 +784,12 @@ The table names four of them; `tests/` holds fourteen, and all fourteen `tests/`
 `node --test` with no dependencies, which is what keeps the `verify` job down to a checkout, a
 Node set-up and three commands — `npm run check:seed`, `npm test`, and `npm run check:claims`,
 which runs the suite a second time to read its total back — no install step, and it finishes
-in seconds. That short job is run twice, over a `node: ['20', '22']` matrix, because a single
-pinned version once hid a breakage: the runner stopped matching a positional `tests/`
-directory argument after Node 20, so `npm test` ran zero tests on newer runtimes while CI
-stayed green.
+in seconds. That short job is run three times, over a `node: ['20', '22', '24']` matrix,
+because a single pinned version once hid a breakage: the runner stopped matching a positional
+`tests/` directory argument after Node 20, so `npm test` ran zero tests on newer runtimes
+while CI stayed green. 24 is there because from Node 23 the runner's default reporter is no
+longer TAP, which `npm run check:claims` reads; 20 because it is the oldest Node
+`package.json` admits.
 
 The two layers that need real infrastructure are deliberately kept out of that job. Their
 specs live in `e2e/` and `rules-tests/`, not `tests/`, so `node --test` never discovers

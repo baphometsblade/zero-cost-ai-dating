@@ -750,6 +750,40 @@ h3 {
   padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px) + var(--space-4));
 }
 
+/* And keyboard focus is kept out from under both bars. When Tab moves focus
+   to a control off screen, the browser scrolls it flush to the viewport's
+   edge unless the scroller says how much of that edge is covered, and nothing
+   did: of the 184 stops e2e/specs/12-accessibility.e2e.js walks on settings
+   and the profile, 16 landed entirely under the tab bar or the header on a
+   phone, and 7 under the header on a desktop. Each padding is its bar plus a
+   gap. The tab bar is only on screen at phone widths and only once someone is
+   signed in; a browser without :has() drops that half and keeps the old
+   behaviour. */
+html {
+  scroll-padding-top: calc(var(--nav-h) + 1px + var(--space-3));
+}
+
+@media (max-width: 720px) {
+  html:has(> body.has-tabbar) {
+    scroll-padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px) + var(--space-3));
+  }
+}
+
+/* Except while the focus is in the header. Its own controls sit inside the
+   band the top padding says is covered, so to the browser every one of them
+   was hidden: on a page scrolled part-way down, Shift+Tab out of <main> moved
+   the page about 400px up for each header link it reached, though the header
+   is sticky and they were all in view all along. Focus moves before the page
+   scrolls to it, so a move into the header is measured without the padding
+   and a move back into <main> with it. The offset stays a padding on the
+   page rather than becoming a margin on what is in <main>: tried that way, a
+   link in the matches page's strip of new matches, which scrolls sideways on
+   its own, was left partly under the header. A browser without :has() keeps
+   the padding, and the old jump with it. */
+html:has(.nav :focus) {
+  scroll-padding-top: 0;
+}
+
 /* --------------------------------------------------------------------------
    6. Buttons
    -------------------------------------------------------------------------- */

@@ -13,12 +13,14 @@ Authentication. No Cloud Functions, no Cloud Storage, no server of any kind. And
 no Firebase project at all, it still runs — the whole app falls back to `localStorage` with a
 bundled cast of 32 profiles, so you can try it in about thirty seconds.
 
-**A hosted demo** is published from `main` to
+**A hosted demo** is set up to publish from `main` to
 **<https://baphometsblade.github.io/zero-cost-ai-dating/>** by
-[`.github/workflows/pages.yml`](.github/workflows/pages.yml) — exactly that demo mode, so
-everything you do there stays in your own browser's `localStorage`: no account, no server,
-nothing uploaded anywhere. *(GitHub Pages has to be switched on once for the repository
-before the first deploy can land — [docs/DEPLOY.md](docs/DEPLOY.md#github-pages-the-live-demo--and-why-it-is-not-this-guide)
+[`.github/workflows/pages.yml`](.github/workflows/pages.yml), once CI has passed on the commit.
+It is exactly that demo mode, so everything you do there stays in your own browser's
+`localStorage`: no account, no server, nothing uploaded anywhere. *(It is not live yet. GitHub
+Pages has to be switched on once for the repository before the first deploy can land, and
+until then the URL returns 404.
+[docs/DEPLOY.md](docs/DEPLOY.md#github-pages-the-live-demo--and-why-it-is-not-this-guide)
 has the one setting.)*
 
 ---
@@ -100,7 +102,9 @@ No network calls, no model weights, no randomness. Given the same two profiles a
 
 ### 1. Build a corpus
 
-Every visible bio is tokenised — lowercased, diacritics stripped, split on non-alphanumerics,
+Every visible bio is tokenised — Latin-script words only (modifier letters such as the ʻokina
+of Hawaiʻi stay inside their word), lowercased, diacritics stripped, the letters NFD cannot
+split folded (`ø→o`, `æ→ae`, `ß→ss`, `ł→l` and seven more), split on non-alphanumerics,
 stopwords removed, lightly stemmed (`ies→y`, `sses→ss`, trailing `s`, `ing`/`ed`) — and an
 inverse document frequency table is built: `idf = ln((docCount + 1) / (df + 1)) + 1`. This is
 classic TF‑IDF, which is exactly the right tool here: it is cheap, it is deterministic, and it
@@ -268,7 +272,7 @@ npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.
 
 ### Unit suites
 
-Fourteen suites on Node's built-in runner — **288 checks**, no install, no browser, seconds:
+Fourteen suites on Node's built-in runner — **306 checks**, no install, no browser, seconds:
 
 | Suite | What it pins down |
 | --- | --- |
@@ -276,14 +280,14 @@ Fourteen suites on Node's built-in runner — **288 checks**, no install, no bro
 | `tests/csp-sync.test.js` | The `<meta http-equiv>` copy of the Content-Security-Policy on every page equals the `firebase.json` header minus `frame-ancestors`, and sits before the first `<link>` and `<script>` — two copies of a policy drift apart unless something forces them together. And `connect-src`, the directive an injected script would send your data out through, may hold only the page's own origin and hosts under `googleapis.com`, where the three Firebase SDKs the pages load were measured to connect and nowhere else, each source listed in the test with its reason, so widening it is a deliberate edit rather than a quiet one. |
 | `tests/contrast.test.js` | Reads the three palette blocks out of `style.css` and holds the flat fill/ink pairs — and body text on each neutral surface — to WCAG AA in light and in both darks, and the deck's four action glyphs to the threshold their size calls for, at rest and on hover. A label on a two-stop gradient — the primary and send buttons, your own chat bubbles, the "how it works" numerals, the plan ribbon, the premium badge — has no single background but does have a worst one, so every rule in either stylesheet that declares such a fill as its background and a text colour beside it is found and held to AA at the lowest point along the whole line, not just at its two stops, because the darkest point of a gradient need not be a stop. Those six must keep being found, so a sweep that stopped finding rules fails rather than passing, and the heart in the wordmark is exempt by name, as WCAG exempts a logo; the lowest label today is 5.07:1. Glass over photos, `color-mix` and text clipped to its own gradient have no second flat colour to measure against, so they are left out and said so rather than measured badly. It found white text on dark's `--danger` at 2.85:1, on the button that deletes your account. |
 | `tests/data-store.test.js` | The demo storage adapter, loaded for real in Node against a `localStorage` shim: seeding (32 profiles, inbound likes, both conversations, idempotency, force re-seed), user create/update deep-merge semantics with wholesale `interestAffinity` replacement, swipe/match/undo idempotency, messaging with unread counters and the 1000-char cap, daily usage limits per plan, the reports lifecycle (file, list, retract, purge on account deletion), and export/import/reset round-trips. A store that cannot be read is a failure rather than an empty answer wherever a page would show the empty answer as a fact: your filed reports, retracting one (which would otherwise say it had already been removed), and the swipes, matches and messages the data export writes out as your whole record. And `getMatches` and `getMatch` hand over the same public projection of the other person that the live list does, as the Firestore adapter's do — never their address, birthdate or block list. |
-| `tests/docs.test.js` | The claims this README makes about itself: that every `**N checks**` total is one `scripts/claims.js` stands behind, that every path and `npm run` incantation in the docs resolves, and that no spec exists without a line describing it. Documentation is the one part of this project that fails silently; this is the cheapest check there is, so it runs on every push. |
+| `tests/docs.test.js` | The claims this README makes about itself: that every `**N checks**` total is one `scripts/claims.js` stands behind, that every path and `npm run` incantation in the docs resolves, and that no spec exists without a line describing it. And two that the configuration makes: that CI's `verify` job runs the unit suite on the oldest Node `package.json` admits — it said 18 while nothing ran 18, and four tests fail there — and that `npm run check:claims` can read the summary of the runner it starts, which from Node 23 it could not until it named the TAP reporter. Documentation is the one part of this project that fails silently; this is the cheapest check there is, so it runs on every push. |
 | `tests/injection.test.js` | No shipped script can hand a browser a string to parse as markup or run as code — `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, `srcdoc`, `eval`, `new Function`, string-bodied timers, `javascript:` URLs — with comments and string literals blanked first, so a sink named in prose is not mistaken for one in use. Shipped means every `.js` file under `public/`, the service worker included, and the body of every inline `<script>` in a page — today only `404.html`'s, which the CSP lets run by its hash, and a hash pins the bytes, not what they do. In a dating app almost every string on screen was typed by somebody else. |
 | `tests/limits.test.js` | Every bound in this app is written down twice — once in `public/js/profile.js`, which enforces it while you type and names it in the message, and once in `firestore.rules`, because a client-side limit is a courtesy. This reads both files and refuses to let them drift: no limit the form accepts may be one the rules refuse, the private document and the public projection must state each bound identically, and the rules' photo-link allowance must be exactly six of what the editor permits per link. Plus the two rules that made those caps necessary: every key a `hasOnly` allowlist admits must be one something in the same validator looks at, and a list whose *length* is bounded must have its *contents* bounded too, counted per occurrence, because one element can be a megabyte. And every closed vocabulary the rules pin — report reasons, genders, themes, plans — must be exactly the list the client offers, because the client validates against its own copy and cannot see the rules refuse a slug it added: a report reason added to the dialog alone would be an abuse report that cannot be filed, refused with nothing named. The first of the two rules above found `discovery/{uid}.personality` accepting anything at all, three lines from the `location` field that had the same defect and was caught by eye rounds earlier; it reads code with the comments stripped, because deleting a rule and leaving `// TODO: validate 'personality' here.` behind is the likeliest shape a real edit takes and the first version of the check passed against exactly that. |
-| `tests/matching-engine.test.js` | Every hard filter including the mutual gender/age cases, the neutral missing-location path, score bounds, determinism, tokeniser and cosine behaviour, learning clamp/prune/cap, ranking tie-breaks, weight renormalisation, and a golden end-to-end score. |
+| `tests/matching-engine.test.js` | Every hard filter including the mutual gender/age cases, the neutral missing-location path, score bounds, determinism, tokeniser and cosine behaviour (letter folds and modifier letters included), whole-word quoting in bio reasons and icebreakers, learning clamp/prune/cap, ranking tie-breaks, weight renormalisation, and a golden end-to-end score. |
 | `tests/projection.test.js` | What is public about an account, agreed in one place. The key set `projectDiscovery()` emits must equal the closed `hasOnly` lists in `firestore.rules`, and drift either way is named. So must the keys a private user document is written with, against `userDocOk`'s list and each nested validator's: the document the shipped store creates for a new account, at the top level and in each of its maps but `learning.interestAffinity`, whose keys are interest tags and so an open set, and the location the profile editor writes, which a new account does not have — a key the client writes and the rules do not allow is a refused sign-up or profile save in Firebase mode only, where no demo-mode test would see it. And, separately, a fully populated private account is projected and searched for sentinels, so `email`, `birthdate`, `blocked`, `learning` or `usage` cannot reach the world-readable half even if somebody widens the rules to let them. |
-| `tests/pwa.test.js` | The manifest and the service worker carry no root-anchored assumptions, so the same `public/` installs and serves offline under a GitHub Pages project subpath as well as at a site root. And a new worker's install asks the server for the shell rather than the browser's HTTP cache, so the offline copy it stores is one deploy, not files from either side of one; has every file in hand before it stores any, so an install that fails partway leaves the cache its predecessor serves offline as it was; and reads each file as it arrives, because holding two dozen responses unread against the six connections a browser opens to a host left the new worker installing for good. |
+| `tests/pwa.test.js` | The manifest and the service worker carry no root-anchored assumptions, so the same `public/` installs and serves offline under a GitHub Pages project subpath as well as at a site root. And a new worker's install asks the server for the shell rather than the browser's HTTP cache, so the offline copy it stores is one deploy, not files from either side of one; has every file in hand before it stores any, so an install that fails partway leaves the cache its predecessor serves offline as it was; and reads each file as it arrives, because holding two dozen responses unread against the six connections a browser opens to a host left the new worker installing for good. And offline, a page is the copy its last online visit stored, whatever URL that visit asked for: a clean URL as Firebase Hosting answers (`/matches`, `/`), a query string, or a Pages project's bare subpath. The worker used to store each visit under that URL and look pages up offline by file name, so on Hosting the offline page stayed the one it installed with while every visit refreshed the page's scripts. |
 | `tests/seed.test.js` | The shape of all 32 seeded profiles against the data model, unique uids and emails, valid interest slugs, ages consistent with birthdates, and `seed-data.js` being in sync with `seed/profiles.json`. |
-| `tests/static.test.js` | Parses every HTML page: no dead local `src`/`href`, correct script load order, no inline script whose hash the CSP does not list and no `style=` attribute or `on*=` handler (the CSP would block them), no class token that the CSS does not define, and `lang` + `title` + viewport + description on every page. Then two things the pages depend on without naming them. The service worker's precache list names every file Hosting deploys, in any folder — the worker itself aside — and nothing that does not exist, so a file added in a folder of its own cannot ship uncached and missing offline. And every glyph the stylesheets generate carries alternative text, because generated content is read aloud: a decorative one is given `''`, and the plan rows' ✓ and ✕, the only thing separating an included feature from a missing one, are announced as *Included:* and *Not included:*. Last, the plans page's placeholder usage rows are the rows `subscription.js` draws, label for label: they hold the plan cards where they will stay while today's counters load, and one short would move the cards by its height on every visit. And the matches page ships its conversation card visible, leaving the loading state to the stylesheet: a page and its scripts can come from two deploys, and a card shipped hidden for this deploy's `matches.js` to reveal stayed hidden, conversations and all, under the previous deploy's. |
+| `tests/static.test.js` | Parses every HTML page: no dead local `src`/`href`, correct script load order (plus the one script every page but 404's loads in its `<head>`, the stored theme, held to the key and themes `app.js` uses), no inline script whose hash the CSP does not list and no `style=` attribute or `on*=` handler (the CSP would block them), no class token that the CSS does not define, and `lang` + `title` + viewport + description on every page. Then two things the pages depend on without naming them. The service worker's precache list names every file Hosting deploys, in any folder — the worker itself aside — and nothing that does not exist, so a file added in a folder of its own cannot ship uncached and missing offline. And every glyph the stylesheets generate carries alternative text, because generated content is read aloud: a decorative one is given `''`, and the plan rows' ✓ and ✕, the only thing separating an included feature from a missing one, are announced as *Included:* and *Not included:*. Last, the plans page's placeholder usage rows are the rows `subscription.js` draws, label for label: they hold the plan cards where they will stay while today's counters load, and one short would move the cards by its height on every visit. And the matches page ships its conversation card visible, leaving the loading state to the stylesheet: a page and its scripts can come from two deploys, and a card shipped hidden for this deploy's `matches.js` to reveal stayed hidden, conversations and all, under the previous deploy's. And three promises the two workflows make: CI's `emulator` job drives the store suite through the compat SDK the pages load, CI's `emulators:exec` run of the browser suite fails the Firebase spec rather than letting it skip, and the Pages deploy waits for CI and publishes only a commit CI passed. |
 | `tests/usage.test.js` | The daily counter's decision, `nextUsage(current, field, amount, today)`, as a pure function: same-day increment, a stale day resetting to zeros *before* the amount lands, an unknown field, a missing or corrupt record, the clamp at zero. Then the same decision through the demo adapter, so it is proven to persist and `canSpend` is proven to agree with it. |
 | `tests/utils.test.js` | The pure half of `ZC.util` — numbers, timing on a hand-rolled fake clock, dates, geo, hashing, avatars, URL parsing. The DOM half needs a live document and belongs to the browser suite. |
 
@@ -294,7 +298,7 @@ store and its daily counter, the auth backend, the pure half of the utilities, t
 schema, the static HTML. It cannot reach the flows that only exist in a DOM — signing in,
 the deck and its keyboard, the match burst, chat that persists, reporting someone, deleting
 your account, and the service worker serving the app with the network gone. Those live in
-`e2e/`: **362 checks** across the twelve specs that need nothing installed but a browser, each
+`e2e/`: **450 checks** across the twelve specs that need nothing installed but a browser, each
 run at 390x844 and most of them at 1280x800 as well — plus a thirteenth, `10-firebase.e2e.js`,
 which needs the Firebase emulators and skips, by name and reason, when they are not running.
 
@@ -317,7 +321,7 @@ Firebase rather than `localStorage`: the real SDK, real Auth, real Firestore, an
 read back out of the emulator instead of off the page. It drives the pages **with their real
 CSP meta tag** — the emulators are reached through the page's own origin rather than by
 relaxing the policy, which is the whole reason it can exist; the Limitations section explains
-the constraint it is working around. With both emulators up the run is **384 checks**, all
+the constraint it is working around. With both emulators up the run is **478 checks**, all
 passing.
 
 It did not start that way. On its first run one check was red, and it had found a real bug:
@@ -329,7 +333,7 @@ fixture in `rules-tests/` ever used a null there. The rule now accepts null, and
 checks pin the shape.
 
 Without an emulator the runner prints `SKIP` and records nothing, so `npm run test:e2e` on a
-bare machine is still 362/362 — and CI runs it both ways, so the skip path and the emulator
+bare machine is still 450/450 — and CI runs it both ways, so the skip path and the emulator
 path are each exercised on every push.
 
 ### Security rules tests
@@ -339,7 +343,7 @@ readable by other accounts, that nobody can mint a match with a stranger and the
 them, that the abuse queue cannot be enumerated — is a claim about one file,
 `firestore.rules`, because there is no server to enforce anything else. Reading it
 carefully is not evidence. `rules-tests/` executes it against the Firestore emulator:
-**216 checks**, including the attacks each rule exists to stop.
+**222 checks**, including the attacks each rule exists to stop.
 
 ```sh
 npm install --prefix /tmp/zc-rules @firebase/rules-unit-testing firebase-tools
@@ -357,7 +361,7 @@ The daily usage counter is the one piece of client logic where reading the code 
 as weak an argument as it was for the rules: whether two concurrent bumps collapse into one
 is a property of a real database, not of anything visible in the file. `store-tests/` loads
 the **shipped** `public/js/data-store.js` into Node — `window` aliased to `globalThis`,
-`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **261
+`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **269
 checks**, including 20 concurrent `bumpUsage` calls on one document storing exactly 20, the
 midnight roll-over happening inside the same transaction, a bump writing `usage` and nothing
 else, 30 bumps each with a whole-document save in flight across it storing exactly 30, an
@@ -376,7 +380,9 @@ anybody reads, and simply stops the account appearing in other people's decks.
 
 ```sh
 npm install --prefix /tmp/zc-emu firebase @firebase/rules-unit-testing firebase-tools
+npm install --prefix /tmp/zc-sdk firebase@10.12.2   # the compat SDK the pages load
 
+export ZC_STORE_SDK=/tmp/zc-sdk/node_modules
 NODE_PATH=/tmp/zc-emu/node_modules npm run test:store      # the store suite
 NODE_PATH=/tmp/zc-emu/node_modules npm run test:emulator   # rules, then store, one boot
 ```
@@ -407,7 +413,10 @@ account from both directions:
 
 - `tests/docs.test.js` asserts the README quotes those numbers and no others, that every path
   and `npm run` incantation in the documentation resolves, and that no spec file exists
-  without a line describing it. It reads files only — no browser, no emulator — so it runs in
+  without a line describing it. It also holds two promises made outside the prose: that CI's
+  `verify` job runs the oldest Node `package.json` admits, and that the test run
+  `npm run check:claims` starts prints a summary it can read. It reads files and starts one
+  child `node --test` over a two-test fixture — no browser, no emulator — so it runs in
   `npm test` on every push.
 - each runner compares its own summary against the same file at the end of a **complete**
   run, and fails if they disagree. A filtered run counts less by design and is not checked.
@@ -415,8 +424,9 @@ account from both directions:
   for each; a complete run in which any other spec skipped fails rather than passing
   uncompared, because nothing claims a number for it.
 - `npm run check:claims` covers the one total no test inside the run can see: `npm test`'s
-  own. It runs the suite in a child process and reads the count out of the TAP summary, and
-  CI's `verify` job runs it straight after `npm test`.
+  own. It runs the suite in a child process with the TAP reporter named (Node stopped choosing
+  TAP by default in 23) and reads the count out of its summary, and CI's `verify` job runs it
+  straight after `npm test`.
 
 So a suite that grows fails its own run until `scripts/claims.js` is updated, and updating
 that file fails `npm test` until this README agrees. There is no order in which the two can
@@ -427,11 +437,14 @@ while keeping its number — and `scripts/claims.js` says so rather than implyin
 
 `.github/workflows/ci.yml` has three jobs. `verify` runs `npm run check:seed`, `npm test`
 and `npm run check:claims` — the last runs the unit suite a second time, to hold its total
-to `scripts/claims.js` as described above — on every push and pull request, across a Node 20
-and Node 22 matrix (`fail-fast: false`, so one version failing still reports the other) — no
-install, no browser, seconds. Two majors are deliberate: pinning a single one once hid a
+to `scripts/claims.js` as described above — on every push and pull request, across a Node 20,
+22 and 24 matrix (`fail-fast: false`, so one version failing still reports the others) — no
+install, no browser, seconds. Several majors are deliberate: pinning a single one once hid a
 real breakage, because the test runner stopped matching a positional `tests/` directory
-argument after Node 20 and `npm test` silently ran nothing on newer runtimes. `e2e` is
+argument after Node 20 and `npm test` silently ran nothing on newer runtimes; and leaving the
+newest LTS out hid another, because from Node 23 the runner no longer defaults to TAP and
+`npm run check:claims` could not read the total on Node 24. 20 is in the matrix because it
+is the oldest Node `package.json` admits, and `tests/docs.test.js` fails if it is not. `e2e` is
 separate and runs the browser suite, installing Playwright and Chromium into the runner's
 temp directory — never into the repo — in a step of its own, so a failed download reads as
 infrastructure rather than as a red test. `emulator` does the same for the Firestore
@@ -439,9 +452,14 @@ emulator, and runs both suites that need one — `firestore.rules`, then the shi
 inside a single boot, because booting costs more than either suite does. The `e2e` job runs
 the browser suite twice: once bare, which is what a contributor with nothing installed gets
 and which proves the Firebase spec skips rather than silently passing, and once inside
-`emulators:exec`, which is the only run in which every spec executes and therefore the only
-one that can hold the 384-check total to account. There are no secrets and no deploy step —
-deploying stays a deliberate local `npm run deploy`.
+`emulators:exec` with `--require=firebase`, which turns a skip of the Firebase spec into a
+failing check. That makes it the only run in which every spec must execute, and therefore the
+only one that can hold the 478-check total to account. The `emulator` job drives the store
+suite through the compat SDK the pages load (firebase@10.12.2, installed apart from the
+testing library and passed in as `ZC_STORE_SDK`), and `npm test` fails if that pin and the
+pages' script tags disagree. There are no secrets and no deploy step — deploying stays a
+deliberate local `npm run deploy`. The GitHub Pages demo has its own workflow, which
+publishes main's tip only after CI has passed on it.
 
 ---
 
@@ -462,6 +480,7 @@ deploying stays a deliberate local `npm run deploy`.
 │   │   ├── style.css        # design tokens, layout, forms, buttons
 │   │   └── components.css   # deck, chat, plans, overlays
 │   └── js/
+│       ├── theme-boot.js        # the stored theme, set from <head> before the first paint
 │       ├── firebase-config.js   # ZC.config / ZC.firebase — decides demo vs firebase
 │       ├── utils.js             # ZC.util / ZC.ui — DOM, avatars, toasts, modals
 │       ├── seed-data.js         # generated: ZC.SEED_PROFILES, ZC.INTEREST_TAGS
@@ -495,8 +514,9 @@ deploying stays a deliberate local `npm run deploy`.
 
 - **Firestore rules are the real boundary.** [`firestore.rules`](firestore.rules) validates
   writes against the data model: only the owner reads or writes their `users/{uid}` document;
-  `uid`, `email` and `createdAt` are immutable after creation; bios are capped at 500
-  characters, interests at 12, photos at 6; a swipe can only be created by its `from` user and
+  `uid` and `createdAt` are immutable after creation, and `email` can change only to the
+  address on the caller's own sign-in token; bios are capped at 500 characters, interests at
+  12, photos at 6; a swipe can only be created by its `from` user and
   its document id must be `from_to`; matches are readable only by their two participants and
   require proof of a reciprocal like to create; messages require participation and
   `from == request.auth.uid`. Everything else is denied by default.
@@ -780,9 +800,9 @@ These are real, and worth knowing before you show this to anyone:
   What is *not* fixed, and is worth knowing:
   - **Offline, nothing is stored.** A transaction needs a server round-trip, so it fails with
     no connection; the store warns, persists nothing, and returns the figure it computed —
-    from the SDK's cached copy of your document when it has one, and otherwise from a fresh
-    day. Swipe with no connection and the stored counter can still come back light. That is
-    deliberate: a counter that could not save must never take the deck down.
+    from the last usage this page read or committed for you when it has one, and otherwise
+    from a fresh day. Swipe with no connection and the stored counter can still come back
+    light. That is deliberate: a counter that could not save must never take the deck down.
   - **A swipe is not one write.** The *bump* is a single write of a single field — it no
     longer restamps `updatedAt` or republishes the public `discovery/{uid}` projection to
     mirror a field that projection deliberately excludes. The deck also records the swipe
@@ -795,12 +815,13 @@ These are real, and worth knowing before you show this to anyone:
     `scripts/claims.js` names this exact sentence as one of the three that drifted before
     anything executed them — "a *three writes* that was four for a mutual like", caught by a
     person reading carefully. `store-tests/specs/19-write-cost.store.js` now runs it: a pass
-    is **2**, an ordinary like **3**, a mutual like **4**, a message **2** (the message and
-    the conversation row it moves), a profile save **2** (the private document and its
-    projection, in one transaction) — and every check names the documents, because three
-    writes to the wrong places is also three writes. Against the free tier's **20,000 writes
-    a day**, three a like is about 6,600 likes across the whole deployment — passes are
-    cheaper at two, so a real day's mix buys somewhat more than that.
+    is **2**, an ordinary like **3**, a mutual like **4**, a like on a pair already passed
+    **0**, a message **2** (the message and the conversation row it moves), a profile save
+    **2** (the private document and its projection, in one transaction) — and every check
+    names the documents, because three writes to the wrong places is also three writes.
+    Against the free tier's **20,000 writes a day**, three a like is about 6,600 likes
+    across the whole deployment — passes are cheaper at two, so a real day's mix buys
+    somewhat more than that.
   - **And a swipe used to be eight READS of the counter.** The deck consults it twice around
     every card — once before the spend, so a swipe past the limit is refused before anything
     is written, and once after, to repaint the hint, the limit banner and the buttons. Both
@@ -817,7 +838,11 @@ These are real, and worth knowing before you show this to anyone:
     is worth less than the reads it saves. Midnight cost writes as well: the roll-over is
     persisted, and three parallel questions each found the same stale record — in flight
     together, none of them can see another's reset — so each fired its own transaction and the
-    first repaint of every day was three contended writes. One read means one roll-over.
+    first repaint of every day was three contended writes. One read means one roll-over. An
+    open deck also asks once when the local day changes: at midnight, or when the tab is shown
+    again on a later day. That is `canSpendAll` on a stale record, two reads and the one
+    roll-over write `20-spend-cost` measures, and the day's first question would have paid
+    that roll-over anyway.
   - **Demo mode is not immune.** It is per-device, but not "one tab at a time": the store
     listens for `storage` events and supports several tabs of the same browser, and the demo
     adapter's bump is still a `localStorage` read-modify-write two of them can race. It shares

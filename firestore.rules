@@ -326,21 +326,34 @@ service cloud.firestore {
                                     && listCharsOk(d.blocked, 48000)));
       }
 
-      // Identity fields are set once at sign-up and can never be rewritten afterwards —
-      // this is what stops an account from impersonating another or back-dating itself.
+      // Identity fields are set at sign-up, and uid and createdAt can never be rewritten
+      // afterwards — this is what stops an account from impersonating another or
+      // back-dating itself. email has one way through, and only one: to the address
+      // Firebase Auth signed into the caller's own ID token, which a client cannot forge.
+      // That corrects the stored copy of the account's identity rather than changing it.
+      // auth.js asks for exactly that on any page load where the two differ, and while
+      // email was frozen outright every such write was refused: a document whose address
+      // was stored as '' (updateUser's upsert used to write that) or changed outside the
+      // app kept it for good, and the refusal sent a finished account back through
+      // onboarding on every page. A token carrying no email cannot satisfy the comparison;
+      // `01-users` signs in with none and is still refused.
       //
       // One question asked of the diff rather than three `==`s, and that is budget, not
       // style. Every routine write to this document is an update — the last-active stamp
       // as pages load (at most every five minutes), the learning map on every swipe, the
       // usage counter on every like — so this runs on top of userDocOk on the writes that
       // cost the most. Measured on that path with `08-budget`'s clause as the unit: the
-      // three comparisons, walking six request and resource paths, cost five; this costs
-      // two. `unchangedKeys()` holds a key only when both versions have it with equal
-      // values, so `hasAll` asks what the three `==`s did, a missing field included — and
-      // `01-users` still rewrites each of the three and is refused.
+      // three comparisons, walking six request and resource paths, cost five; one `hasAll`
+      // of the diff cost two. Binding the diff to `same`, so the email question reuses it,
+      // costs one more there (08-budget's update headroom went from 13 to 12), and the
+      // correction, which also reads the token, is two behind that (10); 08-budget measures
+      // all three paths. `unchangedKeys()` holds a key only when both versions have it with
+      // equal values, so `hasAll` and `in` ask what the `==`s did, a missing field included
+      // — and `01-users` still rewrites each of the three and is refused.
       function identityUnchanged() {
-        return request.resource.data.diff(resource.data).unchangedKeys()
-          .hasAll(['uid', 'email', 'createdAt']);
+        let same = request.resource.data.diff(resource.data).unchangedKeys();
+        return same.hasAll(['uid', 'createdAt'])
+          && ('email' in same || request.resource.data.email == request.auth.token.email);
       }
 
       // Owner only. Other people are discovered through discovery/{uid}, a
@@ -353,7 +366,8 @@ service cloud.firestore {
         && request.resource.data.uid == uid
         && userDocOk(request.resource.data);
 
-      // Update: only your own document, shape re-validated, identity fields frozen.
+      // Update: only your own document, shape re-validated, identity fields frozen (email
+      // may only be corrected to the caller's own; see identityUnchanged).
       allow update: if isOwner(uid)
         && userDocOk(request.resource.data)
         && identityUnchanged();

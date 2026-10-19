@@ -6,7 +6,7 @@
   "license": "MIT",
   "type": "commonjs",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "scripts": {
     "test": "node --test",
