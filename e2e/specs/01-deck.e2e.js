@@ -231,6 +231,55 @@ module.exports = {
     }
     await h.closeBurst(page);
 
+    /* ---- one press, one swipe ---- */
+
+    // Holding a key down makes the operating system send its keydown again,
+    // many times a second, each time with `repeat` set; Playwright's
+    // keyboard.down on a key that is already down sends exactly that. The deck
+    // used to take each repeat as a fresh swipe whenever it was free to: a
+    // held ← passed one profile per repeat, faster than anybody could see
+    // them, and a held → went on spending likes, neither of which the free
+    // plan can rewind. A held Enter on one of the deck's buttons did the same
+    // by another road, because Chromium clicks a focused button again on
+    // every repeated Enter. A pass is what is held here because it never
+    // waits on the store, so every repeat the deck acted on is a card gone by
+    // the time the key comes up. The repeats the page saw are counted, so that a
+    // Playwright that stopped sending them could not pass this by sending
+    // nothing.
+    const liveUids = function () {
+      return page.evaluate(function () {
+        return Array.prototype.map.call(
+          document.querySelectorAll('#deck-stack .swipe-card:not([data-exiting])'),
+          function (node) { return node.dataset.uid || ''; });
+      });
+    };
+    const holdKey = async function (key) {
+      await page.evaluate(function () {
+        window.__zcRepeats = 0;
+        if (window.__zcRepeatCounter) return;
+        window.__zcRepeatCounter = function (event) { if (event.repeat) window.__zcRepeats += 1; };
+        window.addEventListener('keydown', window.__zcRepeatCounter, true);
+      });
+      await page.keyboard.down(key);
+      for (let i = 0; i < 10; i += 1) await page.keyboard.down(key);
+      await page.keyboard.up(key);
+      return page.evaluate(function () { return window.__zcRepeats; });
+    };
+
+    for (const held of [{ key: 'ArrowLeft', on: null, name: 'holding ←' },
+      { key: 'Enter', on: '#btn-pass', name: 'holding Enter on the Pass button' }]) {
+      if (held.on) await page.focus(held.on);
+      const stackBefore = await liveUids();
+      const repeats = await holdKey(held.key);
+      const stackAfter = await liveUids();
+      const decided = stackBefore[0] ? await storedAction(page, me, stackBefore[0]) : null;
+      const gone = stackBefore.indexOf(stackAfter[0]);
+      t.check(held.name + ' passes one profile, not one for every auto-repeat',
+        repeats === 10 && stackBefore.length > 1 && stackAfter[0] === stackBefore[1] && decided === 'pass',
+        repeats + ' repeats seen; ' + (gone === -1 ? 'every card in view left' : gone + ' card(s) left') +
+          ', stored for the first: ' + (decided || 'nothing'));
+    }
+
     /* ---- a swipe that lands but cannot finish ---- */
 
     // recordSwipe writes the swipe and then goes looking for a match, so a

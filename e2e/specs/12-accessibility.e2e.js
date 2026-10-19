@@ -330,6 +330,146 @@ module.exports = {
     t.check('and the swipe is spoken, so the region is written to and not merely present',
       spoken.length > 0 && spoken !== status.text, JSON.stringify(spoken.slice(0, 60)));
 
+    /* ---- the full explanation is read with the arrow keys ---- */
+
+    // "I" opens "Why this card, in full" and puts the focus in it, and the page
+    // is then taller than the screen, so the arrows are how a keyboard reads
+    // it. ArrowDown, which the deck does not bind, scrolled. ArrowUp is the
+    // deck's super like, and it spent the free plan's one a day on the person
+    // being read about. Whether the key was left to the browser is read in the
+    // window's own listener, which runs after the deck's: that answer does not
+    // depend on how quickly the store would have let a super like through.
+    await page.waitForFunction(function () {
+      return /likes left today/.test((document.getElementById('usage-hint') || {}).textContent || '');
+    }, null, { timeout: 5000 }).catch(function () {});
+    await page.focus('#deck-stack .swipe-card');
+    const reading = await page.evaluate(function () {
+      return document.querySelector('#deck-stack .swipe-card').getAttribute('aria-label');
+    });
+    await page.keyboard.press('i');
+    const panelOpen = await page.waitForSelector('#deck-details:not(.hidden)', { timeout: 5000 })
+      .then(function () { return true; }, function () { return false; });
+    const hintBefore = await page.textContent('#usage-hint');
+    await page.evaluate(function () {
+      window.__zcArrowUp = null;
+      window.addEventListener('keydown', function (event) {
+        if (event.key === 'ArrowUp') window.__zcArrowUp = { prevented: event.defaultPrevented };
+      });
+    });
+    await page.keyboard.press('ArrowUp');
+    const readOn = await page.evaluate(function () {
+      const card = document.querySelector('#deck-stack .swipe-card:not([data-exiting])');
+      const panel = document.getElementById('deck-details');
+      return {
+        key: window.__zcArrowUp,
+        focusInPanel: !!(panel && panel.contains(document.activeElement)),
+        top: card ? card.getAttribute('aria-label') : null,
+        hint: (document.getElementById('usage-hint') || {}).textContent || ''
+      };
+    });
+    t.check('ArrowUp inside the full explanation is left to the browser to scroll with, and spends nothing',
+      panelOpen && readOn.focusInPanel && !!readOn.key && readOn.key.prevented === false &&
+        readOn.top === reading && readOn.hint === hintBefore,
+      JSON.stringify({ panelOpen: panelOpen, key: readOn.key, focusInPanel: readOn.focusInPanel }) +
+        (readOn.top === reading ? '' : ' top: ' + reading + ' -> ' + readOn.top) +
+        (readOn.hint === hintBefore ? '' : ' hint: ' + hintBefore + ' -> ' + readOn.hint));
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('#deck-details', { state: 'hidden', timeout: 5000 }).catch(function () {});
+    await h.closeBurst(page);
+
+    /* ---- a button that its own press disables keeps the keyboard on the deck ---- */
+
+    // Spending the day's last super like disables the Super button, and a
+    // disabled button cannot hold the focus: Chromium drops it on <body> the
+    // moment the button is disabled, and a screen reader loses its place with
+    // it, in the middle of the deck. Somebody who has already liked this
+    // account would raise the match overlay, which takes the focus for itself,
+    // so this would fail whatever the deck did; the card on top is one of the
+    // others first.
+    const likers = await page.evaluate(function () {
+      return window.ZC.store.getLikesReceived(window.ZC.auth.current.uid).then(function (list) {
+        return list.map(function (doc) { return doc.uid; });
+      });
+    });
+    for (let i = 0; i < 10; i += 1) {
+      const onTop = await page.evaluate(function () {
+        const node = document.querySelector('#deck-stack .swipe-card:not([data-exiting])');
+        return node ? node.dataset.uid : null;
+      });
+      if (!onTop || likers.indexOf(onTop) === -1) break;
+      await h.pressDeckKey(page, 'ArrowLeft', await h.topCardName(page));
+    }
+    const superFrom = await h.topCardName(page);
+    await page.focus('#btn-super');
+    // Pressed from the button itself, with the day's super like still there to
+    // spend: a button that was disabled already could not be focused, and
+    // would leave this to measure wherever the focus happened to be.
+    const superReady = await page.evaluate(function () {
+      const button = document.getElementById('btn-super');
+      return !button.disabled && document.activeElement === button;
+    });
+    await page.keyboard.press('Enter');
+    const superMoved = await page.waitForFunction(function (name) {
+      const card = document.querySelector('#deck-stack .swipe-card:not([data-exiting])');
+      const on = card && card.querySelector('.swipe-name');
+      return !on || on.textContent.trim() !== name;
+    }, superFrom, { timeout: 5000 }).then(function () { return true; }, function () { return false; });
+    const afterSuper = await page.evaluate(function () {
+      const card = document.querySelector('#deck-stack .swipe-card:not([data-exiting])');
+      const active = document.activeElement;
+      return {
+        disabled: document.getElementById('btn-super').disabled,
+        onTopCard: !!card && active === card,
+        active: !active || active === document.body ? 'BODY' : active.tagName + (active.id ? '#' + active.id : ''),
+        burst: !!document.querySelector('.match-burst')
+      };
+    });
+    t.check('spending the last super like from its button leaves the focus on the next card, not on the document',
+      superReady && superMoved && afterSuper.disabled && afterSuper.onTopCard && !afterSuper.burst,
+      JSON.stringify(Object.assign({ pressedFromAnEnabledButton: superReady, deckMoved: superMoved }, afterSuper)));
+    await h.closeBurst(page);
+
+    // Retry rebuilds the deck from nothing, and on the way it shows a skeleton
+    // with no control in it: the button that had the focus is gone, and the
+    // render that brought the cards back did not know anybody had been there.
+    // The deck's first read is made to fail once, from before the page script
+    // runs and only when the address asks for it, so nothing else here sees it.
+    await page.addInitScript(function () {
+      if (!/[?&]zcdeckfail=1(&|$)/.test(window.location.search)) return;
+      document.addEventListener('DOMContentLoaded', function () {
+        const store = window.ZC && window.ZC.store;
+        if (!store) return;
+        const real = store.listCandidates;
+        let failed = false;
+        store.listCandidates = function () {
+          if (failed) return real.apply(store, arguments);
+          failed = true;
+          return Promise.reject(new Error('e2e: the first deck read is made to fail'));
+        };
+      });
+    });
+    ctx.session.expectConsoleError(/The deck failed to load/);
+    await page.goto(ctx.base + '/dashboard.html?zcdeckfail=1', { waitUntil: 'domcontentloaded' });
+    const retry = page.locator('#deck-stack button', { hasText: 'Retry' });
+    const failedFirst = await retry.waitFor({ timeout: 5000 }).then(function () { return true; }, function () { return false; });
+    if (failedFirst) {
+      await retry.focus();
+      await page.keyboard.press('Enter');
+      await page.waitForSelector('#deck-stack .swipe-card', { timeout: 5000 }).catch(function () {});
+    }
+    ctx.session.expectConsoleError(null);
+    const afterRetry = await page.evaluate(function () {
+      const card = document.querySelector('#deck-stack .swipe-card:not([data-exiting])');
+      const active = document.activeElement;
+      return {
+        card: !!card,
+        onTopCard: !!card && active === card,
+        active: !active || active === document.body ? 'BODY' : active.tagName + (active.id ? '#' + active.id : '')
+      };
+    });
+    t.check('Retry, pressed from the keyboard, leaves the focus on the deck it brought back',
+      failedFirst && afterRetry.onTopCard, JSON.stringify(Object.assign({ errorStateShown: failedFirst }, afterRetry)));
+
     /* ---- the pane swap that was stranding people ---- */
 
     await page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });

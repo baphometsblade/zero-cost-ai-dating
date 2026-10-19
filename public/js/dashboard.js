@@ -400,7 +400,12 @@
     updateControls();
     if (state.detailsOpen) renderDetails();
     if (hadFocus) restoreDeckFocus();
+    else settleFocus();
   }
+
+  // Focus the deck dropped and could not yet put back, because there was
+  // nowhere right to put it: see `restoreDeckFocus` and `updateControls`.
+  let focusOwed = false;
 
   /**
    * Put focus back inside the freshly rebuilt stack: the live card when there
@@ -408,11 +413,27 @@
    * @returns {void}
    */
   function restoreDeckFocus() {
+    focusOwed = false;
     // Never pull focus out of something that owns it in its own right.
     if (state.burst) return;
     if (detailsEl && document.activeElement && detailsEl.contains(document.activeElement)) return;
     const target = topCard() || $('button, a[href]', stackEl);
     if (target && typeof target.focus === 'function') target.focus();
+    // A skeleton has nothing in it that can take the focus. Retry and Check
+    // again are removed by the very render that shows one, so the focus is
+    // owed to the render that replaces it, when the deck has loaded.
+    else focusOwed = true;
+  }
+
+  /**
+   * Pay back focus the deck owes, unless somebody has put it somewhere since.
+   * @returns {void}
+   */
+  function settleFocus() {
+    if (!focusOwed) return;
+    focusOwed = false;
+    const active = document.activeElement;
+    if (!active || active === document.body) restoreDeckFocus();
   }
 
   /* ------------------------------------------------------------------------
@@ -461,12 +482,27 @@
 
   /** Enable exactly the buttons that can do something right now. */
   function updateControls() {
+    // Read before anything is disabled: Chromium moves the focus off a button
+    // the moment it is disabled, onto <body>, and from then on nothing says
+    // where it was. Chromium is the only engine this was measured in; in one
+    // that left the focus on the disabled button, settleFocus, which pays back
+    // only focus that has fallen to <body>, would leave it there.
+    const focused = document.activeElement;
     const live = !state.loading && !state.error && state.queue.length > 0;
     if (buttons.pass) buttons.pass.disabled = !live;
     if (buttons.info) buttons.info.disabled = !live;
     if (buttons.like) buttons.like.disabled = !live || exhausted('likes');
     if (buttons.super) buttons.super.disabled = !live || exhausted('superLikes');
     if (buttons.rewind) buttons.rewind.disabled = !state.history.length;
+    // The day's last like from Like, the free super like from Super, a rewind
+    // that empties the history from Rewind, a pass on the last card from Pass:
+    // each disables the very button that was pressed, under the keyboard that
+    // pressed it. Mid-commit the card on top is still the one leaving, so while
+    // a swipe or a rewind is in flight the render that rebuilds the stack pays
+    // the focus back, onto the card it puts on top; otherwise it is paid here.
+    const onButton = Object.keys(buttons).some(function (name) { return buttons[name] === focused; });
+    if (onButton && focused.disabled) focusOwed = true;
+    if (!state.busy) settleFocus();
   }
 
   /** Render "n of m likes left today" under the deck. */
@@ -806,7 +842,12 @@
         return;
       }
       const action = decideDrag(travelX, travelY, travelX / elapsed, travelY / elapsed);
-      if (!action) {
+      // A deck that cannot commit just now refuses without a word: the match
+      // overlay goes up when a like's write answers, which can be in the middle
+      // of the next card's drag, and commit() returned early and left that card
+      // where the drag had put it, tilted and stamped, with nothing stored. So
+      // it goes home instead, the same as a drag too short to count.
+      if (!action || state.busy || state.burst) {
         resetCard(card);
         return;
       }
@@ -1273,6 +1314,7 @@
     });
     state.modalOpen = false;
     if (choice === 'plans') window.location.href = 'subscription.html';
+    else showHeldBurst();
   }
 
   /* ------------------------------------------------------------------------
@@ -1406,6 +1448,22 @@
      10. The match burst
      ------------------------------------------------------------------------ */
 
+  // A match that answered while one of this page's dialogs was open, waiting
+  // for that dialog to close.
+  let heldBurst = null;
+
+  /**
+   * Raise the overlay for a match that waited on a dialog. Called as the
+   * dialog closes, by whatever opened it, once the dialog has given the focus
+   * back: the overlay then takes it from there.
+   * @returns {void}
+   */
+  function showHeldBurst() {
+    const held = heldBurst;
+    heldBurst = null;
+    if (held) showMatchBurst(held.result, held.matchId);
+  }
+
   /**
    * Celebrate a mutual like and hand over three openers built from what the
    * two of you actually share. Focus is trapped until it closes.
@@ -1415,10 +1473,18 @@
    */
   function showMatchBurst(result, matchId) {
     const other = result.profile;
-    // A second match while the first overlay is still up: say it rather than
-    // stacking two dialogs on top of each other.
-    if (state.burst) {
+    // A second match while the first overlay is still up, or still waiting to
+    // go up: say it rather than stacking two dialogs on top of each other.
+    if (state.burst || heldBurst) {
       toast('It is also a match with ' + nameOf(other) + '. Both are waiting in Matches.', 'success');
+      return;
+    }
+    // Opened over one of this page's dialogs, the overlay covered the dialog
+    // while the dialog's focus trap kept the keyboard: what was on screen and
+    // what the keys reached were two different things, and Escape closed the
+    // one underneath. So it waits for the dialog to close; see showHeldBurst.
+    if (state.modalOpen) {
+      heldBurst = { result: result, matchId: matchId };
       return;
     }
     const otherName = nameOf(other);
@@ -1470,13 +1536,21 @@
       attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId }
     }, [inner]);
 
-    // Escape closes; Tab cycles inside the overlay.
+    // Escape closes it wherever the focus is, which is why it is heard on the
+    // document. A click on the overlay's text, where nothing can take the
+    // focus, leaves the focus on <body>: a handler on the overlay never heard
+    // that Escape, and the deck's own stands down while an overlay is up, so
+    // Escape did nothing until the focus was tabbed back into the overlay.
+    // closeBurst removes it.
+    function onEscape(event) {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      event.preventDefault();
+      closeBurst();
+    }
+    document.addEventListener('keydown', onEscape);
+
+    // Tab cycles inside the overlay.
     overlay.addEventListener('keydown', function (event) {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        closeBurst();
-        return;
-      }
       if (event.key !== 'Tab') return;
       const focusables = $$('a[href], button:not([disabled])', overlay);
       if (!focusables.length) return;
@@ -1505,6 +1579,7 @@
     function closeBurst() {
       if (state.burst !== overlay) return;
       state.burst = null;
+      document.removeEventListener('keydown', onEscape);
       if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
       const card = topCard();
       const restorable = opener && opener !== document.body &&
@@ -1569,12 +1644,15 @@
       });
     } finally {
       state.modalOpen = false;
+      showHeldBurst();
     }
   }
 
   /**
    * Global shortcut handler. It stands down whenever something else owns the
-   * keyboard: a text field, a modal, or the match overlay.
+   * keyboard: a text field, a modal, the match overlay, or, for the arrow
+   * keys, the full explanation while the focus is in it. A key held down acts
+   * once, however long it is held.
    * @param {KeyboardEvent} event the keydown
    * @returns {void}
    */
@@ -1584,6 +1662,27 @@
     if (state.burst || state.modalOpen || $('.modal-backdrop')) return;
 
     const key = event.key;
+
+    // The full explanation is a page to read, and "I" puts the focus in it, so
+    // the arrows there are the reader's. ArrowDown, which the deck does not
+    // bind, already scrolled it; ArrowUp was the super like, and spent the free
+    // plan's one a day on the person being read about, with no rewind on that
+    // plan to take it back. Left to the browser, both scroll.
+    if (/^Arrow/.test(key) && detailsEl && detailsEl.contains(event.target)) return;
+
+    // One press, one action. Holding a key makes the operating system send its
+    // keydown again, many times a second, with `repeat` set, and the deck took
+    // each of those as a fresh swipe whenever it was free to: a held ← passed a
+    // profile per repeat, faster than anybody could see them, and a held → went
+    // on spending likes, neither of which the free plan can rewind. Enter is
+    // included because Chromium, at least, clicks a focused button again on
+    // every repeated Enter, so a held Enter on Like did the same by another
+    // road. The repeats are swallowed, not just ignored, so a held arrow does
+    // not go on to scroll the page instead.
+    if (event.repeat) {
+      if (/^(ArrowLeft|ArrowRight|ArrowUp|z|Z|i|I|Enter)$/.test(key)) event.preventDefault();
+      return;
+    }
 
     if (key === 'Escape' && state.detailsOpen) {
       event.preventDefault();
