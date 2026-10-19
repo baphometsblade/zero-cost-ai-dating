@@ -638,13 +638,102 @@ module.exports = {
         walked += stops;
       }
     }
-    await page.emulateMedia({ reducedMotion: null });
     // Walked both ways, settings and the profile make 184 stops in <main>; a
     // walk that found far fewer stopped early and would pass by looking at
     // nothing.
     t.check('no control the keyboard reaches is scrolled to where the header or the tab bar covers it',
       walked >= 150 && buried.length === 0,
       walked + ' stops walked, ' + buried.length + ' covered' + (buried.length ? ': ' + buried.slice(0, 3).join('; ') : ''));
+
+    // That offset is for <main>'s controls, and the walk above records only
+    // those. The header's own controls sit inside the band it keeps clear and
+    // never leave the screen, so while it applied to them as well the browser
+    // took every one of them for covered: Shift+Tab out of <main> on a page
+    // scrolled part-way down moved the page up about 400px for each header
+    // link it reached, all of them in view all along. So each page starts
+    // part-way down and is walked backwards out of <main> through the header,
+    // and no stop there may move it. Then the focus steps into the header and
+    // straight back to a control parked under the header, and that step has
+    // to bring it out: lifting the offset for the header must not lift it for
+    // <main> as well.
+    const jumped = [];
+    const returns = [];
+    let headerStops = 0;
+    let lowestStart = Infinity;
+    for (const name of ['settings.html', 'profile.html']) {
+      await page.goto(ctx.base + '/' + name, { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector(name === 'profile.html' ? '#profile-main:not(.hidden) #interest-groups input' : '#theme-group');
+      await page.waitForSelector('[data-zc-nav] .nav-links', { state: 'attached' });
+      // Part-way down, with the focus on the first control in <main> and
+      // nothing scrolled to show it.
+      const start = await page.evaluate(function () {
+        if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+        window.scrollTo(0, Math.min(900, document.scrollingElement.scrollHeight - window.innerHeight));
+        Array.prototype.find.call(
+          document.querySelectorAll('main a[href], main button:not([disabled]), main input:not([disabled]), main select, main textarea'),
+          function (node) { return node.getClientRects().length > 0; }).focus({ preventScroll: true });
+        return Math.round(window.scrollY);
+      });
+      lowestStart = Math.min(lowestStart, start);
+      let stops = 0;
+      for (let i = 0; i < 20; i += 1) {
+        await page.keyboard.press('Shift+Tab');
+        const stop = await page.evaluate(function () {
+          const node = document.activeElement;
+          const nav = document.querySelector('[data-zc-nav]');
+          if (!node || !nav || !nav.contains(node)) return null;
+          return {
+            label: (node.getAttribute('aria-label') || (node.textContent || '').trim() || node.tagName).replace(/\s+/g, ' ').slice(0, 30),
+            y: Math.round(window.scrollY)
+          };
+        });
+        if (!stop) {
+          if (stops > 0) break;
+          continue;
+        }
+        stops += 1;
+        if (stop.y !== start) jumped.push(name + ': "' + stop.label + '" moved the page from y ' + start + ' to ' + stop.y);
+      }
+      headerStops += stops;
+
+      // The same control, 10px from the top of the screen: inside the
+      // viewport, so only the offset says it has to move.
+      const parked = await page.evaluate(function () {
+        if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+        const first = Array.prototype.find.call(
+          document.querySelectorAll('main a[href], main button:not([disabled]), main input:not([disabled]), main select, main textarea'),
+          function (node) { return node.getClientRects().length > 0; });
+        first.setAttribute('data-zc-parked', '');
+        const box = (first.tagName === 'INPUT' && first.closest('label')) || first;
+        window.scrollBy(0, box.getBoundingClientRect().top - 10);
+        first.focus({ preventScroll: true });
+        return Math.round(box.getBoundingClientRect().top);
+      });
+      await page.keyboard.press('Shift+Tab');
+      await page.keyboard.press('Tab');
+      returns.push(await page.evaluate(function (parkedAt) {
+        const first = document.querySelector('[data-zc-parked]');
+        first.removeAttribute('data-zc-parked');
+        const back = document.activeElement === first;
+        const top = ((first.tagName === 'INPUT' && first.closest('label')) || first).getBoundingClientRect().top;
+        const edge = document.querySelector('[data-zc-nav]').getBoundingClientRect().bottom;
+        return {
+          ok: back && parkedAt < edge && top >= edge - 0.5,
+          text: (back ? 'back' : 'not back') + ' on the control parked at y ' + parkedAt + ', now at ' + Math.round(top) +
+            ', the header ending at ' + Math.round(edge)
+        };
+      }, parked));
+    }
+    await page.emulateMedia({ reducedMotion: null });
+    // A page that started at the top could not be scrolled up by anything,
+    // and a walk that never reached the header looked at nothing.
+    t.check('focus moved into the sticky header leaves a page scrolled part-way down where it was',
+      lowestStart >= 300 && headerStops >= 2 && jumped.length === 0,
+      headerStops + ' header stops from y >= ' + lowestStart + ', ' + jumped.length + ' moved the page' +
+        (jumped.length ? ': ' + jumped.slice(0, 3).join('; ') : ''));
+    t.check('and focus moved back out of it into <main> is still kept clear of the header',
+      returns.length === 2 && returns.every(function (r) { return r.ok; }),
+      returns.map(function (r) { return r.text; }).join('; '));
 
     /* ---- the daily-limit banner: said once, not once a second ---- */
 

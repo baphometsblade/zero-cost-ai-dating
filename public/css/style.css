@@ -769,6 +769,21 @@ html {
   }
 }
 
+/* Except while the focus is in the header. Its own controls sit inside the
+   band the top padding says is covered, so to the browser every one of them
+   was hidden: on a page scrolled part-way down, Shift+Tab out of <main> moved
+   the page about 400px up for each header link it reached, though the header
+   is sticky and they were all in view all along. Focus moves before the page
+   scrolls to it, so a move into the header is measured without the padding
+   and a move back into <main> with it. The offset stays a padding on the
+   page rather than becoming a margin on what is in <main>: tried that way, a
+   link in the matches page's strip of new matches, which scrolls sideways on
+   its own, was left partly under the header. A browser without :has() keeps
+   the padding, and the old jump with it. */
+html:has(.nav :focus) {
+  scroll-padding-top: 0;
+}
+
 /* --------------------------------------------------------------------------
    6. Buttons
    -------------------------------------------------------------------------- */
