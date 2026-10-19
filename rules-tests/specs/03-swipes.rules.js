@@ -3,7 +3,9 @@
    The deterministic id is load-bearing: it is what makes recording a swipe
    idempotent and what stops a client inventing two conflicting swipes for the
    same pair. Deletes are allowed in both directions because a rewind removes
-   your own, and account deletion (PR #2) must be able to purge inbound likes. */
+   your own, and account deletion (PR #2) must be able to purge inbound likes —
+   and in the inbound direction only likes: a pass aimed at you, and a miss, are
+   its author's alone, as they are to read. */
 'use strict';
 
 module.exports = {
@@ -17,12 +19,14 @@ module.exports = {
     const THIRD = 'third';
     const FOURTH = 'fourth';   // never seeded, so writes to it are creates
     const PASSER = 'passer';   // passed on ME
+    const STARRER = 'starrer'; // super-liked ME
 
     await seed(async function (admin) {
       const db = admin.firestore();
       await db.doc('swipes/' + OTHER + '_' + ME).set(h.swipeDoc(OTHER, ME, 'like'));
       await db.doc('swipes/' + OTHER + '_' + THIRD).set(h.swipeDoc(OTHER, THIRD, 'like'));
       await db.doc('swipes/' + PASSER + '_' + ME).set(h.swipeDoc(PASSER, ME, 'pass'));
+      await db.doc('swipes/' + STARRER + '_' + ME).set(h.swipeDoc(STARRER, ME, 'super'));
     });
 
     /* ---- create ---- */
@@ -166,8 +170,30 @@ module.exports = {
     t.check('you can delete your own swipe (the rewind path)',
       await ok(assertSucceeds(as(ME).doc('swipes/' + ME + '_' + THIRD).delete())));
 
-    t.check('you can delete a swipe aimed at you (account deletion purges inbound likes)',
+    t.check('you can delete a like aimed at you (account deletion purges inbound likes)',
       await ok(assertSucceeds(as(ME).doc('swipes/' + OTHER + '_' + ME).delete())));
+
+    t.check('and a super like aimed at you',
+      await ok(assertSucceeds(as(ME).doc('swipes/' + STARRER + '_' + ME).delete())));
+
+    // Account deletion is the only reason the target may delete at all, and it
+    // purges likes, because a pass is not the target's to read. Deleting one is
+    // not harmless either: the id is `from_to`, so the person passed on knows it,
+    // and a pass deleted is a person back in its author's deck, which leaves out
+    // everybody its author has a swipe for.
+    t.check('but not a pass aimed at you, which would put you back in its author\'s deck',
+      await ok(assertFails(as(ME).doc('swipes/' + PASSER + '_' + ME).delete())));
+
+    // And so not a miss aimed at you either. Were a miss allowed to the target and
+    // a pass refused, the refusal would be the pass, the oracle the read rule
+    // refuses a miss aimed at you to deny.
+    t.check('nor a missing swipe aimed at you, so the refusal does not single out a pass',
+      await ok(assertFails(as(ME).doc('swipes/' + FOURTH + '_' + ME).delete())));
+
+    // The pass is still its author's to rewind: the target branch narrowed, the
+    // author's did not.
+    t.check('while the one who passed can still delete it (the rewind path)',
+      await ok(assertSucceeds(as(PASSER).doc('swipes/' + PASSER + '_' + ME).delete())));
 
     t.check('you cannot delete a swipe between two other people',
       await ok(assertFails(as(ME).doc('swipes/' + OTHER + '_' + THIRD).delete())));
@@ -181,9 +207,9 @@ module.exports = {
     t.check('you can delete your own swipe again once it is gone (a second rewind)',
       await ok(assertSucceeds(as(ME).doc('swipes/' + ME + '_' + THIRD).delete())));
 
-    // ...allowed by the id: either half of the pair may delete a miss, as either may
-    // delete the swipe while it is there, so a stranger gets the same refusal whether
-    // or not the document is there and learns nothing from it.
+    // ...allowed by the id, to its author alone, as the read of a miss is: a stranger
+    // gets the same refusal whether or not the document is there and learns nothing
+    // from it.
     t.check('but you cannot delete a missing swipe between two other people',
       await ok(assertFails(as(ME).doc('swipes/' + OTHER + '_' + FOURTH).delete())));
 

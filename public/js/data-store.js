@@ -3222,10 +3222,9 @@
         if (snap.exists) return { ok: false, reason: 'matched' };
         // Whether the swipe is still there is not asked: another tab may have rewound
         // it first, or this may be a retry, and the delete goes ahead either way.
-        // firestore.rules allows deleting a missing swipe to either person its id
-        // names (wider than reading one, which only its author may), so a second
-        // undo answers `{ ok: true }` exactly as the demo adapter's does, and no
-        // read is spent finding out.
+        // firestore.rules allows the author its id names to delete a missing swipe,
+        // as it allows them to read one, so a second undo answers `{ ok: true }`
+        // exactly as the demo adapter's does, and no read is spent finding out.
         tx.delete(swipeRef);
         return { ok: true };
       });
@@ -3770,6 +3769,17 @@
       // as that account's own record of a decision, readable by nobody else; the
       // demo adapter leaves it the same way. settings.html promises to remove
       // "every swipe you have made", which this still does.
+      //
+      // The rules let this account delete a swipe aimed at it only while that
+      // swipe is a like or a super like, and refuse it a missing one — so a liker
+      // who rewinds between the query and the batch below leaves the batch
+      // deleting a miss, or a pass if they swiped again, and the whole batch is
+      // refused. Nothing in it was deleted and nothing is wrong: the like it was
+      // for is gone. So a refused batch of inbound likes is answered by asking
+      // again, once, which no longer lists that swipe. A second refusal is thrown
+      // like any other failure, before the account's documents go, so the person
+      // can retry. Their own swipes are not asked twice: the rules let the author
+      // delete one whatever it says, and a missing one too.
       const swipes = db().collection('swipes');
       const queries = [
         swipes.where('from', '==', uid),
@@ -3777,7 +3787,13 @@
       ];
       for (let q = 0; q < queries.length; q += 1) {
         const snap = await queries[q].get();
-        await batchDelete(snap.docs.map(function (doc) { return doc.ref; }));
+        try {
+          await batchDelete(snap.docs.map(function (doc) { return doc.ref; }));
+        } catch (err) {
+          if (q === 0 || !isPermissionDenied(err)) throw err;
+          const again = await queries[q].get();
+          await batchDelete(again.docs.map(function (doc) { return doc.ref; }));
+        }
       }
 
       // Every match this account is in, messages first (see unmatch).
