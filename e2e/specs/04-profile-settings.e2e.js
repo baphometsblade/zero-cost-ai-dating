@@ -766,6 +766,27 @@ module.exports = {
     await editing.reload({ waitUntil: 'domcontentloaded' });
     await editing.waitForSelector('#profile-main:not(.hidden)');
     const askedOnReload = editingAsked.splice(0);
+    // A page the back-forward cache restores is in use again, and so is the
+    // question. Here the page hears `zc:leaving`, as it does on its way out, and
+    // is then hidden and restored — the same synthetic pair 03 uses, because
+    // this Chromium restores nothing from the cache itself. An edit made after
+    // that is asked about on reload like any other.
+    await editing.evaluate(function () {
+      window.dispatchEvent(new Event('zc:leaving'));
+      window.dispatchEvent(new Event('pagehide'));
+      let show;
+      try {
+        show = new PageTransitionEvent('pageshow', { persisted: true });
+      } catch (err) {
+        show = new Event('pageshow');
+        Object.defineProperty(show, 'persisted', { value: true });
+      }
+      window.dispatchEvent(show);
+    });
+    await editing.fill('#input-bio', 'An edit made on a page restored after it was left.');
+    await editing.reload({ waitUntil: 'domcontentloaded' });
+    await editing.waitForSelector('#profile-main:not(.hidden)');
+    const askedAfterRestore = editingAsked.splice(0);
     await editing.fill('#input-bio', 'An edit nobody saved before another tab signed out.');
     await page.goto(ctx.base + '/settings.html', { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('main [data-signout]');
@@ -782,6 +803,8 @@ module.exports = {
       otherTab);
     t.check('the profile editor asks before an unsaved edit is reloaded away',
       askedOnReload.length === 1 && askedOnReload[0] === 'beforeunload', JSON.stringify(askedOnReload));
+    t.check('and asks again on a page restored after it was left',
+      askedAfterRestore.length === 1 && askedAfterRestore[0] === 'beforeunload', JSON.stringify(askedAfterRestore));
     t.check('but a sign-out in another tab takes it to the sign-in page without asking',
       editingAsked.length === 0 && h.pageUrl('auth').test(editingTab) && /[?&]next=/.test(editingTab),
       JSON.stringify({ asked: editingAsked, at: editingTab.replace(ctx.base, '') }));

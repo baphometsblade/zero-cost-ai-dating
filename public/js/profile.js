@@ -1523,6 +1523,10 @@
     // it is: nothing in it counts until Add. A page restored whole from the
     // back/forward cache kept its state along with its controls.
     window.addEventListener('pageshow', function (event) {
+      // A page the back-forward cache restores is in use again. `leaving` was
+      // set on its way out — by Start matching, or by `zc:leaving` — and, left
+      // set, it would let every later edit go without the question.
+      if (event.persisted) leaving = false;
       if (event.persisted || !painted) return;
       controlValues().forEach(function (entry) {
         if (entry[0][entry[1]] !== entry[2]) entry[0][entry[1]] = entry[2];

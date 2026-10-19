@@ -856,11 +856,10 @@
       };
       // Checked, like the swipe write that precedes it. `recordSwipe` catches this and
       // rethrows it as a stored-swipe failure, so the deck keeps the swipe, skips the
-      // match burst and shows "Saved, but we could not check for a match just then. We will
-      // try again next time you open the app." — and it will: the facade noted this pair
-      // (before calling in here, or for a pair decided earlier, once this rejection names
-      // the decision on record), and `reconcileMatches` finishes it on the next page load.
-      // byte for byte what the Firestore adapter produces when `matchRef.set` fails.
+      // match burst and says it could not check for a match just then and will try again
+      // next time the app is opened — and it will: the facade noted this pair before
+      // calling in here, and `reconcileMatches` finishes it on the next page load. The
+      // Firestore adapter answers the same way when `matchRef.set` fails.
       // Announcing a match that was never written is the one thing this must not do:
       // the person is told they matched, the conversation is not there on reload, and
       // nothing ever writes it, because both clients have spent their swipe.
@@ -4014,17 +4013,16 @@
   }
 
   /** Remember that a match check is about to be attempted for this pair. */
-  function notePendingMatch(fromUid, toUid, action) {
-    // A pass on a pair nobody has decided can never produce a match, so it can
-    // never leave one unfinished, and it is not noted. A pass pressed on a pair
-    // whose like or super like already stands is the exception: recordSwipe
-    // runs the match check on the decision on record, and when that check
-    // fails the facade notes the pair afterwards, for that decision. Only a tab
-    // that leaves during that check loses it; noting every pass up front would
-    // cover that case too, at the price of a note per pass. What IS pinned is
-    // the half a stale note can reach — `finishMatchCheck` reads the stored
-    // action, so a `pass` cannot become a match however the note got there.
-    if (!isPositive(normalizeAction(action))) return;
+  function notePendingMatch(fromUid, toUid) {
+    // Whatever key was pressed. A pass used to go unnoted, on the grounds that
+    // a pass can never match — but a pass on a pair whose like or super like
+    // already stands runs the match check on the decision on record, and a tab
+    // that left during that check lost it, with nothing on this device to say
+    // it was owed. The note is free while it lasts: any settled answer clears
+    // it, and one left by a pass whose write never landed costs the 1-read
+    // check `recordSwipe` already accepts for a like. What a stale note can
+    // reach is pinned — `finishMatchCheck` reads the stored action, so a
+    // `pass` cannot become a match however the note got there.
     const map = readPendingMatches();
     if (!isPlainObject(map[fromUid])) map[fromUid] = {};
     if (map[fromUid][toUid]) return;
@@ -4566,21 +4564,16 @@
       // The cost of being early is one wasted 1-read check on the next load when
       // the swipe itself never landed, and `finishMatchCheck` answers that
       // without writing anything.
-      notePendingMatch(fromUid, toUid, action);
+      notePendingMatch(fromUid, toUid);
       try {
         const outcome = await adapter.recordSwipe(fromUid, toUid, action);
         clearPendingMatch(fromUid, toUid);
         return outcome;
       } catch (err) {
         // A failure BEFORE the swipe landed leaves nothing to finish. Only a
-        // rejection that says the swipe is stored is worth coming back to.
-        //
-        // The note above was taken from the action pressed, and a pass is
-        // never noted. A pass on a pair whose like or super like already
-        // stands runs a match check all the same, so when that check fails the
-        // pair is noted now, for the decision on record.
+        // rejection that says the swipe is stored — this one, or a decision
+        // already on record — is worth coming back to.
         if (!(err && err.swipeStored)) clearPendingMatch(fromUid, toUid);
-        else if (err.existing) notePendingMatch(fromUid, toUid, err.action);
         throw err;
       }
     },

@@ -1214,11 +1214,11 @@ test('a match check that fails on a pair decided earlier still says which decisi
 });
 
 test('and the note it leaves is for the decision that stands, not the one pressed', async function () {
-  // The facade notes the pair before the adapter runs, from the action it was
-  // handed, and a pass is never noted because a pass can never match. A pass on
-  // a pair whose like already stands is a match check all the same, and when it
-  // failed this device noted nothing, although the deck says "We will try again
-  // next time you open the app". The like is written straight into storage, as
+  // The facade notes the pair before the adapter runs. It used to take the
+  // note from the action it was handed and never note a pass, because a pass
+  // can never match; but a pass on a pair whose like already stands is a match
+  // check all the same, and when it failed this device noted nothing, although
+  // the deck says "We will try again next time you open the app". The like is written straight into storage, as
   // another device's would arrive, so this one holds no note of its own for it.
   // Notes outlive a cleared storage in memory, as they do on a page, so any an
   // earlier test left are spent first, against a world with no swipes to finish.
@@ -1249,6 +1249,45 @@ test('and the note it leaves is for the decision that stands, not the one presse
     'the next page load finishes the check, because the like on record is owed one');
   assert.ok((await store.getMatches(me)).some(function (m) { return m.otherUid === them; }),
     'and the conversation is there');
+});
+
+test('and the note is down before the match check runs, whatever key was pressed', async function () {
+  // The facade notes a pair before calling the adapter because the likeliest
+  // way to lose a match check is a tab that leaves while it runs, and a note
+  // written once the check has failed never exists for that tab. A pass was
+  // the exception: it was never noted up front, so a pass on a pair whose like
+  // stands ran a match check this device had no note of until the check had
+  // failed. Looked at the moment the check writes the match, the note has to
+  // be there already.
+  await resetWorld();
+  const me = 'demo-you';
+  const them = 'ava-nakamura';
+  await store.reconcileMatches(me);
+  await store.recordSwipe(them, me, 'like');
+  const swipes = raw(KEYS.swipes);
+  swipes[me + '_' + them] = { id: me + '_' + them, from: me, to: them, action: 'like', createdAt: new Date().toISOString() };
+  writeRaw(KEYS.swipes, swipes);
+
+  let notedWhenChecked = null;
+  const realSetItem = localStorageShim.setItem;
+  localStorageShim.setItem = function (key, value) {
+    if (String(key) === KEYS.matches && notedWhenChecked === null) {
+      const notes = JSON.parse(backing.get(KEYS.pendingMatch) || '{}');
+      notedWhenChecked = !!(notes[me] && notes[me][them]);
+    }
+    return realSetItem.call(localStorageShim, key, value);
+  };
+  let outcome = null;
+  try {
+    outcome = await store.recordSwipe(me, them, 'pass');
+  } finally {
+    localStorageShim.setItem = realSetItem;
+  }
+  assert.ok(outcome && outcome.existing && outcome.action === 'like' && outcome.created,
+    'the pass found the like, and its match check wrote the missing match');
+  assert.equal(notedWhenChecked, true, 'the pair was noted before the match was written');
+  assert.deepEqual(await store.reconcileMatches(me), { checked: 0, repaired: 0, pending: 0 },
+    'and the answered check spent the note');
 });
 
 test('a message whose write is refused is reported as lost, not as sent', async function () {

@@ -305,7 +305,8 @@ module.exports = {
     // rejection said only that the swipe was stored, so the deck counted and
     // taught a swipe that was never recorded. The like here was made where this
     // device kept no note of it (another device, or a write reported lost that
-    // landed), and the swipe made now is a pass, which is never noted.
+    // landed), and the swipe made now is a pass, which this device used to
+    // leave unnoted.
     const decided = 'rec-decided';
     await k.admin.set('swipes', decided + '_' + me, k.h.swipeDoc(decided, me, 'like'));
     await k.admin.set('swipes', me + '_' + decided, k.h.swipeDoc(me, decided, 'like'));
