@@ -49,31 +49,7 @@ module.exports = {
     // next profile save of anything at all — a bio edit — wrote the old name
     // back. Both tabs then said saved, and the rename was gone.
     const renamed = 'Renamed In Another Tab';
-    const settingsTab = await ctx.session.context.newPage();
-    // Into the session's own list, so the spec's closing no-errors check covers
-    // this tab too. The CDN is aborted on purpose in demo mode, and the session
-    // writes those failures off by the same test.
-    settingsTab.on('pageerror', function (err) {
-      ctx.session.errors.push('pageerror @ ' + settingsTab.url() + ' :: ' + (err && err.message ? err.message : String(err)));
-    });
-    settingsTab.on('console', function (msg) {
-      if (msg.type() !== 'error') return;
-      const text = msg.text();
-      const where = (msg.location() || {}).url || '';
-      const cdnNoise = text.indexOf('e2e-unhandled-rejection:') !== 0 &&
-        (where ? /^https?:\/\/([a-z0-9-]+\.)*gstatic\.com\//i.test(where) : /gstatic\.com/i.test(text));
-      if (!cdnNoise) ctx.session.errors.push('console.error @ ' + (where || settingsTab.url()) + ' :: ' + text);
-    });
-    await settingsTab.goto(ctx.base + '/settings.html', { waitUntil: 'domcontentloaded' });
-    await settingsTab.waitForFunction(function () {
-      return document.getElementById('input-name').value !== '';
-    });
-    await settingsTab.fill('#input-name', renamed);
-    await settingsTab.click('#save-account');
-    await settingsTab.waitForFunction(function () {
-      return document.getElementById('account-status').textContent.trim() === 'Saved.';
-    });
-    await settingsTab.close();
+    await renameInSettings(renamed);
     const nameBeforeSave = await page.inputValue('#input-name');
     await page.fill('#input-bio', (await page.inputValue('#input-bio')) + ' Saved from the older tab.');
     await page.click('#save-btn');
@@ -104,6 +80,118 @@ module.exports = {
     t.check('and the editor takes up the new name, so "Saved just now." is true of the whole form',
       afterOlderSave.box === renamed && afterOlderSave.status === 'Saved just now.' &&
       !afterOlderSave.discardEnabled, JSON.stringify(afterOlderSave));
+
+    /* ---- taking up a rename leaves alone what is being typed meanwhile ---- */
+
+    // That save takes the new name into the form when it comes back. It used
+    // to do so by repainting every control and clearing every error, and only
+    // the Save button is disabled while a save is out, so whatever the person
+    // did in the meantime went with it: a date typed halfway was emptied, and
+    // the error under a refused photo link vanished with the link still in its
+    // box. The store is held here so that both happen while the save is out,
+    // and the check says so if it was not held. The name has to be taken up
+    // for this to test anything: a save that moves nothing repaints nothing.
+    const renamedAgain = 'Renamed Again Elsewhere';
+    const refusedLink = 'http://not-https.example/x.png';
+    await renameInSettings(renamedAgain);
+    await page.evaluate(function () {
+      const store = window.ZC.store;
+      const real = store.updateUser;
+      const gate = new Promise(function (resolve) { window.__e2eReleaseSave = resolve; });
+      store.updateUser = function () {
+        const args = arguments;
+        store.updateUser = real;
+        window.__e2eSaveHeld = true;
+        return gate.then(function () { return real.apply(store, args); });
+      };
+    });
+    await page.fill('#input-bio', (await page.inputValue('#input-bio')) + ' Saved while a date was half typed.');
+    await page.click('#save-btn');
+    await page.waitForFunction(function () { return window.__e2eSaveHeld === true; });
+    await page.fill('#input-photo', refusedLink);
+    await page.click('#btn-add-photo');
+    await page.fill('#input-birthdate', '');
+    await page.click('#input-birthdate');
+    await page.keyboard.type('1');
+    const duringSave = await page.evaluate(function () {
+      return {
+        held: document.getElementById('save-btn').hasAttribute('aria-busy'),
+        photoError: document.getElementById('error-photo').textContent.trim(),
+        halfTyped: document.getElementById('input-birthdate').validity.badInput
+      };
+    });
+    await page.evaluate(function () { window.__e2eReleaseSave(); });
+    await page.waitForFunction(function () {
+      return !document.getElementById('save-btn').hasAttribute('aria-busy');
+    });
+    const afterTakeUp = await page.evaluate(function () {
+      return {
+        name: document.getElementById('input-name').value,
+        photoError: document.getElementById('error-photo').textContent.trim(),
+        photoBox: document.getElementById('input-photo').value,
+        halfTyped: document.getElementById('input-birthdate').validity.badInput
+      };
+    });
+    t.check('a save that takes up a rename leaves a date typed halfway and a photo error where they were',
+      duringSave.held && duringSave.photoError !== '' && duringSave.halfTyped &&
+        afterTakeUp.name === renamedAgain && afterTakeUp.halfTyped &&
+        afterTakeUp.photoError === duringSave.photoError && afterTakeUp.photoBox === refusedLink,
+      (duringSave.held ? '' : 'the save was not held, so this tested nothing — ') +
+        JSON.stringify({ afterTakeUp: afterTakeUp, duringSave: duringSave }));
+    // Back to the stored document for what follows: Discard repaints it, and
+    // the photo box is the one control it leaves alone.
+    await page.click('#discard-btn');
+    await h.clickModalAction(page, 'Discard');
+    await page.waitForSelector('.modal-backdrop', { state: 'detached' });
+    await page.fill('#input-photo', '');
+
+    /* ---- a birthdate corrected in one tab survives an older tab's save ---- */
+
+    // Only the save that completes a profile sends the birthdate unasked. A fix
+    // for the profile rebuilt with no birthdate first sent it on every save,
+    // and then a profile tab opened before a correction made in another put
+    // its own birthdate back on its next save of anything at all. "Saved just
+    // now." is already showing from earlier saves, so a save is waited out by
+    // the button dropping `aria-busy`, and what counts is read from the store.
+    const savedProfile = async function (tab) {
+      await tab.click('#save-btn');
+      await tab.waitForFunction(function () {
+        return !document.getElementById('save-btn').hasAttribute('aria-busy') &&
+          /^Saved/.test(document.getElementById('save-status').textContent.trim());
+      }, null, { timeout: 10000 });
+    };
+    const storedProfile = function () {
+      return page.evaluate(async function () {
+        const doc = await window.ZC.store.getUser(window.ZC.auth.current.uid);
+        return { birthdate: doc.profile.birthdate, bio: doc.profile.bio };
+      });
+    };
+    const olderTab = await ctx.session.context.newPage();
+    try {
+      await olderTab.goto(ctx.base + '/profile.html', { waitUntil: 'domcontentloaded' });
+      await olderTab.waitForSelector('#profile-main:not(.hidden)');
+      const bornBefore = await page.inputValue('#input-birthdate');
+      const corrected = bornBefore === '1990-04-03' ? '1991-05-06' : '1990-04-03';
+      await page.fill('#input-birthdate', corrected);
+      await savedProfile(page);
+      const olderBio = await olderTab.inputValue('#input-bio');
+      await olderTab.fill('#input-bio', olderBio + ' Saved from the older tab.');
+      await savedProfile(olderTab);
+      const afterOlder = await storedProfile();
+      t.check('a birthdate corrected in one tab survives a save of something else from a tab opened before it',
+        afterOlder.birthdate === corrected && /Saved from the older tab\.$/.test(afterOlder.bio),
+        JSON.stringify({ before: bornBefore, corrected: corrected, stored: afterOlder }));
+      // Both put back for what follows: the bio from the older tab, then the
+      // birthdate from a fresh load of this one.
+      await olderTab.fill('#input-bio', olderBio);
+      await savedProfile(olderTab);
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#profile-main:not(.hidden)');
+      await page.fill('#input-birthdate', bornBefore);
+      await savedProfile(page);
+    } finally {
+      await olderTab.close();
+    }
 
     /* ---- what Back brings back is what is stored, and what Save writes ---- */
 
@@ -617,5 +705,39 @@ module.exports = {
     t.check('signing out in one tab takes the other tabs off their signed-in pages',
       otherTab.indexOf(ctx.base + '/') === 0 && h.pageUrl('auth').test(otherTab) && /[?&]next=/.test(otherTab),
       otherTab);
+
+    /**
+     * Rename the account from Settings in a tab of its own, as somebody with
+     * the profile editor open in another tab would, and close that tab.
+     * @param {string} name the new display name
+     * @returns {Promise<void>}
+     */
+    async function renameInSettings(name) {
+      const settingsTab = await ctx.session.context.newPage();
+      // Into the session's own list, so the spec's closing no-errors check covers
+      // this tab too. The CDN is aborted on purpose in demo mode, and the session
+      // writes those failures off by the same test.
+      settingsTab.on('pageerror', function (err) {
+        ctx.session.errors.push('pageerror @ ' + settingsTab.url() + ' :: ' + (err && err.message ? err.message : String(err)));
+      });
+      settingsTab.on('console', function (msg) {
+        if (msg.type() !== 'error') return;
+        const text = msg.text();
+        const where = (msg.location() || {}).url || '';
+        const cdnNoise = text.indexOf('e2e-unhandled-rejection:') !== 0 &&
+          (where ? /^https?:\/\/([a-z0-9-]+\.)*gstatic\.com\//i.test(where) : /gstatic\.com/i.test(text));
+        if (!cdnNoise) ctx.session.errors.push('console.error @ ' + (where || settingsTab.url()) + ' :: ' + text);
+      });
+      await settingsTab.goto(ctx.base + '/settings.html', { waitUntil: 'domcontentloaded' });
+      await settingsTab.waitForFunction(function () {
+        return document.getElementById('input-name').value !== '';
+      });
+      await settingsTab.fill('#input-name', name);
+      await settingsTab.click('#save-account');
+      await settingsTab.waitForFunction(function () {
+        return document.getElementById('account-status').textContent.trim() === 'Saved.';
+      });
+      await settingsTab.close();
+    }
   }
 };

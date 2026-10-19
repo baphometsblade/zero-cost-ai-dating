@@ -735,6 +735,45 @@ module.exports = {
         stale.length === 0,
         stale.length ? stale.length + ' stale commit(s): ' + stale[0] : 'no rejected commits');
 
+      // Settings deletes an account's data before its sign-in, and says so when
+      // only the first half lands, so a profile editor left open in another tab
+      // can still save into a users/{uid} that is gone, and updateUser builds it
+      // again from the patch. The editor sent only the fields that differed
+      // from what it had loaded, but profileComplete: true every time, so the
+      // document came back complete with no birthdate and no age, discovery
+      // published it with age null, and requireProfile, which reads nothing
+      // but that flag, would let it into the deck: a profile this editor's own
+      // validate() refuses. Here the document is removed behind the editor,
+      // which is that state without the rest of the deletion. Before the probe
+      // below, which needs the document gone again.
+      await page.goto(base + '/profile.html', { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#profile-main:not(.hidden)');
+      const birthdateShown = await page.inputValue('#input-birthdate');
+      await emulator(FIRESTORE, 'DELETE', DOCS + '/users/' + uid);
+      const orphanBio = 'Saved from an editor opened before its document went.';
+      await page.fill('#input-bio', orphanBio);
+      await page.click('#save-btn');
+      // Bounded, so a save that never lands is reported by the check below.
+      await page.waitForFunction(function () {
+        return !document.getElementById('save-btn').hasAttribute('aria-busy') &&
+          /^Saved/.test(document.getElementById('save-status').textContent.trim());
+      }, null, { timeout: 15000 }).catch(function () {});
+      const reborn = await awaitDoc('users/' + uid, function (doc) {
+        return !!doc.profile && doc.profile.bio === orphanBio;
+      });
+      const rebornPublic = await awaitDoc('discovery/' + uid, function (doc) {
+        return !!doc.profile && doc.profile.bio === orphanBio;
+      });
+      const claimed = function (doc) {
+        return !doc ? null : { complete: doc.profileComplete, birthdate: (doc.profile || {}).birthdate, age: (doc.profile || {}).age };
+      };
+      t.check('a profile save into a users/{uid} removed behind the editor claims a complete profile only with its birthdate',
+        birthdateShown !== '' && !!reborn && reborn.profile.bio === orphanBio && !!rebornPublic &&
+          (reborn.profileComplete !== true ||
+            (reborn.profile.birthdate === birthdateShown && typeof reborn.profile.age === 'number' && reborn.profile.age >= 18)) &&
+          (rebornPublic.profileComplete !== true || rebornPublic.profile.age === reborn.profile.age),
+        JSON.stringify({ users: claimed(reborn), discovery: claimed(rebornPublic), shown: birthdateShown }));
+
       await emulator(FIRESTORE, 'DELETE', DOCS + '/users/' + uid);
       const recreate = await page.evaluate(function (id) {
         return window.ZC.store.updateUser(id, { displayName: 'Recreated by updateUser' })

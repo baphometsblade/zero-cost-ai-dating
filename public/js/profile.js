@@ -332,10 +332,11 @@
   let tagOrder = [];
   // The stored value of every field, as snapshot() writes it, as of the last
   // load or save. Kept field by field because a save sends only the fields
-  // that differ from it. A field is sent whole: the five personality sliders
-  // are one field, as are the interests and the photos, so when two profile
-  // tabs each move a different slider, the later save puts the earlier one's
-  // slider back.
+  // that differ from it, and the birthdate, which goes with every save (see
+  // buildPatch). A field is sent whole: the five personality sliders are one
+  // field, as are the interests and the photos, so when two profile tabs each
+  // move a different slider, the later save puts the earlier one's slider
+  // back.
   let baseline = {};
   let savedText = 'Everything here is saved.';
   let saving = false;
@@ -374,7 +375,9 @@
 
   /**
    * The fields of a snapshot that differ from the baseline: the ones a save
-   * sends. The coordinates and the label are written together, as
+   * sends, besides the birthdate that goes with the flag on the save that
+   * completes a profile (see buildPatch). The coordinates and the label are
+   * written together, as
    * `profile.location`, so a change to either sends both.
    * @param {Object} current a snapshot()
    * @returns {string[]} field names
@@ -470,36 +473,39 @@
    * Each change the person makes is written into the state as it happens, and
    * this page sets a control only from the state, so the two only part when
    * something else sets one, as the browser does on Back.
-   * @returns {Array<Array>} [control, property, value] for each
+   * @returns {Array<Array>} [control, property, value, field] for each, where
+   *   field is the snapshot() key the value comes from
    */
   function controlValues() {
     const values = [
-      [refs.name, 'value', state.displayName],
-      [refs.birthdate, 'value', state.birthdate],
-      [refs.gender, 'value', state.gender],
-      [refs.pronouns, 'value', state.pronouns],
-      [refs.bio, 'value', state.bio],
-      [refs.city, 'value', citySelectValue()],
-      [refs.location, 'value', state.locationLabel],
-      [refs.showAge, 'checked', state.showAge],
-      [refs.showDistance, 'checked', state.showDistance]
+      [refs.name, 'value', state.displayName, 'displayName'],
+      [refs.birthdate, 'value', state.birthdate, 'birthdate'],
+      [refs.gender, 'value', state.gender, 'gender'],
+      [refs.pronouns, 'value', state.pronouns, 'pronouns'],
+      [refs.bio, 'value', state.bio, 'bio'],
+      [refs.city, 'value', citySelectValue(), 'locationLabel'],
+      [refs.location, 'value', state.locationLabel, 'locationLabel'],
+      [refs.showAge, 'checked', state.showAge, 'showAge'],
+      [refs.showDistance, 'checked', state.showDistance, 'showDistance']
     ];
 
     AXES.forEach(function (axis) {
       const slider = id('range-' + axis.key);
-      if (slider) values.push([slider, 'value', String(state.personality[axis.key])]);
+      if (slider) values.push([slider, 'value', String(state.personality[axis.key]), 'personality']);
     });
 
     tagOrder.forEach(function (slug) {
-      if (chipInputs[slug]) values.push([chipInputs[slug], 'checked', state.interests.indexOf(slug) !== -1]);
+      if (chipInputs[slug]) values.push([chipInputs[slug], 'checked', state.interests.indexOf(slug) !== -1, 'interests']);
     });
     return values;
   }
 
   /**
    * Write the state into every control but the photo-link box, which holds
-   * only what is being typed before Add. Used on load, on discard, and after a
-   * save that took up fields changed elsewhere (see rebase).
+   * only what is being typed before Add, and clear every error. Used on load
+   * and on discard, where all of it is meant to go back to the stored
+   * document; a save that takes up fields changed elsewhere writes only those
+   * (see rebase).
    * @returns {void}
    */
   function paintForm() {
@@ -1146,7 +1152,8 @@
 
   /**
    * Build the patch ZC.store.updateUser merges into the user document: only
-   * the fields that differ from the baseline. This used to be every field the
+   * the fields that differ from the baseline, and the birthdate, which goes
+   * with profileComplete (see below). This used to be every field the
    * editor had loaded, and the store's merge lets a patch win over whatever is
    * stored, so with this page open in one tab and a rename saved from Settings
    * in another, a save of the bio here wrote the old name back. A field left
@@ -1177,14 +1184,30 @@
       ? { label: state.locationLabel.trim(), lat: state.coords.lat, lng: state.coords.lng }
       : null;
 
+    // Reaching a valid save means the account has a name and a verified 18+
+    // birthdate, which is exactly what requireProfile() waits for, so the save
+    // that finishes a profile says so — and carries the birthdate and its age
+    // with the flag, because the flag is a claim about them. Once the document
+    // this page holds is complete, the flag is left out and the birthdate goes
+    // only when it changed, like every other field. Sending them on every save
+    // instead put this tab's birthdate back over one changed since in another.
+    // A field left out stays as stored, and when users/{uid} is gone nothing is:
+    // a save from an editor opened before the data was deleted builds the
+    // document again from this patch and the signed-in account's uid, email and
+    // name (missingUserBase in data-store.js). The flag used to go every time,
+    // so that rebuilt document said profileComplete: true, which is all
+    // requireProfile() reads, with no birthdate and no age, and discovery/{uid}
+    // was published that way. Left out, the rebuilt document is incomplete,
+    // and the next page load sends the person through onboarding to fill it.
+    const completing = !(state.doc && state.doc.profileComplete);
+    const sendBirthdate = completing || has('birthdate');
+
     return {
       displayName: has('displayName') ? state.displayName.trim() : undefined,
-      // Reaching a valid save means the account has a name and a verified
-      // 18+ birthdate, which is exactly what requireProfile() waits for.
-      profileComplete: true,
+      profileComplete: completing ? true : undefined,
       profile: {
-        birthdate: has('birthdate') ? state.birthdate || null : undefined,
-        age: has('birthdate') ? (state.birthdate ? util.ageFromBirthdate(state.birthdate) : null) : undefined,
+        birthdate: sendBirthdate ? state.birthdate || null : undefined,
+        age: sendBirthdate ? (state.birthdate ? util.ageFromBirthdate(state.birthdate) : null) : undefined,
         gender: has('gender') ? state.gender : undefined,
         pronouns: has('pronouns') ? state.pronouns.trim() : undefined,
         bio: has('bio') ? state.bio.trim() : undefined,
@@ -1214,6 +1237,15 @@
    * between. Those are taken into the form as well, unless they were edited
    * while the save was in flight, so that "Saved just now." is true of every
    * box on screen and Discard goes back to what is actually stored.
+   *
+   * Only the controls of the fields taken up are written, only where they
+   * disagree with the state, as the pageshow handler does it, and no error is
+   * cleared. Only the button that started a save is disabled while it is in
+   * flight, so the person can be part-way through something else when it
+   * lands. This used to repaint the whole form, which emptied a date typed
+   * halfway — writing '' into one clears it, though it already reads as '' —
+   * and wiped the error under a photo link that Add had just refused, leaving
+   * the link in its box with nothing said about it.
    * @param {Object} sent the snapshot() the patch was built from
    * @param {Object} updated the UserDoc the store returned
    * @returns {void}
@@ -1224,7 +1256,7 @@
     const stored = snapshot(fresh);
     const now = snapshot();
     const next = {};
-    let moved = false;
+    const moved = [];
     Object.keys(sent).forEach(function (key) {
       if (send.indexOf(key) !== -1) {
         next[key] = sent[key];
@@ -1233,11 +1265,20 @@
       next[key] = stored[key];
       if (stored[key] !== baseline[key] && now[key] === baseline[key]) {
         state[key] = fresh[key];
-        moved = true;
+        moved.push(key);
       }
     });
     baseline = next;
-    if (moved) paintForm();
+
+    const took = function (key) { return moved.indexOf(key) !== -1; };
+    controlValues().forEach(function (entry) {
+      if (took(entry[3]) && entry[0][entry[1]] !== entry[2]) entry[0][entry[1]] = entry[2];
+    });
+    if (took('interests')) applyInterestState();
+    if (took('photos')) renderPhotos();
+    if (took('bio')) updateBioCount();
+    if (took('personality')) updateAxisOutputs();
+    if (took('coords')) updateLocationStatus();
   }
 
   /**
