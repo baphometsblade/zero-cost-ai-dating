@@ -713,7 +713,14 @@
       // Escape to dismiss, Tab to cycle inside the dialog.
       backdrop.addEventListener('keydown', function (event) {
         if (event.key === 'Escape' && dismissible) {
+          // The Escape was spent closing this dialog, so it stops here. Left to
+          // bubble, it reached the document after close() had already removed
+          // the backdrop, and a page handler that looked for an open dialog
+          // could not tell it from an Escape meant for the page: on the matches
+          // page, below its two-pane width, the conversation behind the dialog
+          // closed with it and its unsent reply was discarded.
           event.preventDefault();
+          event.stopPropagation();
           close(null);
           return;
         }
@@ -763,9 +770,19 @@
       lockScroll();
       document.addEventListener('focus', enforceFocus, true);
 
-      // Focus the primary action when there is one, otherwise the dialog itself.
-      const primary = $('.btn-primary', foot) || $('.btn-danger', foot) || $(FOCUSABLE, bodyEl);
-      if (primary && typeof primary.focus === 'function') primary.focus();
+      // Where focus starts is what a stray Enter answers. A dialog that asks for
+      // something starts on its first field. Otherwise it starts on the primary
+      // action, and no caller gives a destructive choice that variant: those are
+      // all `danger`. With neither, it starts on the way out (Cancel, Close),
+      // never on a danger button. Every danger confirmation used to open on its
+      // own commitment, so the Enter that opened it, held past the OS auto-repeat
+      // delay, answered it too: one keypress unmatched someone or wiped the demo
+      // data.
+      const start = $('input:not([disabled]), select:not([disabled]), textarea:not([disabled])', bodyEl) ||
+        $('.btn-primary', foot) ||
+        $('.btn-ghost, .btn-secondary', foot) ||
+        $(FOCUSABLE, bodyEl);
+      if (start && typeof start.focus === 'function') start.focus();
       else dialog.focus();
     });
   }

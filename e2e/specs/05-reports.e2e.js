@@ -47,6 +47,15 @@ module.exports = {
     await page.waitForSelector('.modal-backdrop select.select');
     const reasons = await page.locator('.modal-backdrop select.select option').count();
     t.check('the report dialog offers the store\'s reason list', reasons > 1, 'reasons=' + reasons);
+    // It has no primary button, and the shared dialog used to fall back to its
+    // "Send report": the repeat of an Enter held on Report filed one under the
+    // first reason in the list. A dialog that asks a question starts on it.
+    const reportFocus = await page.evaluate(function () {
+      const active = document.activeElement;
+      return active ? active.tagName + (active.tagName === 'BUTTON' ? ' ' + active.textContent.trim() : '') : null;
+    });
+    t.check('the report dialog opens on its reason, not on Send report',
+      reportFocus === 'SELECT', 'focus: ' + JSON.stringify(reportFocus));
 
     await page.selectOption('.modal-backdrop select.select', { index: 1 });
     const reason = await page.inputValue('.modal-backdrop select.select');
@@ -75,6 +84,15 @@ module.exports = {
 
     /* ---- and can be taken back ---- */
     await page.locator('#reports-list li button').first().click();
+    // A confirmation whose only commitment is destructive opens on Cancel, so
+    // the Enter that pressed Retract cannot answer it by repeating.
+    await page.waitForSelector('.modal-backdrop .modal-foot');
+    const retractFocus = await page.evaluate(function () {
+      const active = document.activeElement;
+      return active ? (active.textContent || active.tagName).trim() : null;
+    });
+    t.check('the retract confirmation opens on Cancel, not on Retract it',
+      retractFocus === 'Cancel', 'focus: ' + JSON.stringify(retractFocus));
     await h.clickModalAction(page, 'Retract it');
     await page.waitForFunction(function () {
       return document.querySelectorAll('#reports-list li').length === 0;

@@ -122,6 +122,122 @@ module.exports = {
     }, text);
     t.check('the sent message survives a reload', persisted);
 
+    /* ---- Escape on a dialog belongs to the dialog ---- */
+
+    // Below the two-pane width, Escape also backs out of an open conversation,
+    // from a handler on the document. The dialog's own Escape closed the dialog
+    // and then bubbled up to it, where the "is a dialog open?" guard looked for
+    // a backdrop that close() had already removed: the conversation shut behind
+    // the dialog, `?m=` went, and the composer was emptied with a half-written
+    // reply in it. Where both panes show, that handler stands down, so at
+    // 1280x800 only the count of Escapes reaching the document can fail here.
+    // The fix has two halves, and each is enough on its own for this page, so
+    // each has a check of its own: the dialog stops the Escape it used, and the
+    // page ignores an Escape that something else has already handled.
+    await page.evaluate(function () {
+      window.__zcEscapesSeen = 0;
+      document.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape') window.__zcEscapesSeen += 1;
+      });
+    });
+    const unsent = 'half a reply that a dialog must not throw away';
+    const chatState = function () {
+      return page.evaluate(function () {
+        const chat = document.getElementById('chat');
+        const active = document.activeElement;
+        return {
+          chatOpen: !!chat && !chat.classList.contains('hidden') && chat.offsetParent !== null,
+          m: window.ZC.util.qs('m'),
+          draft: document.getElementById('chat-input').value,
+          focus: active ? (active.id || active.tagName) : null,
+          escapesSeen: window.__zcEscapesSeen
+        };
+      });
+    };
+    await page.fill('#chat-input', unsent);
+    await page.focus('#chat-menu');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.modal-backdrop .modal-foot');
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('.modal-backdrop', { state: 'detached' });
+    const escaped = await chatState();
+    t.check('Escape on a dialog over a conversation closes the dialog and goes no further: not the conversation, not its draft',
+      escaped.chatOpen && !!escaped.m && escaped.draft === unsent && escaped.focus === 'chat-menu' &&
+        escaped.escapesSeen === 0,
+      JSON.stringify(escaped));
+    // Put the thread back if it was lost, so one failure here is not the cause
+    // of every failure after it.
+    if (!escaped.chatOpen) await openConversation(page, 'Devin');
+
+    // The page's half, reached without a dialog: a control that handles Escape
+    // itself and says so with preventDefault, but lets the event bubble. Only
+    // the phone viewport can fail this one: where both panes show, the page's
+    // handler stands down for every Escape, with that guard or without it.
+    await page.evaluate(function () {
+      const input = document.getElementById('chat-input');
+      input.addEventListener('keydown', function consume(event) {
+        if (event.key !== 'Escape') return;
+        input.removeEventListener('keydown', consume);
+        event.preventDefault();
+      });
+    });
+    await page.focus('#chat-input');
+    await page.keyboard.press('Escape');
+    const consumed = await chatState();
+    t.check('and an Escape another control has already handled does not close the conversation either',
+      consumed.chatOpen && !!consumed.m && consumed.draft === unsent &&
+        consumed.escapesSeen - escaped.escapesSeen === 1,
+      JSON.stringify(consumed) + ' (one more Escape reached the document, or this tested nothing)');
+    if (!consumed.chatOpen) await openConversation(page, 'Devin');
+    await page.fill('#chat-input', '');
+
+    /* ---- a held Enter cannot carry through a destructive confirmation ---- */
+
+    // The Enter that picks "Unmatch" in the options dialog is still down when the
+    // confirmation opens, and a held key repeats: once its auto-repeat delay has
+    // passed, the OS sends more keydowns, marked repeat. The confirmation used to
+    // open with focus on its own "Unmatch", so the first repeat answered it, and
+    // the match was gone with no second decision. A second `down` of a key that
+    // Playwright still holds is sent marked repeat, as the OS sends it. Counted
+    // at the facade: a confirmed unmatch calls it from the same microtask
+    // checkpoint as the click, so the count is settled by the time the dialog is
+    // seen to be gone.
+    await page.evaluate(function () {
+      const store = window.ZC.store;
+      const real = store.unmatch;
+      window.__zcUnmatches = 0;
+      store.unmatch = function () {
+        window.__zcUnmatches += 1;
+        return real.apply(store, arguments);
+      };
+    });
+    await page.focus('#chat-menu');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.modal-backdrop .modal-foot');
+    await page.locator('.modal-backdrop .modal-foot button', { hasText: /^Unmatch$/ }).focus();
+    await page.keyboard.down('Enter');
+    await page.waitForFunction(function () {
+      const title = document.querySelector('.modal-backdrop .modal-title');
+      return !!title && /^Unmatch /.test(title.textContent);
+    });
+    const confirmFocus = await page.evaluate(function () {
+      const active = document.activeElement;
+      return active ? (active.textContent || active.tagName).trim() : null;
+    });
+    await page.keyboard.down('Enter');
+    await page.keyboard.up('Enter');
+    await page.waitForSelector('.modal-backdrop', { state: 'detached' });
+    const held = await page.evaluate(function () {
+      return {
+        unmatches: window.__zcUnmatches,
+        m: window.ZC.util.qs('m'),
+        rows: document.querySelectorAll('#match-list .match-row').length
+      };
+    });
+    t.check('a destructive confirmation opens on Cancel, so a held Enter dismisses it instead of unmatching',
+      confirmFocus === 'Cancel' && held.unmatches === 0 && !!held.m && held.rows === 2,
+      'focus on opening: ' + JSON.stringify(confirmFocus) + '; after the repeat: ' + JSON.stringify(held));
+
     /* ---- the thread nobody has written to ---- */
     // On phones the chat covers the list, so step back to it first.
     if (ctx.viewport.key === 'mobile') {
@@ -867,5 +983,94 @@ module.exports = {
       rowSurvived && pressOpened,
       (rowSurvived ? 'the row was left alone' : 'the row was rebuilt under the press') + ', and the click ' +
       (pressOpened ? 'opened the conversation' : 'never arrived'));
+
+    /* ---- "Yesterday" is the calendar's yesterday, on the days clocks change ---- */
+
+    // The separator used to take "yesterday" as whatever day it was 24 hours
+    // ago. The day clocks go forward is short, so just after it that lands two
+    // days back: in New York at 00:30 on Monday 9 March 2026, "Yesterday"
+    // headed Saturday's messages and Sunday's got a date. The same time of day
+    // one date back is no better where the hour skipped is the last of its day.
+    // Nuuk went from 23:00 on Saturday 28 March 2026 straight to Sunday, so at
+    // 23:30 on Sunday "Saturday, 23:30" does not exist and resolves to Sunday
+    // 00:30, and Saturday's messages lose their "Yesterday".
+    // Each case is a session of its own: an installed clock stays installed for
+    // the life of its context, the time zone is set on that context, and Sam's
+    // thread in this one was ended above. One viewport: the arithmetic is the
+    // same at both, and the panes play no part in it. Sam's seeded thread starts
+    // empty, so every message in a fresh one is one this check sent, at a time
+    // it chose. The time zone and the instant are read back too: without them
+    // either case would be an ordinary day, where every formula is right.
+    if (ctx.viewport.key === 'desktop') {
+      // Sends one message to Sam at noon on Saturday and one at noon on Sunday,
+      // then opens the thread at `view` and reads the separator over each.
+      const daysSeenAt = async function (timezoneId, saturdayNoon, sundayNoon, view) {
+        const dst = await h.openSession(page.context().browser(), ctx.viewport);
+        const cdp = await dst.context.newCDPSession(dst.page);
+        let days = null;
+        try {
+          await cdp.send('Emulation.setTimezoneOverride', { timezoneId: timezoneId });
+          await dst.page.clock.install({ time: new Date(saturdayNoon) });
+          await h.signIn(dst.page, ctx.base);
+          await dst.page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
+          await dst.page.waitForSelector('#match-list .match-row');
+          const sendAs = function (text) {
+            return dst.page.evaluate(async function (body) {
+              const store = window.ZC.store;
+              const me = window.ZC.auth.current.uid;
+              const sam = (await store.getMatches(me)).filter(function (m) { return /sam/.test(m.otherUid); })[0];
+              await store.sendMessage(sam.matchId, sam.otherUid, body);
+              return sam.matchId;
+            }, text);
+          };
+          await sendAs('sent on Saturday');
+          await dst.page.clock.setSystemTime(new Date(sundayNoon));
+          const samId = await sendAs('sent on Sunday');
+          await dst.page.clock.setSystemTime(new Date(view));
+          await dst.page.goto(ctx.base + '/matches.html?m=' + encodeURIComponent(samId), { waitUntil: 'domcontentloaded' });
+          await dst.page.waitForFunction(function () {
+            return document.querySelectorAll('#chat-log .msg').length === 2;
+          });
+          days = await dst.page.evaluate(function () {
+            const now = new Date();
+            const heading = {};
+            let current = '';
+            Array.prototype.forEach.call(document.getElementById('chat-log').children, function (node) {
+              if (node.classList.contains('chat-day')) current = node.textContent.trim();
+              const text = node.querySelector && node.querySelector('.msg-text');
+              if (text) heading[text.textContent.trim()] = current;
+            });
+            return {
+              now: now.toString().slice(0, 21),
+              offset: now.getTimezoneOffset(),
+              saturday: heading['sent on Saturday'],
+              sunday: heading['sent on Sunday']
+            };
+          });
+        } finally {
+          await cdp.detach().catch(function () {});
+          await dst.context.close();
+        }
+        return { days: days, detail: JSON.stringify(days) + (dst.errors.length ? ' | ' + dst.errors.slice(0, 2).join(' | ') : ''), clean: dst.errors.length === 0 };
+      };
+
+      // New York: noon on Saturday 7 March (EST), noon on Sunday (EDT by then),
+      // and half past midnight on Monday, when 24 hours ago was Saturday, 23:30.
+      const ny = await daysSeenAt('America/New_York',
+        '2026-03-07T17:00:00Z', '2026-03-08T16:00:00Z', '2026-03-09T04:30:00Z');
+      t.check('at 00:30 the night after clocks go forward, "Yesterday" heads the day before, not the day before that',
+        ny.clean && !!ny.days && /^Mon Mar 09 2026 00:/.test(ny.days.now) && ny.days.offset === 240 &&
+          ny.days.sunday === 'Yesterday' && !!ny.days.saturday && ny.days.saturday !== 'Yesterday',
+        ny.detail);
+
+      // Nuuk: noon on Saturday 28 March (UTC-2), noon on Sunday (UTC-1 since
+      // midnight), and 23:30 on Sunday.
+      const nuuk = await daysSeenAt('America/Nuuk',
+        '2026-03-28T14:00:00Z', '2026-03-29T13:00:00Z', '2026-03-30T00:30:00Z');
+      t.check('and at 23:30 the day after clocks skip from 23:00 to midnight, "Yesterday" still heads the day before',
+        nuuk.clean && !!nuuk.days && /^Sun Mar 29 2026 23:/.test(nuuk.days.now) && nuuk.days.offset === 60 &&
+          nuuk.days.saturday === 'Yesterday' && nuuk.days.sunday === 'Today',
+        nuuk.detail);
+    }
   }
 };

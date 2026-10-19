@@ -42,7 +42,6 @@
   const STAMP_TICK_MS = 60000;       // keep relative timestamps honest
   const LOCKED_AVATARS = 5;          // placeholder faces behind the Premium blur
   const NEW_MATCH_NAME_MAX = 14;     // the strip is 76px wide; keep labels short
-  const DAY_MS = 86400000;
 
   /* ------------------------------------------------------------------------
      2. Elements and state
@@ -582,7 +581,18 @@
   function dayLabel(dateLike) {
     const key = dayKey(dateLike);
     if (key === ZC.util.todayKey()) return 'Today';
-    if (key === ZC.util.todayKey(new Date(Date.now() - DAY_MS))) return 'Yesterday';
+    // The calendar's yesterday: not the day it was 24 hours ago, and not this
+    // time of day one date back. The day clocks go forward is short, so just
+    // after it, 24 hours back is two days back. The day they go back is long,
+    // so late in it, 24 hours back is still today. Where the hour skipped is
+    // the last of its day, as in Nuuk, one date back from 23:30 the next
+    // evening is a time that never existed, and it resolves to today. Noon
+    // keeps its date through clock changes (only a day skipped whole, as a
+    // zone crossed the date line, has no noon), so noon one date back is
+    // yesterday.
+    const now = new Date();
+    const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 12);
+    if (key === ZC.util.todayKey(yesterday)) return 'Yesterday';
     return ZC.util.fmtDate(dateLike) || key;
   }
 
@@ -1794,8 +1804,14 @@
       });
     }
 
-    // Escape backs out of a conversation on a phone, where the list is hidden.
+    // Escape backs out of a conversation on a phone, where the list is hidden,
+    // but not an Escape something else has already acted on. A dialog removes
+    // its backdrop as it closes on Escape, before the event bubbles here, so
+    // the backdrop check alone let one keypress close the dialog and then the
+    // conversation behind it, unsent reply and all. ZC.ui.modal now stops that
+    // event; this guard holds for any other handler that consumes an Escape.
     document.addEventListener('keydown', function (event) {
+      if (event.defaultPrevented) return;
       if (event.key !== 'Escape' || !state.active || isWide()) return;
       if ($('.modal-backdrop')) return;
       closeMatch();
