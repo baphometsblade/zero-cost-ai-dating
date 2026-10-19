@@ -8,12 +8,13 @@
    `recordSwipe` for the pair again. The two are matched and neither of them will
    ever be told.
 
-   A sweep cannot find them, and that is the whole reason this is a note rather
-   than a scan. `unmatch` deletes the match document and leaves BOTH swipes — so
-   "mutual like with no match document" is byte-for-byte what a deliberately
-   ended conversation looks like, and a sweep would reopen every one of them on
-   every page load. That claim is executed here rather than asserted, because it
-   is the load-bearing one.
+   A sweep could not find them, and that is the reason this is a note rather
+   than a scan. `unmatch` used to delete the match document and leave BOTH
+   swipes, so every conversation ended that way is still byte-for-byte "mutual
+   like with no match document", and a sweep would reopen each of them on every
+   page load. An unmatch now turns the ender's like into a pass, which no repair
+   writes a match for. What an unmatch leaves is executed here rather than
+   asserted, because the repair's safety rests on it.
 
    The failing client leaves a note instead, and the next page load finishes what
    this device knows it began. What this spec measures is the firebase half —
@@ -172,9 +173,10 @@ module.exports = {
 
     /* ---- 2. the case a sweep could never get right ---------------------- */
 
-    // `unmatch` leaves both swipes behind, so an ended conversation is
-    // indistinguishable from an unfinished check by inspection alone. Executed,
-    // because this is the claim the whole design rests on.
+    // `unmatch` used to leave both likes behind, so an ended conversation was
+    // indistinguishable from an unfinished check by inspection alone, and each
+    // path that repairs a mutual pair with no match would write it again. What
+    // it leaves now is executed, because the repair's safety rests on it.
     const ended = 'rec-ended';
     await k.admin.set('discovery', ended, k.h.discoveryDoc(ended));
     await k.admin.set('swipes', ended + '_' + me, k.h.swipeDoc(ended, me, 'like'));
@@ -183,33 +185,38 @@ module.exports = {
     const madeIt = await k.admin.get('matches', endedId);
     await k.store.unmatch(endedId, me);
     const afterUnmatch = await k.admin.get('matches', endedId);
-    // Put it back, so the note-then-unmatch ordering below has a conversation to
-    // end. This is the same pair deliberately: the point is that the DATA cannot
-    // tell the two situations apart.
-    await k.store.recordSwipe(me, ended, 'like');
     const swipesLeft = [
       await k.admin.get('swipes', me + '_' + ended),
       await k.admin.get('swipes', ended + '_' + me)
     ];
 
-    t.check('ending a conversation deletes the match and leaves both swipes',
-      !!madeIt && afterUnmatch === null && swipesLeft.every(function (s) { return !!s; }),
-      'match ' + (afterUnmatch === null ? 'gone' : 'still there') + ', ' +
-      swipesLeft.filter(Boolean).length + ' of 2 swipes still on disk — which is why a ' +
-      'sweep for "mutual like, no match" would reopen it');
+    t.check('ending a conversation deletes the match and turns the ender\'s like into a pass',
+      !!madeIt && afterUnmatch === null && !!swipesLeft[0] && swipesLeft[0].action === 'pass' &&
+        !!swipesLeft[1] && swipesLeft[1].action === 'like',
+      'match ' + (afterUnmatch === null ? 'gone' : 'still there') + ', mine ' +
+      (swipesLeft[0] ? swipesLeft[0].action : 'missing') + ', theirs ' +
+      (swipesLeft[1] ? swipesLeft[1].action : 'missing') +
+      ' — two likes would be a mutual pair, which each repair path writes the match for again');
+
+    // Put it back, so the note-then-unmatch ordering below has a conversation to
+    // end, through the one way back the app offers: the pass rewound and a fresh
+    // like on the same pair.
+    await k.store.undoSwipe(me, ended);
+    await k.store.recordSwipe(me, ended, 'like');
+    const restored = await k.admin.get('matches', endedId);
 
     // The note is placed BEFORE the unmatch, which is the reachable order: a
     // device can have an unfinished check for a pair and then end the
-    // conversation. What stops the repair reopening it is that `unmatch` spends
-    // the note — nothing downstream could tell the difference by looking at the
-    // data, as the check above just demonstrated.
+    // conversation. The pass the unmatch records would already stop the repair
+    // reopening it; the note is spent as well, so the next load owes nothing.
     note(me, ended);
     await k.store.unmatch(endedId, me);
     const notesAfterUnmatch = notesFor(me).indexOf(ended) === -1;
     await k.store.reconcileMatches(me);
 
     t.check('and ending it spends any check still owed for that pair',
-      notesAfterUnmatch && (await k.admin.get('matches', endedId)) === null,
+      !!restored && notesAfterUnmatch && (await k.admin.get('matches', endedId)) === null,
+      (restored ? '' : 'NO CONVERSATION TO END, ') +
       (notesAfterUnmatch ? 'note cleared' : 'NOTE STILL THERE') + ', conversation ' +
       ((await k.admin.get('matches', endedId)) === null ? 'stays ended' : 'WAS REOPENED'));
 

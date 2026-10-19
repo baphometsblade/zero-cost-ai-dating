@@ -490,6 +490,53 @@ test('undoSwipe refuses once the pair have matched, and deletes nothing', async 
   assert.equal((await store.getSwipes('alice')).length, 1, 'the other side\'s swipe stands');
 });
 
+test('an unmatch stays ended: no stale swipe or note on either side brings it back', async function () {
+  // `unmatch` used to delete the match and leave both likes under it, and every
+  // path that finds a mutual pair with no match document writes one: a deck tab
+  // that loaded before the like, on any key, a pass included, because the like
+  // on record is the decision that stands; the other person's tab doing the
+  // same; a pending-match note on a device the unmatch did not run on. The
+  // dialog had just said "this cannot be undone".
+  await resetWorld();
+  const DEVIN = 'devin-alvarez';
+  assert.deepEqual(await store.unmatch(DEVIN_MATCH, YOU), { ok: true, removed: true });
+
+  const staleMine = await store.recordSwipe(YOU, DEVIN, 'pass');
+  assert.equal(staleMine.matched, false, 'a stale tab of the person who ended it matches nothing: ' +
+    JSON.stringify(staleMine));
+  assert.equal(raw(KEYS.matches)[DEVIN_MATCH], undefined, 'and writes no match document');
+
+  const staleTheirs = await store.recordSwipe(DEVIN, YOU, 'like');
+  assert.equal(staleTheirs.matched, false, 'nor does a stale tab of the other person\'s');
+  assert.equal(staleTheirs.action, 'like', 'whose own like still stands');
+
+  // One browser stands in for the other devices, so the notes go down after the
+  // unmatch, which spent this device's.
+  seedPendingMatch(YOU, DEVIN);
+  seedPendingMatch(DEVIN, YOU);
+  await store.reconcileMatches(YOU);
+  await store.reconcileMatches(DEVIN);
+  assert.equal(raw(KEYS.matches)[DEVIN_MATCH], undefined, 'nor a note on another device, on either side');
+
+  // What stops all of them: the decision on record for the person who ended it
+  // is a pass now, so the pair is no longer mutual.
+  const swipes = raw(KEYS.swipes);
+  assert.equal(swipes[YOU + '_' + DEVIN].action, 'pass', 'the ender\'s own decision is now a pass');
+  assert.equal(swipes[DEVIN + '_' + YOU].action, 'like', 'and the other person\'s is left as they made it');
+
+  // Neither deck offers the other again, and neither is left waiting for an answer.
+  const uidsOf = function (list) { return list.map(function (u) { return u.uid; }); };
+  assert.equal(uidsOf(await store.listCandidates(YOU, {})).indexOf(DEVIN), -1, 'not back in the ender\'s deck');
+  assert.equal(uidsOf(await store.listCandidates(DEVIN, {})).indexOf(YOU), -1, 'nor in the other deck');
+  assert.equal(uidsOf(await store.getLikesReceived(YOU)).indexOf(DEVIN), -1, 'their like is answered');
+  assert.equal(uidsOf(await store.getLikesReceived(DEVIN)).indexOf(YOU), -1, 'and there is no like of the ender\'s to answer');
+
+  // Only a fresh decision of the ender's can: the pass rewound, then a like.
+  assert.deepEqual(await store.undoSwipe(YOU, DEVIN), { ok: true });
+  const fresh = await store.recordSwipe(YOU, DEVIN, 'like');
+  assert.equal(fresh.matched && fresh.created, true, 'a like after a rewind matches again');
+});
+
 /* ------------------------------------------------------------------------
    5. Discovery
    ------------------------------------------------------------------------ */
@@ -1545,12 +1592,14 @@ test('a rewind takes the unfinished check with it', async function () {
 });
 
 test('and so does ending the conversation', async function () {
-  // This is the failure a sweep could never avoid, and the reason there is a note
-  // rather than a sweep. `unmatch` deletes the match and leaves BOTH swipes — so
-  // "mutual like with no match document" is byte-for-byte what a deliberately
-  // ended conversation looks like. A note left behind after an unmatch would
-  // reopen that conversation on the person's next page load, with no way for them
-  // to tell why.
+  // This was the failure a sweep could never avoid, and the reason there is a
+  // note rather than a sweep: `unmatch` deleted the match and left BOTH swipes,
+  // so "mutual like with no match document" was byte-for-byte what a
+  // deliberately ended conversation looked like, and a note left behind after an
+  // unmatch would have reopened it on the person's next page load. The pass it
+  // now records stops that repair on its own (see "an unmatch stays ended"), so
+  // "stays ended" below no longer tells whether the note was spent; the note and
+  // the run that finds nothing to check are asserted for that.
   await resetWorld();
   const me = 'demo-you';
   const them = 'ava-nakamura';
@@ -1559,8 +1608,11 @@ test('and so does ending the conversation', async function () {
   const matchId = [me, them].sort().join('_');
   seedPendingMatch(me, them);
   await store.unmatch(matchId, me);
+  const owed = JSON.parse(backing.get(KEYS.pendingMatch) || '{}');
+  assert.equal(!!(owed[me] && owed[me][them]), false, 'the note for that pair is spent by the unmatch');
 
   const result = await store.reconcileMatches(me);
+  assert.equal(result.checked, 0, 'so the next load has nothing to check: ' + JSON.stringify(result));
   assert.equal(result.repaired, 0, 'nothing is owed for a conversation that was ended');
   const matches = await store.getMatches(me);
   assert.equal(matches.filter(function (m) { return m.otherUid === them; }).length, 0,

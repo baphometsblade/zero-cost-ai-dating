@@ -270,6 +270,23 @@ module.exports = {
       said.writes + ' write(s): ' + k.show(said.wrote) +
       ' — the row carries the preview and the unread count, so it moves with every message');
 
+    /* ---- 4b. ending that conversation ------------------------------------ */
+
+    // Two writes for the person ending it before anything is removed: their
+    // like is deleted and a pass created in its place, because a swipe is never
+    // updated under the rules and a like left there is what let the match be
+    // written again (specs/08 says by whom). Then one per message, and the match.
+    const ended = await measure(function () {
+      return k.store.unmatch(matchId, me);
+    });
+    k.ctx.drainWarnings();
+
+    t.check('ending a conversation is the pass that replaces the like, then one write per message and the match',
+      ended.writes === 4 && !!ended.value && ended.value.removed === true &&
+        k.same(shape(ended.wrote),
+          ['swipes:delete', 'swipes:set', 'batch:matches/messages:delete', 'matches:delete']),
+      ended.writes + ' write(s): ' + k.show(ended.wrote));
+
     /* ---- 5. a profile save ----------------------------------------------- */
 
     const saved = await measure(function () {

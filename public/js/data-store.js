@@ -638,13 +638,14 @@
 
      A write that GROWS the stored value can hit the origin's quota, and every one of
      those is checked: `demoMatchFor`, `sendMessage`, `createUser`/`updateUser`,
-     `reportUser`, and `recordSwipe`'s own swipe row. Each throws, because the
+     `reportUser`, `recordSwipe`'s own swipe row, and the pass `unmatch` records
+     before it deletes anything. Each throws, because the
      Firestore adapter rejects on the same failure and the callers all have the branch.
      Reporting an unwritten document as written is how this file managed to announce a
      match nobody had, send a message it had destroyed, and confirm a safety report it
      had not filed.
 
-     A write that only ever SHRINKS cannot: `unmatch`, `undoSwipe`, `markRead` and
+     A write that only ever SHRINKS cannot: `unmatch`'s deletes, `undoSwipe`, `markRead` and
      `deleteAccountData` re-serialise the map they have just read with entries removed,
      with no `await` in between, so no other tab can grow it underneath them — and
      localStorage's quota is measured on the resulting usage, so a shorter overwrite
@@ -918,12 +919,16 @@
    * readable in firebase mode only by its owner, a match and somebody it liked,
    * and `getPublicProfile(s)` there answer null for anybody else: a reporter
    * too, because anybody can file a report. This adapter answered with the
-   * profile whoever asked. The pages ask as one of those three — the report
-   * menu is in a conversation, so a reporter is a match, and unmatching leaves
-   * the like that made it — so nothing on screen differed; the facade did, and
-   * two adapters diverging quietly is the failure this file keeps finding in
-   * itself. A missing account is "shown" so that it comes back missing, as a
-   * miss does there.
+   * profile whoever asked, and two adapters diverging quietly is the failure
+   * this file keeps finding in itself. The pages mostly ask as one of those
+   * three: the report menu is in a conversation, so a reporter is a match, and
+   * a reporter who ends the conversation leaves the like of the person they
+   * reported, which still names them. Not always: when the person reported
+   * ends it, `unmatch` turns their like into a pass, and once they pause, the
+   * reporter's settings page asks as none of the three. Both adapters answer
+   * that with null, and the page, which cannot tell it from an account that is
+   * gone, names it "a deleted account". A missing account is "shown" so that
+   * it comes back missing, as a miss does there.
    *
    * The rule's other half, that a signed-out caller reads nothing at all, is not
    * restated: this adapter has always answered a discoverable profile without a
@@ -1411,6 +1416,20 @@
       if (!match) return { ok: true, removed: false };
       if (uid && Array.isArray(match.users) && match.users.indexOf(uid) === -1) {
         throw new Error('You are not part of that match.');
+      }
+      // The pass that replaces the like of the person ending it, first, as the
+      // Firestore adapter records it and for its reasons: a like left under a
+      // deleted match is a mutual pair that recordSwipe and finishMatchCheck
+      // write the match for again. Checked, unlike the deletes below, because it
+      // grows the store when there was no swipe to replace, and a throw here has
+      // changed nothing yet. A stored match that names nobody else is corrupt,
+      // and gets no pass aimed at a uid it does not have.
+      const other = uid ? otherOf(match, uid) : null;
+      if (other && other !== uid) {
+        const swipes = readSwipes();
+        const id = swipeId(uid, other);
+        swipes[id] = { id: id, from: uid, to: other, action: 'pass', createdAt: nowIso() };
+        if (!writeSwipes(swipes)) throw new Error('That match could not be ended.');
       }
       delete matches[matchId];
       writeMatches(matches);
@@ -3366,6 +3385,36 @@
       if (uid && Array.isArray(data.users) && data.users.indexOf(uid) === -1) {
         throw new Error('You are not part of that match.');
       }
+      // The like of the person ending it becomes a pass, before anything is
+      // removed. Deleting the match alone left both likes under it, and the
+      // create rule's only proof is that the other person liked the caller: so
+      // they could write the match again from the console, and any deck tab of
+      // either person's still showing the card, or a pending-match note on a
+      // device this did not run on, did write it, since recordSwipe and
+      // finishMatchCheck both repair a mutual pair with no match. With a pass
+      // on record the pair is no longer mutual: the other person has no like
+      // left to prove, and in the app only a fresh like after a rewind matches
+      // them again. First, so a failure past it leaves the conversation whole
+      // for a retry, where the reverse order would leave a retry no match to
+      // find and both likes still in place. A swipe is never updated under the
+      // rules, so the like is deleted and the pass created, as two writes: one
+      // batch doing both to the same swipe is refused (permission-denied,
+      // against the emulator). A failure between them leaves the ender no
+      // swipe under a live match, and a retry runs all of this again, the
+      // delete of the missing swipe included, and ends it. A match naming
+      // nobody else gets no pass, as in the demo adapter.
+      const other = uid ? otherOf(data, uid) : null;
+      if (other && other !== uid) {
+        const swipeRef = db().collection('swipes').doc(swipeId(uid, other));
+        await swipeRef.delete();
+        await swipeRef.set({
+          id: swipeId(uid, other),
+          from: uid,
+          to: other,
+          action: 'pass',
+          createdAt: nowIso()
+        });
+      }
       // Messages first: the delete rule checks membership of the parent match,
       // which stops being checkable the moment the match document is gone.
       await deleteMatchMessages(ref);
@@ -4029,11 +4078,12 @@
    * `recordSwipe` for that pair again. The pair are matched and neither of them
    * will ever be told.
    *
-   * A scan cannot find them. "Mutual like with no match document" is
-   * byte-for-byte what a deliberately ended conversation looks like — `unmatch`
-   * deletes the match and leaves both swipes — so a sweep would reopen every
-   * conversation somebody had closed, on every page load. Measured against the
-   * emulator rather than reasoned about.
+   * A scan cannot find them. `unmatch` used to delete the match and leave both
+   * likes, so every conversation ended that way is still byte-for-byte "mutual
+   * like with no match document", and a sweep would reopen each of them on
+   * every page load. An unmatch now turns the ender's like into a pass, which
+   * no repair writes a match for, but that does not change the conversations
+   * already ended.
    *
    * So the failing client leaves a note before it starts, and the next page load
    * finishes what this device knows it began. Nothing is inferred, nothing is
@@ -4762,7 +4812,12 @@
     },
 
     /**
-     * Remove a match (and, in demo mode, its messages).
+     * Remove a match and its messages. Given the participant asking, as the
+     * page always gives it, first record their pass on the other person in
+     * place of their like, so the pair is no longer mutual and nothing that
+     * repairs a mutual pair with no match can write it again. Without `uid`
+     * there is neither that pass nor the check that the asker is in the
+     * match, and both likes stay under the deleted match.
      * @param {string} matchId match id
      * @param {string} uid the participant asking
      * @returns {Promise<{ok:boolean, removed:boolean}>}
@@ -4771,9 +4826,9 @@
       await ready;
       if (!matchId) throw new Error('A match id is required.');
       const outcome = await adapter.unmatch(matchId, uid);
-      // Whatever was owed for this pair is settled by the conversation ending:
-      // finishing the check afterwards would re-create the match the person just
-      // removed, on their next page load.
+      // Whatever was owed for this pair is settled by the conversation ending.
+      // The pass the adapter recorded already keeps a check finished afterwards
+      // from re-creating the match; spending the note saves that check its read.
       if (uid) clearPendingForPair(uid, matchId);
       return outcome;
     },
@@ -5033,8 +5088,10 @@
      * while it is discoverable, and, once it is paused, what its owner, its
      * matches and the people it liked still may.
      * Demo mode serves the stored document itself; firebase mode reads the
-     * discovery projection. Null when the account is gone or unreadable —
-     * callers should treat that as "a deleted account", not as an error.
+     * discovery projection. Null when the account is gone or this viewer may
+     * not read it, which are not told apart: a paused account that has ended
+     * its conversation with the viewer is null as well, since `unmatch` turned
+     * its like into a pass. Either way it is not an error.
      * @param {string} uid the account to look up
      * @returns {Promise<Object|null>} UserDoc-shaped public profile or null
      */

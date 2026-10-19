@@ -78,11 +78,13 @@ module.exports = {
 
     /* ---- a block, enforced here because there is nowhere else ---- */
 
-    // Unmatching deletes the match document and not the like underneath it, so
-    // `likedByOther` still holds afterwards and the other side could simply write the
-    // document again and carry on messaging. A block list lives in a private user
-    // document no client but its owner can read — and a rule can read it, which makes
-    // this the one place a block survives a determined client.
+    // A plain unmatch no longer leaves the ender's like underneath it: it becomes a
+    // pass (store-tests/specs/08-conversation runs that under these rules), which
+    // takes `likedByOther`'s proof away from the other side. A conversation
+    // ended before that still has both likes, though, and a block has to hold
+    // whatever the likes say. A block list lives in a private user document no
+    // client but its owner can read — and a rule can read it, which makes this the
+    // one place a block survives a determined client.
     t.check('you cannot create a match with somebody who has blocked you',
       await ok(assertFails(as(ME).doc('matches/' + h.pairId(ME, BLOCKER)).set(h.matchDoc(ME, BLOCKER)))));
 
