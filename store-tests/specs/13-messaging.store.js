@@ -371,15 +371,28 @@ module.exports = {
     park['unread.' + E] = 1000000;
     const parkedOk = await k.ok(k.testing.assertSucceeds(
       k.fs.updateDoc(doc(k.rulesEnv.authenticatedContext(E).firestore(), 'matches', parkedId), park)));
+    // The rules context's Firestore is the testing library's copy of the SDK, and
+    // the store builds its `increment(1)` from the global `firebase`. Under
+    // ZC_STORE_SDK that global is the pages' version, and a FieldValue from one
+    // copy is "invalid data" to the other, so for this one send the global is
+    // the testing library's too. A page has one copy of each and never meets this.
     const openDb = k.ctx.ZC.firebase.db;
+    const openFirebase = globalThis.firebase;
+    const testingFirebase = (function () {
+      const app = require('firebase/compat/app');
+      require('firebase/compat/firestore');
+      return app.default || app;
+    })();
     let sentParked = null;
     k.ctx.drainWarnings();
     try {
       k.ctx.ZC.firebase.db = k.rulesEnv.authenticatedContext(A).firestore();
+      globalThis.firebase = testingFirebase;
       sentParked = await k.store.sendMessage(parkedId, A, 'Are you there?')
         .catch(function (err) { return { rejected: (err && err.code) || String(err) }; });
     } finally {
       k.ctx.ZC.firebase.db = openDb;
+      globalThis.firebase = openFirebase;
     }
     const parkedWarnings = k.ctx.drainWarnings();
     let parkedMatch = null;
