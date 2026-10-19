@@ -306,8 +306,43 @@
      4. Text model — tokenise, TF-IDF, cosine
      ------------------------------------------------------------------------ */
 
-  const WORD_RE = /[\p{L}\p{N}'’]+/gu;
+  // A word is a run of Latin letters, the combining marks that sit on them,
+  // ASCII digits, apostrophes and MODIFIER_LETTERS. The marks are the
+  // nonspacing and spacing ones (Mn, Mc), never the enclosing kind (Me): a
+  // keycap emoji is a digit, a variation selector and an enclosing mark, and
+  // must not join the word typed straight after it. Other scripts never form
+  // a word, so a Latin word inside unspaced Chinese or Japanese is a word of
+  // its own rather than a piece of the clause around it, and an accent typed
+  // as a separate mark (decomposed input) stays inside its word instead of
+  // ending it. Unicode files modifier letters such as the ʻokina of Hawaiʻi
+  // and ʻukulele, the ʾ and ʿ of transliterated Arabic and the length mark ː
+  // under the Common script, not Latin, so they are listed by hand: every
+  // Common letter DIACRITIC_RE erases, less the kana marks ー ｰ ﾞ ﾟ, which
+  // belong to the kana beside them. A word that holds one, first letter
+  // included, is quoted with it and scored as the same word without it. The
+  // pattern is built from a string so that both of its classes share the list.
+  const MODIFIER_LETTERS = '\\u02B9-\\u02C1\\u02C6-\\u02D1\\u02EC\\u02EE\\u0374\\u2E2F\\uA717-\\uA71F\\uA788';
+  const WORD_RE = new RegExp(
+    "[\\p{Script=Latin}0-9'’" + MODIFIER_LETTERS + "][\\p{Script=Latin}\\p{Mn}\\p{Mc}0-9'’" + MODIFIER_LETTERS + ']*',
+    'gu'
+  );
   const DIACRITIC_RE = /\p{Diacritic}/gu;
+
+  // Latin letters that NFD leaves whole because they are letters in their own
+  // right, not a letter plus a mark, so the split rule would cut the word at
+  // them ('smørrebrød' scored as 'rrebr'). Each folds to one common ASCII
+  // spelling, as stripping the diacritic turns 'café' into 'cafe'. Some have
+  // another (Danish also writes ø as 'oe'), and a word typed that way stays a
+  // different token. Lower-case forms only: the fold runs after lower-casing.
+  // Most words hold none of them, and testing first keeps those words off the
+  // replace, which cost a measurable share of the scan when it ran on every
+  // word.
+  const LETTER_FOLDS = {
+    'æ': 'ae', 'ð': 'd', 'ø': 'o', 'þ': 'th', 'ß': 'ss', 'đ': 'd',
+    'ħ': 'h', 'ı': 'i', 'ł': 'l', 'œ': 'oe', 'ə': 'e'
+  };
+  const HAS_LETTER_FOLD = /[æðøþßđħıłœə]/;
+  const LETTER_FOLD_RE = /[æðøþßđħıłœə]/g;
 
   /**
    * Light suffix stemmer: enough to collapse the obvious plurals and verb
@@ -326,8 +361,8 @@
 
   /**
    * Scan text into {token, surface} pairs: `token` is the normalised stem used
-   * for maths, `surface` is the original spelling so reasons and icebreakers
-   * can quote the person's own words back at them.
+   * for maths, `surface` is the original spelling of the whole word so reasons
+   * and icebreakers can quote the person's own words back at them.
    * @param {string} text
    * @returns {{token: string, surface: string}[]}
    */
@@ -339,13 +374,19 @@
     while ((match = WORD_RE.exec(text)) !== null) {
       const surface = match[0].replace(/^['’]+|['’]+$/g, '');
       if (!surface) continue;
-      const normalised = surface
+      let normalised = surface
         .normalize('NFD')
         .replace(DIACRITIC_RE, '')
         .replace(/’/g, "'")
         .toLowerCase();
+      if (HAS_LETTER_FOLD.test(normalised)) {
+        normalised = normalised.replace(LETTER_FOLD_RE, function (letter) { return LETTER_FOLDS[letter]; });
+      }
       // Split rule from the contract: anything that is not a-z, 0-9 or an
-      // apostrophe is a separator (so non-Latin scripts drop out here).
+      // apostrophe is a separator. Only Latin words reach it, so a separator
+      // here is inside a word (a letter no fold covers, such as Ewe's ʋ) and
+      // the pieces it leaves are not words the person wrote. They still score,
+      // but every piece keeps the whole word as its surface.
       const parts = normalised.split(/[^a-z0-9']+/);
       for (let i = 0; i < parts.length; i++) {
         const raw = parts[i].replace(/^'+|'+$/g, '');
@@ -353,7 +394,7 @@
         if (STOPWORDS.has(raw)) continue;
         const token = stem(raw);
         if (token.length < 3) continue;
-        out.push({ token: token, surface: parts.length === 1 ? surface : parts[i] });
+        out.push({ token: token, surface: surface });
       }
     }
     return out;
@@ -742,12 +783,14 @@
       });
     }
 
-    // Bio overlap — quote their own words, not the stems.
-    if (b.bio >= 0.15 && ctx.sharedSurfaces.length) {
+    // Bio overlap — quote their own words, not the stems. Two shared stems can
+    // be pieces of one word (see scanTokens), and that word is named once.
+    const bioWords = uniqueStrings(ctx.sharedSurfaces);
+    if (b.bio >= 0.15 && bioWords.length) {
       found.push({
         kind: 'bio',
         icon: '💬',
-        text: 'Your bios both mention ' + joinList(ctx.sharedSurfaces.slice(0, 2))
+        text: 'Your bios both mention ' + joinList(bioWords.slice(0, 2))
       });
     }
 

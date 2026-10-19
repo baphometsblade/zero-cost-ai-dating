@@ -416,7 +416,63 @@
     assert.deepEqual(I.tokenize('I go to my gym'), ['gym'], 'sub-3-character words are dropped');
     assert.deepEqual(I.tokenize(''), []);
     assert.deepEqual(I.tokenize(null), []);
-    assert.deepEqual(I.tokenize('日本語 only'), [], 'non-latin script drops out with the split rule');
+    assert.deepEqual(I.tokenize('日本語 only'), [], 'non-latin script never forms a word');
+  });
+
+  // NFD can only strip a mark it can separate from its letter. ø, æ, ß, ł and
+  // the rest here are letters in their own right, so they reached the split
+  // rule intact and cut the word there: 'smørrebrød' scored as 'rrebr', and
+  // 'København' never met the same city typed as 'Kobenhavn'. Each folded
+  // letter has a word below that holds no other, so a letter missing from the
+  // fold table or from the test that guards it fails here.
+  test('tokenize folds the Latin letters NFD cannot strip, so the word stays whole', function () {
+    assert.deepEqual(
+      I.tokenize('smørrebrød København Łódź Hauptstraße Ærø Bærum œuvre Đakovo Guðrún Þórshöfn Diyarbakır Ħamrun Gəncə'),
+      ['smorrebrod', 'kobenhavn', 'lodz', 'hauptstrasse', 'aero', 'baerum', 'oeuvre', 'dakovo', 'gudrun', 'thorshofn', 'diyarbakir', 'hamrun', 'gence']
+    );
+    assert.deepEqual(I.tokenize('KØBENHAVN STRASSE'), I.tokenize('Kobenhavn Straße'), 'case and spelling meet in one token');
+  });
+
+  /**
+   * Every Common-script letter the diacritic strip erases, as [label, letter]
+   * pairs: `kana` holds the marks that belong to Japanese text (ー ｰ ﾞ ﾟ) and
+   * `modifiers` the rest. Asked of Unicode rather than copied from the
+   * engine's list, so a letter the list leaves out, or a kana mark it lets in,
+   * fails the tests that loop over these.
+   */
+  function erasedCommonLetters() {
+    const DIACRITIC = /^\p{Diacritic}$/u;
+    const LETTER = /^\p{L}$/u;
+    const COMMON = /^\p{Script=Common}$/u;
+    const KANA = /^\p{Script_Extensions=Katakana}$/u;
+    const out = { modifiers: [], kana: [] };
+    for (let cp = 0; cp <= 0x10FFFF; cp++) {
+      if (cp >= 0xD800 && cp <= 0xDFFF) continue;
+      const c = String.fromCodePoint(cp);
+      if (!DIACRITIC.test(c) || !LETTER.test(c) || !COMMON.test(c)) continue;
+      (KANA.test(c) ? out.kana : out.modifiers).push(['U+' + cp.toString(16).toUpperCase().padStart(4, '0'), c]);
+    }
+    assert.ok(out.modifiers.length >= 35, 'found ' + out.modifiers.length + ' modifier letters; Unicode 15.1 and 17.0 both have 35');
+    assert.ok(out.kana.length >= 4, 'found ' + out.kana.length + ' kana marks; Unicode 15.1 and 17.0 both have 4');
+    return out;
+  }
+
+  // The ʻokina of Hawaiʻi, the ʾ and ʿ of transliterated Arabic and the length
+  // mark ː are modifier letters of the Common script, not letters of another
+  // script, and the diacritic strip erases them. A word that holds one is the
+  // same word without it, so it must reach the strip whole: cut at the ʻokina,
+  // 'Hawaiʻi' scored as 'hawai' and never met 'Hawaii'. The kana marks are
+  // Common too but belong to Japanese text, and the bio-quoting test below
+  // keeps them out of Latin words.
+  test('tokenize keeps the modifier letters the diacritic strip erases inside their word', function () {
+    assert.deepEqual(
+      I.tokenize('Hawaiʻi Oʻahu Kauaʻi Qurʾan Ṣanʿāʾ Oʻzbekiston'),
+      ['hawaii', 'oahu', 'kauai', 'quran', 'sana', 'ozbekiston']
+    );
+    assert.deepEqual(I.tokenize('Hawaiʻi'), I.tokenize('Hawaii'), 'the ʻokina spelling meets the plain one');
+    erasedCommonLetters().modifiers.forEach(function (pair) {
+      assert.deepEqual(I.tokenize('abc' + pair[1] + 'def'), ['abcdef'], pair[0] + ' inside a word');
+    });
   });
 
   test('tokenize drops stopwords, including contracted forms', function () {
@@ -686,6 +742,91 @@
     assert.ok(/^Your bios both mention /.test(bio.text));
     assert.ok(/vinyl/i.test(bio.text) || /cook/i.test(bio.text), 'quotes a real shared word: ' + bio.text);
     assert.deepEqual(r.shared.tokens.slice().sort(), ['cook', 'vinyl']);
+  });
+
+  // The bio reason and the bio icebreaker print `surface` straight onto the
+  // deck card, the details sheet, the matches profile and the empty thread.
+  // A word the split rule cut used to be quoted as the piece it kept, lower-
+  // cased: 'Your bios both mention rrebr'. Each case below is one way a word
+  // can come apart, at WORD_RE or at the split rule, or take in a piece of
+  // the text beside it.
+  test('the bio reason and icebreakers quote whole words, never a piece of one', function () {
+    const BIO_ONLY = { interests: 0, personality: 0, distance: 0, age: 0, activity: 0 };
+    function quoted(myBio, theirBio) {
+      const me = mkUser('me', { profile: { bio: myBio } });
+      const them = mkUser('them', { profile: { bio: theirBio } });
+      const r = M.scoreCandidate(me, them, { corpus: M.buildCorpus([me, them]), now: NOW, weights: BIO_ONLY });
+      const reason = r.reasons.filter(function (x) { return x.kind === 'bio'; })[0];
+      return {
+        reason: reason ? reason.text : null,
+        openers: M.icebreakers(me, them, { count: 20 })
+          .filter(function (l) { return /^Your bio mentions /.test(l); })
+          .map(function (l) { return l.replace(/^Your bio mentions /, '').replace(/\. How did that become your thing\?$/, ''); })
+      };
+    }
+
+    // The letters folded above: the reported cases.
+    const smorrebrod = quoted('Weekend smørrebrød with friends is my religion.', 'I could live on smørrebrød.');
+    assert.equal(smorrebrod.reason, 'Your bios both mention smørrebrød');
+    assert.deepEqual(smorrebrod.openers, ['smørrebrød']);
+    assert.equal(quoted('Born in Łódź, raised on pierogi.', 'Spent a summer in Łódź.').reason, 'Your bios both mention Łódź');
+    assert.equal(quoted('Running up and down the Hauptstraße every morning.', 'My flat is on the Hauptstraße.').reason,
+      'Your bios both mention Hauptstraße');
+    assert.deepEqual(quoted('Moved to København last year.', 'I grew up in København and miss it.').openers, ['København']);
+
+    // A Latin letter no fold covers (Ewe's ʋ here) still splits the word for
+    // the maths. The pieces score; the quote is the word they came from, and
+    // a word that split into two shared pieces (a made-up one below) is named
+    // once, not as 'X and X'.
+    assert.deepEqual(quoted('Learning Eʋegbe from my grandmother.', 'I speak Eʋegbe at home.').openers, ['Eʋegbe']);
+    const twice = quoted('Vinyl and jazz, always.', 'Weekends are for vinylŋjazz.');
+    assert.equal(twice.reason, 'Your bios both mention vinylŋjazz');
+    assert.deepEqual(twice.openers, ['vinylŋjazz']);
+
+    // Text typed in decomposed form (a letter, then its accent as a separate
+    // mark) is one word, not 're' + 'sume'.
+    assert.deepEqual(quoted('Polishing my re\u0301sume\u0301.', 'My re\u0301sume\u0301 is a mess.').openers, ['re\u0301sume\u0301']);
+    assert.deepEqual(quoted('Polishing my résumé.', 'My re\u0301sume\u0301 is a mess.').openers, ['re\u0301sume\u0301'],
+      'and it meets the same word typed precomposed');
+
+    // A Latin word inside unspaced Chinese or Japanese is a whole word: it is
+    // quoted as written, not lower-cased and not as the clause around it.
+    assert.deepEqual(quoted('Jazz and vinyl on Sundays.', '我很喜欢Jazz和Vinyl').openers, ['Jazz', 'Vinyl']);
+    // The katakana long-vowel mark is a Common-script letter the diacritic
+    // strip erases, but it belongs to the katakana before it, not to the
+    // Latin word after it. Its half-width form and the half-width voicing
+    // marks belong to the kana too, whichever side of the word they touch.
+    const letters = erasedCommonLetters();
+    assert.deepEqual(quoted('Mario Kart nights.', 'スーパーMarioが大好き').openers, ['Mario']);
+    letters.kana.forEach(function (pair) {
+      assert.deepEqual(quoted('Kayaking abcdef weekly.', 'My ス' + pair[1] + 'abcdef' + pair[1] + 'ス habit.').openers, ['abcdef'],
+        pair[0] + ' beside a word');
+    });
+
+    // A modifier letter such as the ʻokina is part of the word it sits in,
+    // first letter included, and the word is quoted with it.
+    assert.equal(quoted('I moved to Hawaiʻi for the surf.', 'Hawaiʻi is home, always.').reason, 'Your bios both mention Hawaiʻi');
+    assert.equal(quoted('Weekends on Kauaʻi and Molokaʻi.', 'Kauaʻi hikes and Molokaʻi fish.').reason,
+      'Your bios both mention Kauaʻi and Molokaʻi');
+    assert.deepEqual(quoted('Surfing Oʻahu every weekend.', 'Oʻahu sunsets are unbeatable.').openers, ['Oʻahu']);
+    assert.deepEqual(quoted('Reading the Qurʾan daily.', 'The Qurʾan guides me.').openers, ['Qurʾan']);
+    assert.deepEqual(quoted('Learning the ukulele.', 'My ʻukulele goes everywhere.').openers, ['ʻukulele']);
+    letters.modifiers.forEach(function (pair) {
+      const c = pair[1];
+      assert.deepEqual(quoted('Kayaking abcdef weekly.', 'My ' + c + 'abcdef habit.').openers, [c + 'abcdef'],
+        pair[0] + ' starting a word');
+      assert.deepEqual(quoted('Kayaking abcdef weekly.', 'My abc' + c + 'def habit.').openers, ['abc' + c + 'def'],
+        pair[0] + ' inside a word');
+    });
+    assert.deepEqual(quoted('Hawaii is my happy place.', 'Hawaiʻi is home, always.').openers, ['Hawaiʻi'],
+      'and it meets the same word typed without the ʻokina');
+
+    // A keycap emoji is a digit, a variation selector and an enclosing mark.
+    // Only the marks that sit on a letter join a word, so the keycap stays
+    // out of the word written straight after it.
+    const keycaps = quoted('Hiking and cooking are my weekends.', 'My week: 1\uFE0F\u20E3Hiking 2\uFE0F\u20E3Cooking 3\uFE0F\u20E3Travel');
+    assert.equal(keycaps.reason, 'Your bios both mention Cooking and Hiking');
+    assert.deepEqual(keycaps.openers, ['Hiking', 'Cooking']);
   });
 
   // Activity has the smallest weight of the six reason kinds, so its line sits
