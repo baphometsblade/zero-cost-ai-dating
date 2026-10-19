@@ -481,3 +481,51 @@ test('offline, a page is the copy its last visit stored, whatever URL it was vis
   }
   assert.equal(problems.length, 0, report('Offline, a page is not the copy its last visit stored:', problems));
 });
+
+test('a visit stores what it fetched the way the install does: no redirect, no headers that describe the wire', async function () {
+  // The install stores every asset rebuilt from its decoded bytes, so nothing
+  // it serves offline says `content-encoding: gzip` over plain text. A visit
+  // writes over those copies, and on Firebase Hosting nothing it fetches is
+  // redirected but a `.html` name: so the visit wrote the page and every
+  // script and stylesheet back exactly as they came off the wire. Measured
+  // in Chromium against a server that compresses the way Hosting does: after
+  // one online visit the matches page an offline navigation is served said
+  // "gzip, 3238 bytes" over 10,014, and matches.js "gzip, 24842" over 83,947.
+  const HTML = 'text/html; charset=utf-8';
+  const visits = [
+    { why: 'a page at its clean URL, as Hosting answers it', url: 'matches', mode: 'navigate', key: 'matches.html', type: HTML },
+    { why: 'a script', url: 'js/matches.js', mode: 'no-cors', key: 'js/matches.js', type: 'text/javascript; charset=utf-8' },
+    { why: 'a page asked for by its file name, which Hosting redirects', url: 'settings.html', mode: 'cors',
+      key: 'settings.html', type: HTML, redirected: true }
+  ];
+  const problems = [];
+  for (const visit of visits) {
+    const url = 'https://example.test/' + visit.url;
+    const worker = runWorker({
+      fetch: function (asked) {
+        return fakeResponse('decoded ' + asked, {
+          redirected: !!visit.redirected,
+          headers: { 'content-type': visit.type, 'content-encoding': 'gzip', 'content-length': '7' }
+        });
+      }
+    });
+    await worker.fire('fetch', { request: { method: 'GET', url: url, mode: visit.mode } });
+    // The write lands after the answer; every step of it is a settled promise
+    // here, so it has landed once the microtasks drain.
+    await new Promise(function (resolve) { setImmediate(resolve); });
+    const shell = worker.stores.get(worker.cacheName);
+    const stored = shell && shell.get('https://example.test/' + visit.key);
+    if (!stored) {
+      problems.push(visit.why + ': nothing stored under ' + visit.key);
+      continue;
+    }
+    const said = [];
+    if (stored.redirected) said.push('redirected');
+    if (stored.headers.get('content-encoding') !== null) said.push('content-encoding: ' + stored.headers.get('content-encoding'));
+    if (stored.headers.get('content-length') !== null) said.push('content-length: ' + stored.headers.get('content-length'));
+    if (stored.headers.get('content-type') !== visit.type) said.push('lost its content type');
+    if (await stored.clone().text() !== 'decoded ' + url) said.push('lost its body');
+    if (said.length) problems.push(visit.why + ' (' + visit.key + ') was stored ' + said.join(', '));
+  }
+  assert.equal(problems.length, 0, report('A visit stored a copy the install would not have:', problems));
+});
