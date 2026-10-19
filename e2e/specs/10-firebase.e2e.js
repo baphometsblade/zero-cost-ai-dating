@@ -495,6 +495,78 @@ module.exports = {
         !!swipeAgain && swipeAgain.action === 'like',
         swipeAgain ? swipeAgain.from + ' -> ' + swipeAgain.to : 'top card was ' + alsoTop);
 
+      /* ---- two Settings tabs: a pause, and the notifications switch ---- */
+      // The discovery form sent all five preferences on every save, so a
+      // Settings tab opened before the profile was paused in another put
+      // discovery/{uid} back in every deck with a save of the distance alone.
+      // The same two tabs then carry the notifications switch: each tab keeps
+      // its own copy of users/{uid}, and the one that did not save it went on
+      // reading notifications as on.
+      const settingsReady = function (tab) {
+        return tab.waitForFunction(function () {
+          const hint = document.getElementById('signout-hint');
+          return !!hint && /other devices/.test(hint.textContent) &&
+            document.getElementById('input-name').value !== '';
+        }, null, { timeout: 20000 });
+      };
+      const olderSettings = ctx.session.watch(await ctx.session.context.newPage());
+      try {
+        await olderSettings.goto(base + '/settings.html', { waitUntil: 'domcontentloaded' });
+        await settingsReady(olderSettings);
+        await page.goto(base + '/settings.html', { waitUntil: 'domcontentloaded' });
+        await settingsReady(page);
+        await page.click('label.switch:has(#switch-discoverable)');
+        await page.click('#save-discovery');
+        const paused = await awaitDoc('discovery/' + uid, function (doc) {
+          return doc.preferences && doc.preferences.discoverable === false;
+        });
+        const olderSwitchBefore = await olderSettings.isChecked('#switch-discoverable');
+        await olderSettings.locator('#distance').fill('80');
+        await olderSettings.click('#save-discovery');
+        await awaitDoc('users/' + uid, function (doc) {
+          return doc.preferences && doc.preferences.maxDistanceKm === 80;
+        });
+        const publicAfter = await readDoc('discovery/' + uid);
+        const privateAfter = await readDoc('users/' + uid);
+        t.check('a pause saved in one Settings tab survives a distance saved from one opened before it, in both documents',
+          !!paused && paused.preferences.discoverable === false && olderSwitchBefore === true &&
+            !!publicAfter && publicAfter.preferences.discoverable === false && publicAfter.preferences.maxDistanceKm === 80 &&
+            !!privateAfter && privateAfter.preferences.discoverable === false,
+          'older tab\'s switch before its save ' + (olderSwitchBefore ? 'on' : 'off') +
+            '; discovery: discoverable ' + (publicAfter && publicAfter.preferences.discoverable) +
+            ', ' + (publicAfter && publicAfter.preferences.maxDistanceKm) + ' km' +
+            '; users: discoverable ' + (privateAfter && privateAfter.preferences.discoverable));
+
+        // Notifications off in this tab; the older one re-reads its copy. Its
+        // copy saying "on" before is what makes "off" afterwards mean the re-read.
+        const olderCopy = function () {
+          return olderSettings.evaluate(function () {
+            const doc = window.ZC.auth.doc;
+            return doc && doc.preferences ? doc.preferences.notifications : null;
+          });
+        };
+        const olderCopyBefore = await olderCopy();
+        await page.click('label.switch:has(#switch-notifications)');
+        await awaitDoc('users/' + uid, function (doc) {
+          return doc.preferences && doc.preferences.notifications === false;
+        });
+        const olderCopyAfter = await olderSettings.waitForFunction(function () {
+          const doc = window.ZC.auth.doc;
+          return !!doc && !!doc.preferences && doc.preferences.notifications === false;
+        }, null, { timeout: 10000 }).then(function () { return false; }, olderCopy);
+        t.check('and switching notifications off in one tab reaches the copy of users/{uid} the other tab holds',
+          olderCopyBefore === true && olderCopyAfter === false,
+          'other tab\'s copy before ' + olderCopyBefore + ', after ' + olderCopyAfter);
+      } finally {
+        await olderSettings.close();
+      }
+      // Back to the preferences the rest of the spec was written against.
+      await page.evaluate(async function (id) {
+        await window.ZC.store.updateUser(id, {
+          preferences: { discoverable: true, maxDistanceKm: 500, notifications: true }
+        });
+      }, uid);
+
       /* ---- out, and back in ---- */
       // Every header this page shows on the way in is recorded, for the check
       // after the auth gate below. The recorder stays for this page's later
@@ -734,6 +806,53 @@ module.exports = {
           return seen.changes === 0 && seen.sameOpener && seen.focus === 'the opener';
         }),
         JSON.stringify({ away: whileAway, back: onReturn, witnessFromCache: probeFlips }));
+
+      /* ---- a first message the server refuses ---- */
+
+      // The SDK draws a write the moment it is made, marked pending, and takes
+      // it back when the server refuses it. In a conversation with nothing else
+      // in it, the take-back is an empty delivery, and the page reads an empty
+      // delivery as "new, or gone?": a question it skipped while anything was
+      // drawn, so the refused message stayed on screen saying "Sending…" for
+      // good. The message is the store's own shape, stamped two days ahead,
+      // which is what a device whose clock runs more than the rules' day fast
+      // sends, and is refused for (currentStampOk in firestore.rules). It is
+      // written with the page's own SDK, so the take-back is the SDK's. Every
+      // bubble drawn is recorded as it is added: the refusal can take it back
+      // before a poll would see it.
+      await page.evaluate(function (args) {
+        const seen = [];
+        const observer = new MutationObserver(function (records) {
+          records.forEach(function (record) {
+            Array.prototype.forEach.call(record.addedNodes, function (node) {
+              const stamp = node.classList && node.classList.contains('msg') ? node.querySelector('.msg-time') : null;
+              if (stamp) seen.push(stamp.textContent);
+            });
+          });
+        });
+        observer.observe(document.getElementById('chat-log'), { childList: true, subtree: true });
+        const ref = window.ZC.firebase.db.collection('matches').doc(args.id).collection('messages').doc();
+        const write = ref.set({
+          id: ref.id, from: args.me, text: 'Sent from a clock two days fast',
+          createdAt: new Date(Date.now() + 2 * 86400000).toISOString()
+        }).then(function () { return 'stored'; }, function (err) { return (err && err.code) || 'refused'; });
+        window.__zcRefusedFirst = { seen: seen, observer: observer, write: write };
+      }, { id: quietId, me: uid });
+      const refusedWrite = await page.evaluate(function () { return window.__zcRefusedFirst.write; });
+      const takenBack = await page.waitForFunction(function () {
+        return !document.querySelector('#chat-log .msg') && !!document.querySelector('#chat-log .icebreaker');
+      }, null, { timeout: 5000 }).then(function () { return true; }, function () { return false; });
+      const refusedSeen = await page.evaluate(function () {
+        const probe = window.__zcRefusedFirst;
+        probe.observer.disconnect();
+        return {
+          drawn: probe.seen,
+          left: Array.prototype.map.call(document.querySelectorAll('#chat-log .msg .msg-time'), function (n) { return n.textContent; })
+        };
+      });
+      t.check('a first message the server refuses is taken off the screen, not left saying "Sending…"',
+        refusedWrite === 'permission-denied' && refusedSeen.drawn.length === 1 && /Sending/.test(refusedSeen.drawn[0]) && takenBack,
+        JSON.stringify({ write: refusedWrite, drawn: refusedSeen.drawn, left: refusedSeen.left, openers: takenBack }));
 
       /* ---- a message sent with no connection ---- */
 
@@ -1187,6 +1306,45 @@ module.exports = {
         page.off('dialog', recordLeaving);
       }
 
+      /* ---- Sign out, then Back ---- */
+
+      // The page a Sign out leaves can come back whole from the back-forward
+      // cache: Hosting sends these pages no-cache, not no-store, and Back
+      // re-runs none of the boot path. The conversation came back as the
+      // account that had signed out, under the guest's header, and its list
+      // was subscribed again for an account nobody was signed in as. This
+      // Chromium restores nothing from the cache itself, so the restore is the
+      // synthetic pagehide/pageshow pair the demo specs use, around
+      // `ZC.auth.signOut`, which is what the nav's Sign out runs before it
+      // leaves. `pagehide` comes first, so matches.js's listeners are down
+      // before the account goes; app.js's badge listeners stop once the
+      // sign-out has settled, and report nothing as errors on the way. So an
+      // error logged after the restore is one the restore caused.
+      await page.goto(base + '/matches.html?m=' + encodeURIComponent(heldId), { waitUntil: 'domcontentloaded' });
+      await page.waitForURL(h.pageUrl('auth'));
+      await page.waitForSelector('#auth-form');
+      await page.fill('#input-email', heldEmail);
+      await page.fill('#input-password', password);
+      await page.click('#submit-btn');
+      await page.waitForURL(h.pageUrl('matches'));
+      await page.waitForFunction(function (want) {
+        return ((document.getElementById('chat-log') || {}).textContent || '').indexOf(want) !== -1;
+      }, ASKED);
+      const signedOutOn = await page.evaluate(async function () {
+        window.dispatchEvent(new Event('pagehide'));
+        const result = await window.ZC.auth.signOut();
+        return { at: window.location.pathname + window.location.search, ok: !!result && result.ok === true };
+      });
+      await page.evaluate(function () {
+        window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+      });
+      await page.waitForURL(h.pageUrl('auth'), { timeout: 10000 }).catch(function () {});
+      const shownAgainAt = page.url();
+      t.check('a conversation handed back by the back-forward cache after Sign out leaves for the sign-in page',
+        signedOutOn.ok && h.pageUrl('auth').test(shownAgainAt) &&
+          new URL(shownAgainAt).searchParams.get('next') === signedOutOn.at,
+        JSON.stringify({ signedOutOn: signedOutOn, at: shownAgainAt.replace(base, '') }));
+
       /* ---- two accounts whose identity the app did not choose ---- */
 
       // Both are made in the Auth emulator directly, the way a provider makes
@@ -1242,6 +1400,92 @@ module.exports = {
       t.check('and the stored email is corrected to the account\'s own',
         !!staleDoc && staleDoc.email === staleEmail && staleDoc.profileComplete === true,
         staleDoc ? 'email=' + JSON.stringify(staleDoc.email) : 'no document');
+
+      /* ---- a finished account opening a page with no connection ---- */
+
+      // The service worker serves the page offline, which is how an installed
+      // app opens with no signal. Its read of users/{uid} fails, and auth.js
+      // publishes a blank in-memory stand-in rather than lock the account out;
+      // the guard took that stand-in's profileComplete false for the stored
+      // profile's and sent this finished account to onboarding, where it
+      // stayed once the connection was back.
+      //
+      // The worker never answers for another origin, so the SDK's scripts are
+      // handed back from the bytes the page loaded online, as a browser's HTTP
+      // cache would. This session's cannot be relied on to: Playwright turns
+      // the HTTP cache off in any context that routes (see 07-offline).
+      const sdkLoads = [];
+      const keepSdk = function (response) {
+        if (!/^https:\/\/www\.gstatic\.com\//.test(response.url())) return;
+        sdkLoads.push(response.body().then(function (body) { return [response.url(), body]; }));
+      };
+      page.on('response', keepSdk);
+      await page.goto(base + '/matches.html', { waitUntil: 'load' });
+      page.off('response', keepSdk);
+      // Booted to the end, so this page has nothing left to read when the
+      // connection goes: `load` can come before Firebase has restored the
+      // session, and this page's own read then failed instead.
+      await page.waitForSelector('#match-list:not(.hidden), #list-empty:not(.hidden)');
+      const sdkBytes = new Map(await Promise.all(sdkLoads));
+      const sdkRoute = function (route) {
+        const body = sdkBytes.get(route.request().url());
+        if (!body) return route.abort();
+        return route.fulfill({ status: 200, contentType: 'text/javascript; charset=utf-8', body: body });
+      };
+      await ctx.session.context.route('**://www.gstatic.com/**', sdkRoute);
+      // auth.js says so when the read fails, and only then does the connection
+      // come back: a read that got through would find the finished profile and
+      // prove nothing. Heard from the page opened offline only, from the moment
+      // it replaces the one before.
+      let replaced = false;
+      const committed = function (frame) { if (frame === page.mainFrame()) replaced = true; };
+      let heard = null;
+      const readFailed = new Promise(function (resolve) {
+        heard = function (msg) {
+          if (replaced && msg.text().indexOf('Could not reach the profile store') !== -1) resolve(true);
+        };
+        page.on('console', heard);
+      });
+      page.on('framenavigated', committed);
+      let failedOffline = false;
+      let openedAt = '';
+      let opened = null;
+      ctx.session.expectNetworkErrors(true);
+      ctx.session.expectConsoleError(/Could not reach Cloud Firestore backend/);
+      try {
+        await ctx.session.context.setOffline(true);
+        await page.goto(base + '/matches.html', { waitUntil: 'domcontentloaded' });
+        failedOffline = await Promise.race([readFailed, new Promise(function (resolve) {
+          setTimeout(resolve, 20000, false).unref();
+        })]);
+        page.off('console', heard);
+        page.off('framenavigated', committed);
+        await ctx.session.context.setOffline(false);
+        // The list, or its error, appears only once requireProfile has
+        // settled, and the profile editor or its error only on onboarding.
+        await page.waitForSelector('#match-list:not(.hidden), #list-empty:not(.hidden), #list-error:not(.hidden), ' +
+          '#profile-main:not(.hidden), #profile-error:not(.hidden)');
+        openedAt = page.url();
+        opened = await page.evaluate(function () {
+          const shown = function (id) {
+            const node = document.getElementById(id);
+            return !!node && !node.classList.contains('hidden');
+          };
+          return {
+            list: shown('match-list') || shown('list-empty'),
+            complete: !!(window.ZC.auth.doc && window.ZC.auth.doc.profileComplete)
+          };
+        });
+      } finally {
+        await ctx.session.context.setOffline(false);
+        await ctx.session.context.unroute('**://www.gstatic.com/**', sdkRoute);
+        ctx.session.expectConsoleError(null);
+        ctx.session.expectNetworkErrors(false);
+      }
+      t.check('a finished account opening a page with no connection is not sent to onboarding, and the page opens once it is back',
+        failedOffline && h.pageUrl('matches').test(openedAt) && !!opened && opened.list && opened.complete,
+        (failedOffline ? 'read failed offline' : 'the offline read never failed') + ' · ' +
+          openedAt.replace(base, '') + ' ' + JSON.stringify(opened));
 
       /**
        * Sign in through auth.html as an account made in the Auth emulator.

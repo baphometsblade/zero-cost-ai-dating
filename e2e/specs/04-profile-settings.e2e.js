@@ -561,6 +561,92 @@ module.exports = {
     t.check('after Back, the discovery read-outs describe the sliders beside them',
       sliders.restored && sliders.ageAgrees && sliders.distanceAgrees,
       (sliders.restored ? '' : 'the browser restored nothing, so this tested nothing — ') + JSON.stringify(sliders));
+
+    /* ---- a pause saved in one tab survives a discovery save from an older one ---- */
+
+    // The discovery form sent all five of its preferences on every save. So
+    // with Settings open in two tabs, "Show me in other people's decks" turned
+    // off and saved in one, and only the distance changed and saved in the
+    // other, opened before it, that tab's switch, still showing on, went out
+    // with the distance and put the paused profile back in every deck. The
+    // older tab's save is held while an age handle is moved, because the save
+    // takes the stored preferences into the form when it comes back, and a
+    // handle moved meanwhile has to stay where it was moved.
+    const discoveryBefore = await page.evaluate(async function () {
+      return (await window.ZC.store.getUser(window.ZC.auth.current.uid)).preferences;
+    });
+    const olderSettings = ctx.session.watch(await ctx.session.context.newPage());
+    try {
+      await olderSettings.goto(ctx.base + '/settings.html', { waitUntil: 'domcontentloaded' });
+      await olderSettings.waitForFunction(function () {
+        return document.getElementById('input-name').value !== '';
+      });
+      const savedDiscovery = function (tab) {
+        return tab.waitForFunction(function () {
+          return /^Saved/.test(document.getElementById('discovery-status').textContent.trim());
+        }, null, { timeout: 10000 }).catch(function () {});
+      };
+      await page.click('label.switch:has(#switch-discoverable)');
+      await page.click('#save-discovery');
+      await savedDiscovery(page);
+      const km = discoveryBefore.maxDistanceKm === 80 ? 90 : 80;
+      const movedMin = discoveryBefore.ageMin === 30 ? 31 : 30;
+      const olderSwitchBefore = await olderSettings.isChecked('#switch-discoverable');
+      await olderSettings.locator('#distance').fill(String(km));
+      await olderSettings.evaluate(function () {
+        const store = window.ZC.store;
+        const real = store.updateUser;
+        const gate = new Promise(function (resolve) { window.__e2eReleaseSave = resolve; });
+        store.updateUser = function () {
+          const args = arguments;
+          store.updateUser = real;
+          window.__e2eSaveHeld = true;
+          return gate.then(function () { return real.apply(store, args); });
+        };
+      });
+      await olderSettings.click('#save-discovery');
+      const held = await olderSettings.waitForFunction(function () { return window.__e2eSaveHeld === true; },
+        null, { timeout: 5000 }).then(function () { return true; }, function () { return false; });
+      await olderSettings.locator('#age-min').fill(String(movedMin));
+      await olderSettings.evaluate(function () { if (window.__e2eReleaseSave) window.__e2eReleaseSave(); });
+      await savedDiscovery(olderSettings);
+      const afterOlderDiscovery = await olderSettings.evaluate(async function () {
+        const prefs = (await window.ZC.store.getUser(window.ZC.auth.current.uid)).preferences;
+        const min = Number(document.getElementById('age-min').value);
+        const max = Number(document.getElementById('age-max').value);
+        return {
+          stored: { discoverable: prefs.discoverable, km: prefs.maxDistanceKm, ageMin: prefs.ageMin },
+          shown: {
+            discoverable: document.getElementById('switch-discoverable').checked,
+            km: Number(document.getElementById('distance').value),
+            ageMin: min,
+            ageAgrees: document.getElementById('age-value').textContent ===
+              (min === max ? min + ' only' : min + ' to ' + max)
+          }
+        };
+      });
+      // The older tab's switch still showing "on" when it saved is what makes
+      // this a test: a tab that had somehow picked the pause up would pass.
+      t.check('a pause saved in one Settings tab survives a distance saved from one opened before it',
+        olderSwitchBefore === true && afterOlderDiscovery.stored.discoverable === false &&
+          afterOlderDiscovery.stored.km === km,
+        'older tab\'s switch before its save ' + (olderSwitchBefore ? 'on' : 'off') + ', ' +
+          JSON.stringify(afterOlderDiscovery.stored));
+      t.check('and that tab takes the pause up, so its switch shows what is stored',
+        afterOlderDiscovery.shown.discoverable === false && afterOlderDiscovery.shown.km === km,
+        JSON.stringify(afterOlderDiscovery.shown));
+      t.check('but an age handle moved while its save was out stays where it was moved, unsaved',
+        held && afterOlderDiscovery.shown.ageMin === movedMin && afterOlderDiscovery.shown.ageAgrees &&
+          afterOlderDiscovery.stored.ageMin !== movedMin,
+        (held ? '' : 'the save was not held, so this tested nothing — ') + JSON.stringify(afterOlderDiscovery));
+    } finally {
+      await olderSettings.close();
+    }
+    // Back to the preferences the rest of the spec was written against.
+    await page.evaluate(async function (prefs) {
+      await window.ZC.store.updateUser(window.ZC.auth.current.uid, { preferences: prefs });
+    }, discoveryBefore);
+
     // Each wait is bounded and its answer is the check. With no bound of its
     // own, a theme that never applied ran out the session's twenty-second
     // default and threw, recorded as "spec ran to completion", and the check
@@ -589,6 +675,16 @@ module.exports = {
     // facade, the seam both adapters share, because the demo store's own write
     // does not fail by itself.
     const notifyBefore = await page.isChecked('#switch-notifications');
+    // And a tab of the same account that is already open when the switch
+    // changes, for the check after the control below. Each tab keeps its own
+    // copy of the account's document, which only the Settings tab re-read
+    // after the save, so this one went on showing the count, and updating it,
+    // on focus too. Its badge carrying the count first is what makes an empty
+    // one afterwards mean the switch.
+    const badgeTab = ctx.session.watch(await ctx.session.context.newPage());
+    await badgeTab.goto(ctx.base + '/dashboard.html', { waitUntil: 'domcontentloaded' });
+    await badgeTab.waitForSelector('#deck-stack .swipe-card');
+    const badgeTabBefore = await unreadAgainstBadge(badgeTab);
     ctx.session.expectConsoleError(/Could not save the notification preference/);
     await page.evaluate(function () {
       window.__zcRealUpdateUser = window.ZC.store.updateUser;
@@ -631,6 +727,27 @@ module.exports = {
       notifyStored === !notifyBefore &&
       notifySaved === 'In-app notifications ' + (notifyBefore ? 'off' : 'on') + '.',
       'stored ' + (notifyStored ? 'on' : 'off') + ', status ' + JSON.stringify(notifySaved));
+
+    // The other tab is brought to the front the way a person goes back to it,
+    // and the count it showed has to be gone by then or soon after: bounded,
+    // and the answer is the check.
+    await badgeTab.bringToFront();
+    await badgeTab.evaluate(function () {
+      window.dispatchEvent(new Event('focus'));
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    const badgeTabCleared = await badgeTab.waitForFunction(function () {
+      const node = document.querySelector('[data-badge="matches"]');
+      return !!node && node.textContent.trim() === '';
+    }, null, { timeout: 5000 }).then(function () { return true; }, function () { return false; });
+    const badgeTabAfter = await unreadAgainstBadge(badgeTab);
+    await badgeTab.close();
+    await page.bringToFront();
+    t.check('a tab already open when the switch goes off stops showing the count as well',
+      notifyBefore && notifyStored === false && badgeTabBefore.unread > 0 &&
+        badgeTabBefore.badge === String(badgeTabBefore.unread) &&
+        badgeTabCleared && badgeTabAfter.unread > 0 && badgeTabAfter.badge === '',
+      JSON.stringify({ before: badgeTabBefore, after: badgeTabAfter }));
 
     /* ---- a reports list that could not be read is not an empty one ---- */
 

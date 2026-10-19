@@ -115,6 +115,17 @@
   /** The signed-in user document, refreshed after every successful save. */
   let me = null;
 
+  // The discovery preferences as the form last showed them stored, field by
+  // field, as discoveryFields() writes them: painted from the document on
+  // load and after Back or Forward, and taken up again after every discovery
+  // save. A save sends only the fields whose controls differ from it. It used
+  // to send all of them, so a Settings tab opened before the profile was
+  // paused in another tab put "Show me in other people's decks" back on with
+  // a save of the distance alone. The two age handles are one field and go
+  // together, so a range saved here never meets half of a range saved from
+  // another tab.
+  let discoveryBaseline = {};
+
   /**
    * Fire a toast when the overlay layer is present.
    * @param {string} message text to show
@@ -314,35 +325,96 @@
   }
 
   /**
-   * Fill the discovery card from a user document.
+   * The discovery preferences a user document holds, as the form shows them:
+   * defaults for anything missing, numbers held to their sliders, and the
+   * genders in the order of their boxes, which is the order a save writes.
    * @param {Object} doc UserDoc
-   * @returns {void}
+   * @returns {{interestedIn:string[], ageMin:number, ageMax:number,
+   *   maxDistanceKm:number, discoverable:boolean}}
    */
-  function fillDiscovery(doc) {
+  function discoveryFrom(doc) {
     const prefs = doc.preferences || {};
     const wanted = Array.isArray(prefs.interestedIn) && prefs.interestedIn.length
       ? prefs.interestedIn
       : GENDERS.slice();
-    genderBoxes().forEach(function (box) {
-      box.checked = wanted.indexOf(box.dataset.gender) !== -1;
-    });
-
     const min = util.clamp(numberOr(prefs.ageMin, AGE_MIN), AGE_MIN, AGE_MAX);
     const max = util.clamp(numberOr(prefs.ageMax, AGE_MAX), AGE_MIN, AGE_MAX);
-    dom.ageMin.value = String(Math.round(Math.min(min, max)));
-    dom.ageMax.value = String(Math.round(Math.max(min, max)));
-    renderAgeValue();
-
-    dom.distance.value = String(Math.round(
-      util.clamp(numberOr(prefs.maxDistanceKm, DISTANCE_MAX), DISTANCE_MIN, DISTANCE_MAX)
-    ));
-    renderDistanceValue();
-
-    dom.discoverable.checked = prefs.discoverable !== false;
+    return {
+      interestedIn: genderBoxes()
+        .map(function (box) { return box.dataset.gender; })
+        .filter(function (gender) { return wanted.indexOf(gender) !== -1; }),
+      ageMin: Math.round(Math.min(min, max)),
+      ageMax: Math.round(Math.max(min, max)),
+      maxDistanceKm: Math.round(
+        util.clamp(numberOr(prefs.maxDistanceKm, DISTANCE_MAX), DISTANCE_MIN, DISTANCE_MAX)
+      ),
+      discoverable: prefs.discoverable !== false
+    };
   }
 
   /**
-   * Validate and save the discovery filters.
+   * The discovery preferences on screen, as a save writes them.
+   * @returns {{interestedIn:string[], ageMin:number, ageMax:number,
+   *   maxDistanceKm:number, discoverable:boolean}}
+   */
+  function discoveryValues() {
+    const ageMin = Math.round(util.clamp(dom.ageMin.value, AGE_MIN, AGE_MAX));
+    const ageMax = Math.round(util.clamp(dom.ageMax.value, AGE_MIN, AGE_MAX));
+    return {
+      interestedIn: selectedGenders(),
+      ageMin: Math.min(ageMin, ageMax),
+      ageMax: Math.max(ageMin, ageMax),
+      maxDistanceKm: Math.round(util.clamp(dom.distance.value, DISTANCE_MIN, DISTANCE_MAX)),
+      discoverable: !!dom.discoverable.checked
+    };
+  }
+
+  /**
+   * A stable string for each field a discovery save can send, which is how a
+   * save tells the fields that changed from the baseline.
+   * @param {Object} values a discoveryFrom() or discoveryValues()
+   * @returns {Object} field name to JSON string
+   */
+  function discoveryFields(values) {
+    return {
+      interestedIn: JSON.stringify(values.interestedIn),
+      age: JSON.stringify([values.ageMin, values.ageMax]),
+      maxDistanceKm: JSON.stringify(values.maxDistanceKm),
+      discoverable: JSON.stringify(values.discoverable)
+    };
+  }
+
+  /**
+   * Fill the discovery card from a user document, and take what it holds as
+   * the baseline a save compares against.
+   * @param {Object} doc UserDoc
+   * @param {string[]} [keep] fields whose controls are left as they are
+   * @returns {void}
+   */
+  function fillDiscovery(doc, keep) {
+    const values = discoveryFrom(doc);
+    const paint = function (field) { return !keep || keep.indexOf(field) === -1; };
+    if (paint('interestedIn')) {
+      genderBoxes().forEach(function (box) {
+        box.checked = values.interestedIn.indexOf(box.dataset.gender) !== -1;
+      });
+    }
+    if (paint('age')) {
+      dom.ageMin.value = String(values.ageMin);
+      dom.ageMax.value = String(values.ageMax);
+      renderAgeValue();
+    }
+    if (paint('maxDistanceKm')) {
+      dom.distance.value = String(values.maxDistanceKm);
+      renderDistanceValue();
+    }
+    if (paint('discoverable')) dom.discoverable.checked = values.discoverable;
+    discoveryBaseline = discoveryFields(values);
+  }
+
+  /**
+   * Validate and save the discovery filters: the ones changed on this page,
+   * which are the ones that differ from the baseline.
    * @param {Event} event the form submit
    * @returns {Promise<void>}
    */
@@ -351,28 +423,37 @@
     clearFieldError(dom.interestedField, dom.interestedError);
     setStatus(dom.discoveryStatus, '');
 
-    const interestedIn = selectedGenders();
-    if (!interestedIn.length) {
+    if (!selectedGenders().length) {
       setFieldError(dom.interestedField, dom.interestedError,
         'Pick at least one — otherwise your deck has nobody in it.');
       genderBoxes()[0].focus();
       return;
     }
 
-    const ageMin = Math.round(util.clamp(dom.ageMin.value, AGE_MIN, AGE_MAX));
-    const ageMax = Math.round(util.clamp(dom.ageMax.value, AGE_MIN, AGE_MAX));
+    const values = discoveryValues();
+    const fields = discoveryFields(values);
+    const has = function (field) { return fields[field] !== discoveryBaseline[field]; };
 
     busy(dom.saveDiscovery, true, 'Saving…');
     try {
+      // A field left out is `undefined`, which the store's merge skips, so it
+      // stays as stored, including a pause saved from another tab.
       await saveUser({
         preferences: {
-          interestedIn: interestedIn,
-          ageMin: Math.min(ageMin, ageMax),
-          ageMax: Math.max(ageMin, ageMax),
-          maxDistanceKm: Math.round(util.clamp(dom.distance.value, DISTANCE_MIN, DISTANCE_MAX)),
-          discoverable: !!dom.discoverable.checked
+          interestedIn: has('interestedIn') ? values.interestedIn : undefined,
+          ageMin: has('age') ? values.ageMin : undefined,
+          ageMax: has('age') ? values.ageMax : undefined,
+          maxDistanceKm: has('maxDistanceKm') ? values.maxDistanceKm : undefined,
+          discoverable: has('discoverable') ? values.discoverable : undefined
         }
       });
+      // The form now shows the stored preferences, so a pause saved in another
+      // tab is on screen here too, and the next save compares against them.
+      // Only the Save button is disabled while a save is out, so a control
+      // changed in the meantime is left where it was moved, and goes with the
+      // next save.
+      const now = discoveryFields(discoveryValues());
+      fillDiscovery(me, Object.keys(now).filter(function (field) { return now[field] !== fields[field]; }));
       setStatus(dom.discoveryStatus, 'Saved. Your deck reranks on its next load.');
       toast('Discovery preferences saved.', 'success');
     } catch (err) {
@@ -440,6 +521,9 @@
     setStatus(dom.appearanceStatus, enabled ? 'In-app notifications on.' : 'In-app notifications off.');
     try {
       await saveUser({ preferences: { notifications: !!enabled } });
+      // saveUser re-read the document for this tab's own badge; this has the
+      // other open tabs of this browser re-read it for theirs.
+      if (ZC.app && typeof ZC.app.accountChanged === 'function') ZC.app.accountChanged();
     } catch (err) {
       console.error('[zc] Could not save the notification preference:', err);
       // Put the control back where the stored value says it should be — and the
@@ -668,8 +752,12 @@
     dom.reportsList.classList.remove('hidden');
     reports.forEach(function (report, index) {
       const subject = subjects[index];
-      // A missing subject is expected: deleted accounts keep their reports.
-      const name = (subject && subject.displayName) || 'a deleted account';
+      // A missing subject is expected. Deleted accounts keep their reports, and
+      // the rules show a paused account only to the people it has a match or
+      // a like with, which an account that ended the conversation no longer
+      // has. The page gets no face either way and cannot tell which, so the
+      // name says only what is true of both.
+      const name = (subject && subject.displayName) || 'an account you can no longer see';
       dom.reportsList.appendChild(reportRow(report, name));
     });
   }
@@ -684,8 +772,8 @@
     try {
       const reports = await ZC.store.getMyReports(me.uid);
       // One ask for every subject, not one each: a name that cannot be read is
-      // shown as a deleted account, as a missing one is, and does not cost the
-      // panel its list.
+      // shown as an account you can no longer see, as a missing one is, and
+      // does not cost the panel its list.
       const faces = await ZC.store.getPublicProfiles(reports.map(function (report) { return report.about; }))
         .catch(function () { return {}; });
       const subjects = reports.map(function (report) { return faces[report.about] || null; });

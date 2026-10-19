@@ -53,7 +53,14 @@
   // hyphens, and an ASCII-letters-only TLD turned every internationalised
   // domain away with "That does not look like an email address" — an address
   // Firebase Auth accepts, measured against the emulator.
-  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.(?:\p{L}{2,}|xn--[A-Za-z0-9-]+)$/u;
+  //
+  // Letters, each with whatever combining marks it carries: the vowel signs
+  // and viramas of Devanagari, Tamil or Sinhala are marks, not letters, so
+  // "any letters" alone turned `raj@example.भारत` away whenever it arrived
+  // as written rather than punycoded by Chromium's email field — filled in by
+  // a password manager, say. The Auth emulator creates accounts for these
+  // addresses as written, too.
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.(?:(?:\p{L}\p{M}*){2,}|xn--[A-Za-z0-9-]+)$/u;
 
   // If Firebase never reports an auth state (blocked network, dead SDK) the app
   // must still become usable rather than hang on ZC.auth.ready forever.
@@ -330,7 +337,10 @@
 
      A session this page ends on purpose (its own sign-out, deleting the
      account) is marked first, because that code already knows where it is
-     going next. */
+     going next. The mark lasts until the sign-out or deletion that set it
+     fails, or until the back-forward cache hands the page back, if it ever
+     does (see the `pageshow` listener in section 11): by then that code has
+     gone where it was going. */
   let guardedUid = null;
   let endingHere = false;
 
@@ -406,6 +416,16 @@
     return base;
   }
 
+  /* The stand-ins published because the account's document could not be read
+     at all. A stand-in for a document the store said does not exist tells
+     the truth: that account has no profile yet. One for a read that failed
+     knows nothing about the stored profile, and its profileComplete false is
+     not an answer. A finished account opening a page with no connection was
+     sent to onboarding on the strength of it, and stayed there after the
+     connection came back. Kept beside the stand-ins rather than written on
+     them, so a stand-in is shaped exactly like the UserDoc it stands in for. */
+  const unread = new WeakSet();
+
   /**
    * Load the UserDoc for an account, creating it on first sign-in and keeping
    * its identity fields in step with the auth record.
@@ -415,8 +435,10 @@
    */
   async function loadOrCreateDoc(uid, seed) {
     const fields = seed || {};
+    let read = false;
     try {
       const existing = await ZC.store.getUser(uid);
+      read = true;
       if (!existing) {
         return await ZC.store.createUser(uid, {
           email: fields.email || '',
@@ -440,7 +462,9 @@
       }
     } catch (err) {
       console.warn('[zc.auth] Could not reach the profile store; using an in-memory copy.', err);
-      return fallbackDoc(uid, fields);
+      const standIn = fallbackDoc(uid, fields);
+      if (!read) unread.add(standIn);
+      return standIn;
     }
   }
 
@@ -464,15 +488,17 @@
    * uid. The queue is per-uid and self-clearing.
    * @param {{uid:string, email?:string, displayName?:string}} account identity
    * @param {Object} [seed] fields to write when the doc is new
+   * @param {Object} [replacing] an unread stand-in this adoption is only to
+   *   replace; see readAgain()
    * @returns {Promise<Object>} the UserDoc
    */
-  function adopt(account, seed) {
+  function adopt(account, seed, replacing) {
     const uid = account && account.uid;
-    if (!uid) return adoptNow(account, seed);
+    if (!uid) return adoptNow(account, seed, replacing);
     // Failures must not poison the queue, so the link the next caller waits on
     // is always a settled-either-way promise.
     const prior = adopting[uid] || Promise.resolve();
-    const run = prior.then(function () { return adoptNow(account, seed); });
+    const run = prior.then(function () { return adoptNow(account, seed, replacing); });
     const link = run.catch(function () {});
     adopting[uid] = link;
     link.then(function () {
@@ -489,14 +515,21 @@
    * so that two adoptions of one account cannot overlap.
    * @param {{uid:string, email?:string, displayName?:string}} account identity
    * @param {Object} [seed] fields to write when the doc is new
+   * @param {Object} [replacing] an unread stand-in this adoption is only to
+   *   replace; see readAgain()
    * @returns {Promise<Object>} the UserDoc
    */
-  async function adoptNow(account, seed) {
+  async function adoptNow(account, seed, replacing) {
+    if (replacing && api.doc !== replacing) return api.doc;
     const fields = {
       email: (seed && seed.email) || account.email || '',
       displayName: (seed && seed.displayName) || account.displayName || ''
     };
     const doc = await loadOrCreateDoc(account.uid, fields);
+    // The read was out on the network for as long as the network took. If the
+    // session changed meanwhile — signed out in another tab — what it found
+    // is no longer this page's to publish.
+    if (replacing && api.doc !== replacing) return api.doc;
     setSignedIn(
       { uid: account.uid, email: fields.email, displayName: fields.displayName || doc.displayName },
       doc
@@ -506,6 +539,53 @@
       .then(function () { return ZC.store.touchActive(account.uid); })
       .catch(function (err) { console.warn('[zc.auth] Could not record activity.', err); });
     return doc;
+  }
+
+  /** The read replacing an unread stand-in, while it is out; see readAgain(). */
+  let rereading = null;
+
+  /**
+   * Read the signed-in account's document again, in place of an unread
+   * stand-in, and publish what it finds. Joins a read already out, and reads
+   * nothing when the published doc is not an unread stand-in.
+   * @returns {Promise<Object|null>} the published doc, once the read settles
+   */
+  function readAgain() {
+    if (rereading) return rereading;
+    const standIn = api.doc;
+    if (!standIn || !unread.has(standIn) || !api.current) return Promise.resolve(api.doc);
+    const account = { uid: api.current.uid, email: api.current.email, displayName: api.current.displayName };
+    const done = function () {
+      rereading = null;
+      return api.doc;
+    };
+    rereading = adopt(account, undefined, standIn).then(done, done);
+    return rereading;
+  }
+
+  // Back online: read the profile a dead connection could not.
+  window.addEventListener('online', function () { readAgain(); });
+
+  /**
+   * Whether the browser says it has no connection. Only its "no" is taken at
+   * its word: "yes" means some network is up, not that the store is reachable.
+   * @returns {boolean}
+   */
+  function offline() {
+    return !!(window.navigator && window.navigator.onLine === false);
+  }
+
+  /**
+   * Resolve when the browser next says it is back online.
+   * @returns {Promise<void>}
+   */
+  function backOnline() {
+    return new Promise(function (resolve) {
+      window.addEventListener('online', function heard() {
+        window.removeEventListener('online', heard);
+        resolve();
+      });
+    });
   }
 
   /* ------------------------------------------------------------------------
@@ -1138,11 +1218,29 @@
     /**
      * Like requireAuth, but also insists on a finished profile — anyone who
      * has not completed onboarding is sent to fill it in first.
+     *
+     * A profile that could not be read is not an unfinished one (see
+     * `unread`), and is never sent to onboarding. The guard waits for the
+     * read that replaces it: one already out, or, with no connection, the one
+     * that coming back online starts. With a connection and no read out,
+     * nothing is coming that would read it, so the guard rejects and the page
+     * shows its own error. A second read that fails too ends the same way,
+     * unless the connection has gone again, when the guard waits once more.
      * @param {{redirect?:string}} [options] passed through to requireAuth
-     * @returns {Promise<Object>} the UserDoc
+     * @returns {Promise<Object>} the UserDoc; rejects when the profile could
+     *   not be read, the browser is online, and no read is out to wait for
      */
     async requireProfile(options) {
-      const doc = await api.requireAuth(options);
+      let doc = await api.requireAuth(options);
+      const uid = doc && doc.uid;
+      while (doc && unread.has(doc)) {
+        if (offline()) await backOnline();
+        else if (!rereading) throw new Error('Your profile could not be read just now.');
+        doc = await readAgain();
+        // Signed out, or in as someone else, in another tab meanwhile: the
+        // page is already being taken to sign in (followSessionChange).
+        if (!doc || doc.uid !== uid) return pending();
+      }
       if (doc && doc.profileComplete) return doc;
       // Carrying the page it was asked for, so onboarding can hand them back.
       leaveTo(withNext('profile.html?onboarding=1'));
@@ -1250,6 +1348,44 @@
     adoptDemoSession(uid).then(function () { followSessionChange(); }, function (err) {
       console.warn('[zc.auth] Could not follow the session change.', err);
     });
+  });
+
+  // A page the back-forward cache hands back is the same document, with none
+  // of the boot path run again, and the session may have changed while it was
+  // away. app.js's Sign out goes on to the landing page with a history entry,
+  // and Hosting sends pages no-cache rather than no-store, so Back can bring
+  // back the very page that signed out. It came back as the account that had
+  // left: the conversation open, the composer live, and in demo mode a
+  // message sent from it stored as that account (in Firebase mode the rules
+  // refuse it). Only events moved a guarded page on, and the
+  // page's own sign-out had already set `endingHere`, which nothing cleared
+  // once that sign-out had worked, so the page also ignored every change after
+  // it, and a restore after someone else had signed in took on the new account
+  // while still showing, and sending as, the old one. Shown again, its
+  // sign-out is over: the mark goes, and the session is read as it is now.
+  // In demo mode that is the stored record rather than `api.current`: whether
+  // a change made on another page reached this one while it was in the cache
+  // is up to the browser.
+  window.addEventListener('pageshow', function (event) {
+    if (!event || !event.persisted) return;
+    endingHere = false;
+    if (!guardedUid) return;
+    let uid = null;
+    if (MODE === 'demo') {
+      uid = sessionUid(readJson(SESSION_KEY, null));
+    } else {
+      const fb = fbAuth();
+      uid = fb && fb.currentUser ? fb.currentUser.uid : null;
+    }
+    followSessionChange(uid);
+    if (guardedUid) return;
+    // Leaving. The page scripts' own `pageshow` handlers would take the page
+    // up again as the account that has gone: matches.js subscribes the list
+    // and the open conversation again for it, and clears that conversation's
+    // unread count in its name when there is one. This file loads before
+    // app.js and every page script, so this listener runs ahead of theirs and
+    // can stop them.
+    event.stopImmediatePropagation();
   });
 
   // A backstop so a blocked Firebase never leaves pages waiting forever.

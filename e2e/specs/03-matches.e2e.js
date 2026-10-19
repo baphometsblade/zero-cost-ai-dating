@@ -1001,6 +1001,194 @@ module.exports = {
 
     await page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#match-list .match-row');
+
+    /* ---- a send that fails after the reader has moved on ---- */
+
+    // In firebase mode a send settles only when the server answers, which with
+    // no connection is whenever it comes back, so the reader can be in another
+    // conversation by the time a refusal arrives (the match ended meanwhile).
+    // The failed text used to go into whichever composer was open, over the
+    // draft there, under "Your text is still in the box", and the next Enter
+    // sent the first person's words to the second (measured against the
+    // emulator). The demo store answers at once, so here the next send is held
+    // until this check refuses it, the way a refused Firestore write rejects.
+    // Toasts are recorded as they are made: they leave the screen on a timer.
+    // The recorder is put in once per page, so a second hold does not record
+    // every toast twice.
+    const holdNextSend = function () {
+      const store = window.ZC.store;
+      const realSend = store.sendMessage;
+      window.__zcHeld = { sends: [], toasts: [], refuse: null };
+      store.sendMessage = function (matchId, from, text) {
+        window.__zcHeld.sends.push({ matchId: matchId, text: text });
+        store.sendMessage = realSend;
+        return new Promise(function (resolve, reject) {
+          window.__zcHeld.refuse = function () { reject(new Error('Refused by the e2e suite.')); };
+        });
+      };
+      if (window.__zcToastsRecorded) return;
+      window.__zcToastsRecorded = true;
+      const realToast = window.ZC.ui.toast;
+      window.ZC.ui.toast = function (message) {
+        window.__zcHeld.toasts.push(String(message));
+        return realToast.apply(window.ZC.ui, arguments);
+      };
+    };
+    await page.evaluate(holdNextSend);
+    const MEANT = 'Meant for Devin and nobody else';
+    const SAM_DRAFT = 'Half a reply to Sam';
+    await openConversation(page, 'Devin');
+    const devinId = await page.evaluate(function () { return window.ZC.util.qs('m'); });
+    await page.fill('#chat-input', MEANT);
+    await page.press('#chat-input', 'Enter');
+    await page.waitForFunction(function () { return typeof window.__zcHeld.refuse === 'function'; });
+    if (ctx.viewport.key !== 'desktop') await page.click('#chat-back');
+    await openConversation(page, 'Sam');
+    await page.waitForFunction(function (id) {
+      return /Sam/.test(document.getElementById('chat-peer-name').textContent) && window.ZC.util.qs('m') !== id;
+    }, devinId);
+    await page.fill('#chat-input', SAM_DRAFT);
+    await page.evaluate(function () { window.__zcHeld.refuse(); });
+    await page.waitForFunction(function () { return !document.getElementById('chat-send').hasAttribute('aria-busy'); });
+    const elsewhere = await page.evaluate(function () {
+      return {
+        open: document.getElementById('chat-peer-name').textContent,
+        box: document.getElementById('chat-input').value,
+        toasts: window.__zcHeld.toasts.slice()
+      };
+    });
+    t.check('a send refused after the reader opened another conversation leaves that one\'s box alone, and names who it was for',
+      elsewhere.box === SAM_DRAFT && elsewhere.toasts.length === 1 && /Devin/.test(elsewhere.toasts[0]),
+      JSON.stringify(elsewhere));
+
+    // The words are not dropped either: they go back to the conversation they
+    // were written for, the next time it is opened.
+    if (ctx.viewport.key !== 'desktop') await page.click('#chat-back');
+    await openConversation(page, 'Devin');
+    await page.waitForFunction(function (id) { return window.ZC.util.qs('m') === id; }, devinId);
+    const backHome = await page.evaluate(function () {
+      return { box: document.getElementById('chat-input').value, sends: window.__zcHeld.sends.length };
+    });
+    t.check('and they are back in the box of the conversation they were written for when it is opened again',
+      backHome.box === MEANT && backHome.sends === 1, JSON.stringify(backHome));
+
+    // Given back once, and only once. From then on they are the box's, like
+    // anything typed there, so switching away and back finds it empty, as it
+    // does for any conversation reopened. Given back every time, they would
+    // come back after they had been sent, and the next Enter would send them
+    // again.
+    if (ctx.viewport.key !== 'desktop') await page.click('#chat-back');
+    await openConversation(page, 'Sam');
+    await page.waitForFunction(function (id) {
+      return /Sam/.test(document.getElementById('chat-peer-name').textContent) && window.ZC.util.qs('m') !== id;
+    }, devinId);
+    if (ctx.viewport.key !== 'desktop') await page.click('#chat-back');
+    await openConversation(page, 'Devin');
+    await page.waitForFunction(function (id) { return window.ZC.util.qs('m') === id; }, devinId);
+    const reopened = await page.evaluate(function () { return document.getElementById('chat-input').value; });
+    t.check('and only once: opened a second time, its box does not get them again',
+      reopened === '', JSON.stringify(reopened));
+
+    // In their own conversation the words go back ahead of whatever was typed
+    // there since, and the box holds 1000 characters. A pair longer than that
+    // loses the end of the later text, and the toast used to say "Your text is
+    // still in the box" all the same.
+    await page.evaluate(holdNextSend);
+    await page.fill('#chat-input', MEANT);
+    await page.press('#chat-input', 'Enter');
+    await page.waitForFunction(function () { return typeof window.__zcHeld.refuse === 'function'; });
+    const LONG_SINCE = 'typed while it was sending '.repeat(37);
+    await page.fill('#chat-input', LONG_SINCE);
+    await page.evaluate(function () { window.__zcHeld.refuse(); });
+    await page.waitForFunction(function () { return !document.getElementById('chat-send').hasAttribute('aria-busy'); });
+    const overflow = await page.evaluate(function () {
+      return { box: document.getElementById('chat-input').value, toasts: window.__zcHeld.toasts.slice() };
+    });
+    t.check('and when they and what was typed since are more than the box holds, the toast says the end was cut',
+      overflow.box === (MEANT + '\n' + LONG_SINCE).slice(0, 1000) && overflow.toasts.length === 1 &&
+        /cut/.test(overflow.toasts[0]),
+      JSON.stringify({ boxLength: overflow.box.length, boxStart: overflow.box.slice(0, 40), toasts: overflow.toasts }));
+
+    // And when their conversation has ended, there is no box of theirs left:
+    // its row leaves the list, and it can never be opened again. Both orders
+    // happen. Against the emulator the refusal arrived first and the list's
+    // delivery of the ending a moment later. A list that delivers first is
+    // the other order. Either way the last thing the reader is told is that the
+    // message was not sent because its conversation has ended, and the open
+    // conversation's draft is left alone. Each order runs in a session of its
+    // own, because each ends one of the two seeded matches, and this page
+    // needs both of them below.
+    const endedElsewhere = async function (refuseFirst) {
+      const s = await h.openSession(page.context().browser(), ctx.viewport);
+      const p = s.page;
+      let seen = null;
+      try {
+        await h.signIn(p, ctx.base);
+        await p.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
+        await p.waitForSelector('#match-list .match-row');
+        await p.evaluate(holdNextSend);
+        await openConversation(p, 'Devin');
+        const leaving = await p.evaluate(function () { return window.ZC.util.qs('m'); });
+        await p.fill('#chat-input', 'Meant for Devin, who is leaving');
+        await p.press('#chat-input', 'Enter');
+        await p.waitForFunction(function () { return typeof window.__zcHeld.refuse === 'function'; });
+        if (ctx.viewport.key !== 'desktop') await p.click('#chat-back');
+        await openConversation(p, 'Sam');
+        await p.waitForFunction(function (id) {
+          return /Sam/.test(document.getElementById('chat-peer-name').textContent) && window.ZC.util.qs('m') !== id;
+        }, leaving);
+        await p.fill('#chat-input', SAM_DRAFT);
+        const refuse = async function () {
+          await p.evaluate(function () { window.__zcHeld.refuse(); });
+          await p.waitForFunction(function () { return !document.getElementById('chat-send').hasAttribute('aria-busy'); });
+        };
+        const unmatch = async function () {
+          await p.evaluate(function (id) {
+            return window.ZC.store.unmatch(id, window.ZC.auth.current.uid);
+          }, leaving);
+          await p.waitForFunction(function (id) {
+            return !Array.prototype.some.call(document.querySelectorAll('#match-list .match-row'), function (row) {
+              return row.dataset.matchId === id;
+            });
+          }, leaving);
+        };
+        if (refuseFirst) {
+          await refuse();
+          await unmatch();
+        } else {
+          await unmatch();
+          await refuse();
+        }
+        seen = await p.evaluate(function () {
+          return {
+            open: document.getElementById('chat-peer-name').textContent,
+            box: document.getElementById('chat-input').value,
+            toasts: window.__zcHeld.toasts.slice()
+          };
+        });
+      } finally {
+        await s.context.close();
+      }
+      const last = seen ? seen.toasts[seen.toasts.length - 1] || '' : '';
+      return {
+        told: !!seen && seen.box === SAM_DRAFT && /Devin/.test(last) && /not sent/.test(last) && /ended/.test(last),
+        seen: seen,
+        clean: s.errors.length === 0,
+        detail: JSON.stringify(seen && { last: last, toasts: seen.toasts.length, box: seen.box, open: seen.open }) +
+          (s.errors.length ? ' | ' + s.errors.slice(0, 2).join(' | ') : '')
+      };
+    };
+    const refusedThenEnded = await endedElsewhere(true);
+    t.check('a send refused elsewhere whose conversation then ends is said not to have been sent, after the refusal',
+      refusedThenEnded.clean && refusedThenEnded.told && refusedThenEnded.seen.toasts.length === 2,
+      refusedThenEnded.detail);
+    const endedThenRefused = await endedElsewhere(false);
+    t.check('and one whose conversation ended before the refusal is said not to have been sent, with no box promised',
+      endedThenRefused.clean && endedThenRefused.told && endedThenRefused.seen.toasts.length === 1,
+      endedThenRefused.detail);
+
+    await page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#match-list .match-row');
     await openConversation(page, 'Sam');
 
     /* ---- a restored page keeps the open conversation live ---- */
@@ -1019,6 +1207,11 @@ module.exports = {
     // is its policy and changes between versions, but `persisted: true` is the
     // contract the handler is written against, and that is the thing worth
     // pinning.
+    //
+    // The browser keeps what was in the box through a restore, and the page
+    // used to empty it: re-opening the conversation reset the composer.
+    const KEPT = 'Half a reply written before leaving for another page';
+    await page.fill('#chat-input', KEPT);
     const restoredText = await page.evaluate(async function () {
       window.dispatchEvent(new Event('pagehide'));
       let show;
@@ -1050,6 +1243,9 @@ module.exports = {
         ? 'a message sent after the restore reached the open thread'
         : 'nothing reached the thread in 3s — the restore put the list back and left ' +
           'the message listener dead');
+    const keptBox = await page.inputValue('#chat-input');
+    t.check('and it keeps what was typed in its box',
+      keptBox === KEPT, 'the box holds ' + JSON.stringify(keptBox));
 
     /* ---- and a conversation the other side ends keeps what was typed ---- */
 
@@ -1077,6 +1273,21 @@ module.exports = {
     const endedTickers = await page.evaluate(function () { return window.__zcStampTickers().length; });
     t.check('and the list beside it keeps its stamps ticking',
       endedTickers === 1, endedTickers + ' live one-minute ticker(s) after the conversation ended');
+
+    // An ended conversation has no listener for a restore to put back, and
+    // re-opening it found no match to open, so the restore closed it and
+    // emptied the box the ended conversation had just promised to keep.
+    const endedRestore = await page.evaluate(function () {
+      window.dispatchEvent(new Event('pagehide'));
+      window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+      return {
+        typed: document.getElementById('chat-input').value,
+        ended: !!document.getElementById('chat-ended'),
+        tickers: window.__zcStampTickers().length
+      };
+    });
+    t.check('and a restore from the back-forward cache leaves the ended conversation, and what was typed, where they were',
+      endedRestore.typed === typed && endedRestore.ended && endedRestore.tickers === 1, JSON.stringify(endedRestore));
 
     /* ---- and the NEXT conversation is not left disabled ---- */
 
@@ -1162,6 +1373,156 @@ module.exports = {
       rowSurvived && pressOpened,
       (rowSurvived ? 'the row was left alone' : 'the row was rebuilt under the press') + ', and the click ' +
       (pressOpened ? 'opened the conversation' : 'never arrived'));
+
+    /* ---- a send refused in a conversation that ended while it was held ---- */
+
+    // The usual reason a held write is refused: the other side ended the match
+    // first. The ended conversation disables its box and its Send button and
+    // keeps what was typed since the send, and the refusal then put the sent
+    // words back in that box over it. The send's own clean-up also re-enabled
+    // Send from what was in the box, without asking whether the conversation
+    // was still there to send to. The send is held as above; the unmatch is
+    // the real store's.
+    const heldInEnded = await page.evaluate(function () {
+      const store = window.ZC.store;
+      const realSend = store.sendMessage;
+      window.__zcHeld = { refuse: null };
+      store.sendMessage = function () {
+        store.sendMessage = realSend;
+        return new Promise(function (resolve, reject) {
+          window.__zcHeld.refuse = function () { reject(new Error('Refused by the e2e suite.')); };
+        });
+      };
+      return window.ZC.util.qs('m');
+    });
+    const LAST_WORDS = 'Sent just as the match ended';
+    await page.fill('#chat-input', LAST_WORDS);
+    await page.press('#chat-input', 'Enter');
+    await page.waitForFunction(function () { return typeof window.__zcHeld.refuse === 'function'; });
+    const TYPED_SINCE = 'and typed while it was sending';
+    await page.fill('#chat-input', TYPED_SINCE);
+    await page.evaluate(function (matchId) {
+      return window.ZC.store.unmatch(matchId, window.ZC.auth.current.uid);
+    }, heldInEnded);
+    await page.waitForSelector('#chat-ended', { timeout: 3000 });
+    await page.evaluate(function () { window.__zcHeld.refuse(); });
+    await page.waitForFunction(function () { return !document.getElementById('chat-send').hasAttribute('aria-busy'); });
+    const endedRefusal = await page.evaluate(function () {
+      return {
+        box: document.getElementById('chat-input').value,
+        boxDisabled: document.getElementById('chat-input').disabled,
+        sendDisabled: document.getElementById('chat-send').disabled
+      };
+    });
+    t.check('a send refused after its conversation ended puts the words back ahead of what was typed since',
+      endedRefusal.box === LAST_WORDS + '\n' + TYPED_SINCE, JSON.stringify(endedRefusal.box));
+    t.check('and leaves the ended conversation\'s box and Send button disabled',
+      endedRefusal.boxDisabled && endedRefusal.sendDisabled, JSON.stringify(endedRefusal));
+
+    /* ---- Sign out, then Back ---- */
+
+    // The nav's Sign out goes on to the landing page with a history entry, and
+    // Hosting sends these pages no-cache, not no-store, which leaves them free
+    // to go into the back-forward cache. Back then hands the same document
+    // back with nothing re-run: the conversation open, the composer live, and
+    // nobody signed in. It stayed up as the account that had signed out, and a
+    // message sent from it was stored as that account. Signed in as somebody
+    // else and then Back, it took on the new account and went on showing, and
+    // sending as, the old one.
+    //
+    // This Chromium restores nothing from the cache itself, so the document is
+    // kept another way: the landing page answers the Sign out with 204 No
+    // Content, which leaves the page where it was with the real sign-out done,
+    // and the restore is the synthetic pagehide/pageshow pair used above. A
+    // session of its own with the service worker kept out, so the stubs are
+    // what answer, and the sign-in page is a stub too, so nothing there acts
+    // on the made-up account below.
+    const back = await h.openSession(page.context().browser(), ctx.viewport, { serviceWorkers: 'block' });
+    try {
+      const bp = back.page;
+      const isLanding = function (url) { return h.pageUrl('index').test(url.href); };
+      const isSignIn = function (url) { return h.pageUrl('auth').test(url.href); };
+      const pageNow = function () {
+        return bp.evaluate(function () {
+          const input = document.getElementById('chat-input');
+          return {
+            at: window.location.pathname + window.location.search,
+            who: window.ZC.auth.current ? window.ZC.auth.current.uid : null,
+            chatOpen: !document.getElementById('chat').classList.contains('hidden'),
+            composerLive: !!input && !input.disabled
+          };
+        });
+      };
+      // Signs the demo account in, opens Sam's conversation and signs out with
+      // the nav's button, keeping the document. Resolves with where it is.
+      const signOutKept = async function () {
+        await h.signIn(bp, ctx.base);
+        await bp.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
+        await bp.waitForSelector('#match-list .match-row');
+        await openConversation(bp, 'Sam');
+        let answered;
+        const kept = new Promise(function (resolve) { answered = resolve; });
+        await bp.route(isLanding, async function (route) {
+          await route.fulfill({ status: 204, body: '' });
+          answered();
+        });
+        await bp.route(isSignIn, function (route) {
+          return route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>held</title>' });
+        });
+        // Dispatched: the nav's links are hidden at the mobile width, and
+        // app.js handles the click the same way at every width.
+        await bp.locator('[data-zc-nav] [data-signout]').dispatchEvent('click');
+        await kept;
+        await bp.unroute(isLanding);
+        return (await pageNow()).at;
+      };
+      const nextOf = function (href) {
+        try { return new URL(href).searchParams.get('next') || ''; } catch (err) { return ''; }
+      };
+
+      const signedOutOn = await signOutKept();
+      await bp.evaluate(function () {
+        window.dispatchEvent(new Event('pagehide'));
+        window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+      });
+      await bp.waitForURL(isSignIn, { timeout: 10000 }).catch(function () {});
+      const leftFor = bp.url();
+      const leftTitle = await bp.title();
+      t.check('a conversation handed back by the back-forward cache after Sign out leaves for the sign-in page',
+        /^\/matches(\.html)?\?m=/.test(signedOutOn) && h.pageUrl('auth').test(leftFor) && leftTitle === 'held' &&
+          nextOf(leftFor) === signedOutOn,
+        JSON.stringify({ signedOutOn: signedOutOn, at: leftFor.replace(ctx.base, ''), title: leftTitle }));
+
+      // The same account signing in again while the page is away gets its
+      // page back, as it was. And the page goes on following the session: a
+      // tab signing in as somebody else afterwards moves it on, as it does a
+      // page that never signed itself out.
+      await bp.unroute(isSignIn);
+      const againOn = await signOutKept();
+      await bp.evaluate(function () { window.dispatchEvent(new Event('pagehide')); });
+      const other = back.watch(await back.context.newPage());
+      await h.signIn(other, ctx.base);
+      await other.goto(ctx.base + '/index.html', { waitUntil: 'domcontentloaded' });
+      await bp.waitForFunction(function () { return !!window.ZC.auth.current; });
+      await bp.evaluate(function () {
+        window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+      });
+      await bp.waitForSelector('#chat:not(.hidden)');
+      const restored = await pageNow();
+      t.check('and one handed back with its own account signed in again stays, conversation and all',
+        restored.at === againOn && restored.who === 'demo-you' && restored.chatOpen && restored.composerLive,
+        JSON.stringify(restored));
+      await other.evaluate(function () {
+        localStorage.setItem('zc.demo.session', JSON.stringify({ uid: 'e2e-someone-else' }));
+      });
+      await bp.waitForURL(isSignIn, { timeout: 10000 }).catch(function () {});
+      const movedTo = bp.url();
+      t.check('but leaves for the sign-in page once another tab signs in as somebody else',
+        h.pageUrl('auth').test(movedTo) && nextOf(movedTo) === againOn, movedTo.replace(ctx.base, ''));
+      t.check('and the tabs doing it log no errors', back.errors.length === 0, back.errors.slice(0, 3).join(' | '));
+    } finally {
+      await back.context.close();
+    }
 
     /* ---- "Yesterday" is the calendar's yesterday, on the days clocks change ---- */
 
@@ -1250,6 +1611,59 @@ module.exports = {
         nuuk.clean && !!nuuk.days && /^Sun Mar 29 2026 23:/.test(nuuk.days.now) && nuuk.days.offset === 60 &&
           nuuk.days.saturday === 'Yesterday' && nuuk.days.sunday === 'Today',
         nuuk.detail);
+
+      // A conversation left open across midnight. Separators were labelled
+      // once, when drawn, and the one-minute ticker rewrote every stamp but
+      // them: after midnight the evening's messages still sat under "Today",
+      // and the first message of the new day drew a second "Today" below it.
+      // Tokyo keeps no daylight saving, so this night is an ordinary one.
+      const night = await h.openSession(page.context().browser(), ctx.viewport);
+      const nightCdp = await night.context.newCDPSession(night.page);
+      let nightLog = null;
+      try {
+        await nightCdp.send('Emulation.setTimezoneOverride', { timezoneId: 'Asia/Tokyo' });
+        // 23:50 in Tokyo on Sunday 18 October 2026.
+        await night.page.clock.install({ time: new Date('2026-10-18T14:50:00Z') });
+        await h.signIn(night.page, ctx.base);
+        await night.page.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
+        await night.page.waitForSelector('#match-list .match-row');
+        await openConversation(night.page, 'Sam');
+        await night.page.fill('#chat-input', 'sent ten minutes before midnight');
+        await night.page.press('#chat-input', 'Enter');
+        await night.page.waitForFunction(function () {
+          return document.querySelectorAll('#chat-log .msg').length === 1;
+        });
+        // Twenty minutes with the conversation open: the ticker runs twenty times.
+        await night.page.clock.runFor(20 * 60 * 1000);
+        await night.page.evaluate(async function () {
+          const store = window.ZC.store;
+          const matchId = window.ZC.util.qs('m');
+          const sam = (await store.getMatches(window.ZC.auth.current.uid))
+            .filter(function (m) { return m.matchId === matchId; })[0];
+          await store.sendMessage(matchId, sam.otherUid, 'answered ten minutes after');
+        });
+        await night.page.waitForFunction(function () {
+          return document.querySelectorAll('#chat-log .msg').length === 2;
+        });
+        nightLog = await night.page.evaluate(function () {
+          return {
+            now: new Date().toString().slice(0, 21),
+            log: Array.prototype.map.call(document.getElementById('chat-log').children, function (node) {
+              if (node.classList.contains('chat-day')) return '[' + node.textContent.trim() + ']';
+              const text = node.querySelector('.msg-text');
+              return text ? text.textContent.trim() : node.className;
+            })
+          };
+        });
+      } finally {
+        await nightCdp.detach().catch(function () {});
+        await night.context.close();
+      }
+      t.check('a conversation left open past midnight moves its evening under "Yesterday" and draws one "Today"',
+        night.errors.length === 0 && !!nightLog && /^Mon Oct 19 2026 00:1/.test(nightLog.now) &&
+          JSON.stringify(nightLog.log) === JSON.stringify(
+            ['[Yesterday]', 'sent ten minutes before midnight', '[Today]', 'answered ten minutes after']),
+        JSON.stringify(nightLog) + (night.errors.length ? ' | ' + night.errors.slice(0, 2).join(' | ') : ''));
     }
   }
 };

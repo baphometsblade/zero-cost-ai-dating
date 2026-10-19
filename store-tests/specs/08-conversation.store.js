@@ -40,6 +40,12 @@
       missing document, so the second of two rewinds was refused — and only the
       real ruleset could show it, so that part runs against the real ruleset.
 
+   And an unmatch has to stay ended (section 6, under the real rules too; the
+   demo adapter is held to the same in tests/data-store.test.js). It used to
+   leave both likes under the deleted match, so a stale deck tab of either
+   person's, a note on another device, or the other person at the console
+   wrote the conversation back.
+
    The window in (1) is deliberately exceeded here rather than assumed. A test
    that seeds ten messages passes against both the broken and the fixed
    listener.
@@ -256,5 +262,106 @@ module.exports = {
     t.check('and so does the open conversation',
       !!opened && !!opened.other && opened.other.displayName === named,
       k.show(opened && opened.other ? opened.other.displayName : opened));
+
+    /* ---- 6. and an unmatch stays ended ---------------------------------- */
+
+    // `unmatch` used to delete the match and leave both likes under it, and a
+    // mutual pair with no match document is what three things here write one
+    // for: a deck tab of either person's that still shows the card, on any key,
+    // because the like on record is the decision that stands; a pending-match
+    // note on a device the unmatch did not run on; and the other person writing
+    // the document themselves, which the create rule allows on the proof that
+    // the caller was liked. Each is tried, signed in, under the real rules,
+    // after a real unmatch, and anything one lets through is removed again so
+    // the next starts from the ended state.
+    const ender = 'conv-ender';
+    const leftUid = 'conv-left';
+    const endedPair = k.h.pairId(ender, leftUid);
+    const KEY = k.ctx.ZC.store.KEYS.pendingMatch;
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      const db = c.firestore();
+      await k.fs.setDoc(k.fs.doc(db, 'users', ender), k.h.userDoc(ender));
+      await k.fs.setDoc(k.fs.doc(db, 'users', leftUid), k.h.userDoc(leftUid));
+      await k.fs.setDoc(k.fs.doc(db, 'swipes', ender + '_' + leftUid), k.h.swipeDoc(ender, leftUid, 'like'));
+      await k.fs.setDoc(k.fs.doc(db, 'swipes', leftUid + '_' + ender), k.h.swipeDoc(leftUid, ender, 'like'));
+      await k.fs.setDoc(k.fs.doc(db, 'matches', endedPair), k.h.matchDoc(ender, leftUid));
+      await k.fs.setDoc(k.fs.doc(db, 'matches', endedPair, 'messages', 'm1'), k.h.messageDoc(leftUid));
+    });
+    const signedIn = function (uid) { return k.rulesEnv.authenticatedContext(uid).firestore(); };
+    const stored = async function (path) {
+      let data = null;
+      await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+        const snap = await k.fs.getDoc(k.fs.doc(c.firestore(), path));
+        data = snap.exists() ? snap.data() : null;
+      });
+      return data;
+    };
+    const comeBack = async function () {
+      const back = (await stored('matches/' + endedPair)) !== null;
+      if (back) {
+        await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+          await k.fs.deleteDoc(k.fs.doc(c.firestore(), 'matches', endedPair));
+        });
+      }
+      return back;
+    };
+    const owe = function (fromUid, toUid) {
+      const map = {};
+      map[fromUid] = {};
+      map[fromUid][toUid] = { at: new Date().toISOString(), last: null };
+      globalThis.localStorage.setItem(KEY, JSON.stringify(map));
+    };
+    const tried = {};
+    try {
+      k.ctx.ZC.firebase.db = signedIn(ender);
+      tried.unmatch = await k.store.unmatch(endedPair, ender).catch(answer);
+      tried.unmatchLeft = await stored('matches/' + endedPair);
+      k.ctx.ZC.firebase.db = signedIn(leftUid);
+      tried.theirTab = await k.store.recordSwipe(leftUid, ender, 'pass').catch(answer);
+      tried.theirTabBack = await comeBack();
+      tried.console = await k.fs.setDoc(k.fs.doc(signedIn(leftUid), 'matches', endedPair),
+        k.h.matchDoc(ender, leftUid)).then(function () { return 'written'; }, function (err) { return err.code; });
+      tried.consoleBack = await comeBack();
+      owe(leftUid, ender);
+      tried.theirNote = await k.store.reconcileMatches(leftUid).catch(answer);
+      tried.theirNoteBack = await comeBack();
+      k.ctx.ZC.firebase.db = signedIn(ender);
+      tried.myTab = await k.store.recordSwipe(ender, leftUid, 'like').catch(answer);
+      tried.myTabBack = await comeBack();
+      owe(ender, leftUid);
+      tried.myNote = await k.store.reconcileMatches(ender).catch(answer);
+      tried.myNoteBack = await comeBack();
+    } finally {
+      k.ctx.ZC.firebase.db = openDb;
+      globalThis.localStorage.removeItem(KEY);
+    }
+    k.ctx.drainWarnings();
+
+    t.check('under the real rules, an unmatch removes the match',
+      !!tried.unmatch && tried.unmatch.removed === true && tried.unmatchLeft === null,
+      k.show(tried.unmatch) + (tried.unmatchLeft === null ? '' : ', and the match is still there'));
+
+    t.check('and a stale deck tab of the other person\'s does not bring it back, on a pass or any key',
+      !!tried.theirTab && tried.theirTab.matched === false && !tried.theirTabBack,
+      k.show(tried.theirTab) + (tried.theirTabBack ? ', and the match document was written again' : ''));
+
+    t.check('nor can the other person write the match document again themselves',
+      tried.console === 'permission-denied' && !tried.consoleBack, k.show(tried.console));
+
+    t.check('nor does a check still owed on another device, on either side',
+      !!tried.theirNote && !tried.theirNote.rejected && !tried.theirNoteBack &&
+        !!tried.myNote && !tried.myNote.rejected && !tried.myNoteBack,
+      k.show({ theirs: tried.theirNote, reopened: tried.theirNoteBack, mine: tried.myNote, reopenedMine: tried.myNoteBack }));
+
+    t.check('nor a stale deck tab of the person who ended it, which finds their pass on record',
+      !!tried.myTab && tried.myTab.matched === false && tried.myTab.existing === true &&
+        tried.myTab.action === 'pass' && !tried.myTabBack,
+      k.show(tried.myTab) + (tried.myTabBack ? ', and the match document was written again' : ''));
+
+    const enderSwipe = await stored('swipes/' + ender + '_' + leftUid);
+    const leftSwipe = await stored('swipes/' + leftUid + '_' + ender);
+    t.check('because the unmatch recorded the ender\'s pass in place of their like, and left the other like alone',
+      !!enderSwipe && enderSwipe.action === 'pass' && !!leftSwipe && leftSwipe.action === 'like',
+      k.show({ ender: enderSwipe && enderSwipe.action, other: leftSwipe && leftSwipe.action }));
   }
 };

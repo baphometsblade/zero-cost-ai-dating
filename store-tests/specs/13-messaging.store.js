@@ -354,6 +354,50 @@ module.exports = {
       flipped.away && flipped.back && k.same(heard, [0]),
       k.show({ deliveries: heard, witnessFromCache: flips }));
 
+    /* ---- a held message that lands after a newer one ---------------------- */
+
+    // A message sent with no connection waits in the page and is committed when
+    // the connection comes back, and the other person may have written in the
+    // meantime. The preview update that follows it was unconditional, so it put
+    // the older message back as the latest in both people's lists and moved
+    // `lastMessageAt`, which the list sorts by, back in time, while the thread,
+    // ordered by `createdAt`, ended with the newer one. The other side's message
+    // and preview are written the way their device leaves them, through the
+    // admin access, because this suite's one client is the device holding the
+    // write.
+    const F = 'msg-f';
+    const late = k.h.pairId(A, F);
+    await k.admin.set('users', F, k.h.userDoc(F));
+    await k.admin.set('matches', late, k.h.matchDoc(A, F));
+    const HELD = 'Written on the train, offline';
+    const NEWER = 'Newest message, from the other side';
+    let lateSent = 'pending';
+    let newerAt = null;
+    await k.ctx.db.disableNetwork();
+    try {
+      k.store.sendMessage(late, A, HELD).then(function (message) { lateSent = message; },
+        function (err) { lateSent = 'rejected: ' + ((err && (err.code || err.message)) || err); });
+      await tick();
+      newerAt = new Date().toISOString();
+      const owed = {};
+      owed[A] = 1;
+      owed[F] = 0;
+      await k.admin.set('matches/' + late + '/messages', 'from-f', { id: 'from-f', from: F, text: NEWER, createdAt: newerAt });
+      await k.admin.set('matches', late, k.h.matchDoc(A, F, { lastMessage: NEWER, lastMessageAt: newerAt, unread: owed }));
+    } finally {
+      await k.ctx.db.enableNetwork();
+    }
+    await until(function () { return lateSent !== 'pending'; }, 10000);
+    k.ctx.drainWarnings();
+    const lateMatch = (await k.admin.get('matches', late)) || {};
+    const lateThread = (await k.store.getMessages(late)).map(function (m) { return m.text; });
+    t.check('a held message that lands after a newer reply leaves the newer one as the preview, and is still owed',
+      typeof lateSent === 'object' && lateSent.createdAt < newerAt && k.same(lateThread, [HELD, NEWER]) &&
+        lateMatch.lastMessage === NEWER && lateMatch.lastMessageAt === newerAt &&
+        (lateMatch.unread || {})[F] === 1 && (lateMatch.unread || {})[A] === 1,
+      k.show({ sent: typeof lateSent === 'object' ? lateSent.createdAt : lateSent, newerAt: newerAt, thread: lateThread,
+        preview: { lastMessage: lateMatch.lastMessage, at: lateMatch.lastMessageAt }, unread: lateMatch.unread }));
+
     /* ---- a count the other side parked, under the real rules -------------- */
 
     // Each participant may write either count, and firestore.rules bounds the value
@@ -406,5 +450,53 @@ module.exports = {
       k.show({ parked: parkedOk, sent: sentParked && (sentParked.rejected || 'stored'),
         lastMessage: parkedMatch && parkedMatch.lastMessage, unread: parkedMatch && parkedMatch.unread,
         warnings: parkedWarnings.map(function (w) { return w.slice(0, 90); }) }));
+
+    /* ---- a message dated more than a day back, under the real rules ------- */
+
+    // firestore.rules refuses a message dated more than a day before the server's
+    // clock. An honest device writes one in two ways the rules cannot tell apart:
+    // its clock runs that slow, or the message waited that long in an open page for
+    // a connection. Either way the send has to reject rather than resolve, because
+    // matches.js gives the words back from its catch, and resolving clears the box.
+    // The slow clock stands in for the wait: the server sees the same stamp. The
+    // global `firebase` is the testing library's for the send, for the reason the
+    // parked count above gives, so that a send the rules took would move the
+    // preview as it does in a page.
+    const G = 'msg-g';
+    const slowId = k.h.pairId(A, G);
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      await setDoc(doc(c.firestore(), 'matches', slowId), k.h.matchDoc(A, G));
+    });
+    const RealDate = Date;
+    class SlowDate extends RealDate {
+      constructor(...args) {
+        if (args.length) super(...args);
+        else super(RealDate.now() - 25 * 3600000);
+      }
+      static now() { return RealDate.now() - 25 * 3600000; }
+    }
+    let sentSlow = null;
+    k.ctx.drainWarnings();
+    try {
+      k.ctx.ZC.firebase.db = k.rulesEnv.authenticatedContext(A).firestore();
+      globalThis.firebase = testingFirebase;
+      globalThis.Date = SlowDate;
+      sentSlow = await k.store.sendMessage(slowId, A, 'From a clock a day slow')
+        .then(function () { return 'resolved'; }, function (err) { return (err && err.code) || String(err); });
+    } finally {
+      globalThis.Date = RealDate;
+      globalThis.firebase = openFirebase;
+      k.ctx.ZC.firebase.db = openDb;
+    }
+    k.ctx.drainWarnings();
+    let slowMatch = null;
+    let slowStored = null;
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      slowMatch = (await k.fs.getDoc(doc(c.firestore(), 'matches', slowId))).data() || null;
+      slowStored = (await k.fs.getDocs(k.fs.collection(c.firestore(), 'matches', slowId, 'messages'))).size;
+    });
+    t.check('a message from a device clock a day and an hour slow is refused, and the send rejects with nothing stored',
+      sentSlow === 'permission-denied' && slowStored === 0 && !!slowMatch && slowMatch.lastMessage === null,
+      k.show({ send: sentSlow, stored: slowStored, lastMessage: slowMatch && slowMatch.lastMessage }));
   }
 };

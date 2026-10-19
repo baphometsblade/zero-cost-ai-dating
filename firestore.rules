@@ -95,6 +95,30 @@ service cloud.firestore {
            <= request.time + duration.value(1, 'd');
     }
 
+    // currentStampOk, and no more than a day before the server's clock either. For a
+    // message only: the ceiling alone let a participant date one at any earlier moment,
+    // and both threads file it there — above replies sent long before it was written,
+    // at the top as a message from 2001, or outside the live window of a long
+    // conversation, where the other person's open thread never shows it. A day is the
+    // slack the ceiling gives, and inside it a forged stamp can still be filed up to a
+    // day back; this bounds that, it does not close it. Back-dating any other stamp
+    // here only lowers the writer's own place in other people's decks and lists, so
+    // those keep the ceiling alone.
+    //
+    // An honest device meets the floor in two ways. Its clock runs more than a day slow,
+    // and every message it sends is refused, as one running more than a day fast already
+    // was. Or a message waits in an open page for a connection for more than a day:
+    // offline persistence is off, so only a page left open holds it that long, and when
+    // the connection comes back it is refused rather than filed a day or more up the
+    // thread, above what the other person wrote meanwhile. Either way the send is
+    // rejected, and matches.js puts the words back in that conversation's box.
+    function recentStampOk(v) {
+      return currentStampOk(v)
+        && timestamp.date(int(v[0:4]), int(v[5:7]), int(v[8:10]))
+             + duration.time(int(v[11:13]), int(v[14:16]), int(v[17:19]), 0)
+           >= request.time - duration.value(1, 'd');
+    }
+
     // A list's *contents*, not just how many elements it holds.
     //
     // `size()` bounds the count and says nothing about what is inside, so
@@ -595,9 +619,11 @@ service cloud.firestore {
       // published account and withdraw it again, so a read it opened would be one a
       // stranger holding the uid could grant themselves, use and retract, leaving
       // nothing in the queue. The report menu is in a conversation, so a reporter
-      // is a match; unmatching deletes the match and leaves the like under it, and
-      // the like keeps the name. A report the page cannot read it names "a deleted
-      // account", as it names one it cannot fetch.
+      // is a match. A reporter who ends the conversation turns only their own like
+      // into a pass, and the subject's like, left under it, keeps the name. A subject
+      // who ends it turns theirs into a pass, and once they have paused, the reporter
+      // is none of the accounts above. The settings page names a subject it cannot
+      // read "an account you can no longer see", as it names one it cannot fetch.
       //
       // The rules are not a filter, so a query is allowed only when every document
       // it could return is: the deck's query names `discoverable == true` and is,
@@ -867,11 +893,12 @@ service cloud.firestore {
       // lost. It reads the swipe back before creating anything, precisely because this
       // rule proves the OTHER person liked you and never looks at your own side.
       //
-      // ...and not once they have blocked you. Unmatching alone is not durable: it deletes
-      // the match document but not the like underneath it, so `likedByOther` still holds
-      // and the other side can simply write the document again and carry on messaging.
-      // The report dialog's "Block and unmatch" is the flow that has to survive that, and
-      // this is what makes it survive.
+      // ...and not once they have blocked you. An unmatch now turns the ender's own like
+      // into a pass, so `likedByOther` fails for the other side afterwards
+      // (store-tests/specs/08-conversation.store.js runs it), but a conversation ended
+      // before that still has both likes under it, and a blocked account is the one whose
+      // client should not be trusted to leave it alone. The report dialog's "Block and
+      // unmatch" is the flow that has to survive that, and this is what makes it survive.
       //
       // Only that direction is checked. "I blocked them" is enforced by my own client,
       // and a tampered client that matched somebody it had itself blocked would only be
@@ -916,8 +943,8 @@ service cloud.firestore {
           && request.resource.data.text.size() <= 1000
           && (!('id' in request.resource.data) || request.resource.data.id == msgId)
           // Both sides' threads are ordered by this, so it is held to the clock as
-          // well as to a size: see currentStampOk.
-          && currentStampOk(request.resource.data.createdAt);
+          // well as to a size, from above and from below: see recentStampOk.
+          && recentStampOk(request.resource.data.createdAt);
 
         // Messages are never edited, so neither side can rewrite what was said.
         // Deletes are allowed to participants because unmatch and account

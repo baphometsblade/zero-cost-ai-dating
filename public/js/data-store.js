@@ -638,13 +638,14 @@
 
      A write that GROWS the stored value can hit the origin's quota, and every one of
      those is checked: `demoMatchFor`, `sendMessage`, `createUser`/`updateUser`,
-     `reportUser`, and `recordSwipe`'s own swipe row. Each throws, because the
+     `reportUser`, `recordSwipe`'s own swipe row, and the pass `unmatch` records
+     before it deletes anything. Each throws, because the
      Firestore adapter rejects on the same failure and the callers all have the branch.
      Reporting an unwritten document as written is how this file managed to announce a
      match nobody had, send a message it had destroyed, and confirm a safety report it
      had not filed.
 
-     A write that only ever SHRINKS cannot: `unmatch`, `undoSwipe`, `markRead` and
+     A write that only ever SHRINKS cannot: `unmatch`'s deletes, `undoSwipe`, `markRead` and
      `deleteAccountData` re-serialise the map they have just read with entries removed,
      with no `await` in between, so no other tab can grow it underneath them — and
      localStorage's quota is measured on the resulting usage, so a shorter overwrite
@@ -918,12 +919,16 @@
    * readable in firebase mode only by its owner, a match and somebody it liked,
    * and `getPublicProfile(s)` there answer null for anybody else: a reporter
    * too, because anybody can file a report. This adapter answered with the
-   * profile whoever asked. The pages ask as one of those three — the report
-   * menu is in a conversation, so a reporter is a match, and unmatching leaves
-   * the like that made it — so nothing on screen differed; the facade did, and
-   * two adapters diverging quietly is the failure this file keeps finding in
-   * itself. A missing account is "shown" so that it comes back missing, as a
-   * miss does there.
+   * profile whoever asked, and two adapters diverging quietly is the failure
+   * this file keeps finding in itself. The pages mostly ask as one of those
+   * three: the report menu is in a conversation, so a reporter is a match, and
+   * a reporter who ends the conversation leaves the like of the person they
+   * reported, which still names them. Not always: when the person reported
+   * ends it, `unmatch` turns their like into a pass, and once they pause, the
+   * reporter's settings page asks as none of the three. Both adapters answer
+   * that with null, and the page, which cannot tell it from an account that is
+   * gone, names it "an account you can no longer see". A missing account is
+   * "shown" so that it comes back missing, as a miss does there.
    *
    * The rule's other half, that a signed-out caller reads nothing at all, is not
    * restated: this adapter has always answered a discoverable profile without a
@@ -1411,6 +1416,20 @@
       if (!match) return { ok: true, removed: false };
       if (uid && Array.isArray(match.users) && match.users.indexOf(uid) === -1) {
         throw new Error('You are not part of that match.');
+      }
+      // The pass that replaces the like of the person ending it, first, as the
+      // Firestore adapter records it and for its reasons: a like left under a
+      // deleted match is a mutual pair that recordSwipe and finishMatchCheck
+      // write the match for again. Checked, unlike the deletes below, because it
+      // grows the store when there was no swipe to replace, and a throw here has
+      // changed nothing yet. A stored match that names nobody else is corrupt,
+      // and gets no pass aimed at a uid it does not have.
+      const other = uid ? otherOf(match, uid) : null;
+      if (other && other !== uid) {
+        const swipes = readSwipes();
+        const id = swipeId(uid, other);
+        swipes[id] = { id: id, from: uid, to: other, action: 'pass', createdAt: nowIso() };
+        if (!writeSwipes(swipes)) throw new Error('That match could not be ended.');
       }
       delete matches[matchId];
       writeMatches(matches);
@@ -2072,8 +2091,8 @@
   }
 
   /**
-   * Each account's birthdate and the age stored beside it, as this page last
-   * read or saved its own document.
+   * Each account's birthdate, as this page last read or saved its own
+   * document.
    *
    * Only the private document holds a birthdate; `discovery/{uid}` holds the
    * age the last save derived from it, and nothing else rewrote that. So a
@@ -2094,7 +2113,7 @@
   const ageOnRecord = {};
 
   /**
-   * Remember what a read or a save of `users/{uid}` said about the age.
+   * Remember the birthdate a read or a save of `users/{uid}` found.
    * @param {string} uid the account
    * @param {Object|null} data the document as stored, before normalizeUser
    * @returns {void}
@@ -2102,22 +2121,35 @@
   function noteAge(uid, data) {
     const p = data && isPlainObject(data.profile) ? data.profile : null;
     if (!uid || !p) return;
-    ageOnRecord[uid] = { birthdate: p.birthdate || '', age: num(p.age) };
+    ageOnRecord[uid] = { birthdate: p.birthdate || '' };
   }
 
   /**
-   * The age a birthday has brought the account to since its profile was last
-   * saved, or null when the stored age is still right or nothing is known.
+   * The account's age by this device's date, for the presence touch to
+   * publish, or null when no birthdate is known or the age it gives is not
+   * one the rules accept (18 to 120).
+   *
+   * Every time, and not only when it differs from the age the private
+   * document stored. That comparison was what this used to make, and the
+   * private copy is one a touch never rewrites: a touch from a device whose
+   * date was behind the last save's (a clock running slow, or a second
+   * device in a time zone where the birthday has not come yet) published the
+   * year before's age, and from then on every visit from a device with the
+   * right date derived the age the private copy already held, sent none, and
+   * left the wrong one in every other deck until the next save. Sent every
+   * time, the touch that put it there is undone by the next one from a
+   * device with the right date, for nothing: the field rides in an update
+   * the touch makes anyway.
    * @param {string} uid the account
    * @returns {number|null}
    */
-  function ageSinceSave(uid) {
+  function ageToday(uid) {
     const known = ageOnRecord[uid];
     if (!known || !known.birthdate || !util.ageFromBirthdate) return null;
     const age = util.ageFromBirthdate(known.birthdate);
     // Inside the bounds discovery's rules put on `age`, or the refusal would
     // take the timestamp down with it.
-    if (age === null || age === known.age || age < 18 || age > 120) return null;
+    if (age === null || age < 18 || age > 120) return null;
     return age;
   }
 
@@ -2639,12 +2671,41 @@
   }
 
   /**
+   * When somebody was last on the app, as their own projection says: from a
+   * face this page has cached, else one read of `discovery/{uid}`.
+   *
+   * `discoveryOk` holds `lastActiveAt` to the server's clock with
+   * `currentStampOk`, the rule a match's `createdAt` is held to, so a stamp
+   * read here passes that rule again now. A projection last written before
+   * the rule existed can hold a later one; `matchDocumentFor` passes over a
+   * stamp later than the one its own clock wrote, and one in between is
+   * refused like that one was, which answers as a block does.
+   *
+   * Null when it cannot say, and never a rejection: the caller is choosing a
+   * date, and without a better one it keeps the one it has. Nothing is logged
+   * for the same reason: a failure here changes no answer.
+   * @param {string} uid the other person
+   * @returns {Promise<string|null>} an ISO stamp, or null
+   */
+  async function lastSeenAt(uid) {
+    const cached = cachedFaces([uid], Date.now())[uid];
+    if (cached) return toIso(cached.lastActiveAt);
+    try {
+      const snap = await db().collection('discovery').doc(uid).get();
+      return snap.exists ? toIso((snap.data() || {}).lastActiveAt) : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  /**
    * The match document for a pair that has just been found mutual: created once
    * and only once, and answered as "no match" when the rules refuse it.
    * @param {string} fromUid the swiper
    * @param {string} toUid the swiped
    * @param {string|null} likedAt when the other person liked the swiper, as their
-   *   swipe records it: the date a match this device's clock cannot date gets
+   *   swipe records it: the earliest date a match this device's clock cannot
+   *   date gets
    * @returns {Promise<{matched:boolean, matchId:string|null, created:boolean}>}
    */
   async function matchDocumentFor(fromUid, toUid, likedAt) {
@@ -2694,8 +2755,20 @@
       // dated by the like it answers. That stamp is earlier, written by the other
       // person's device, and accepted unless that device's clock ran fast as well. A
       // block refuses both, and the blocked account still gets the same plain no-match.
+      //
+      // Or by the other person's last visit, when that is later. The like can be
+      // weeks old, and both people's lists sort and label a match by `createdAt`:
+      // dated by a like twenty days old, a match made now went below a conversation
+      // three days quiet in the other person's list, and its header said "matched"
+      // and the like's date. Their `lastActiveAt` is held to the server's clock by
+      // the rule this write is held to (see `lastSeenAt`), so it passes here too.
+      // It costs a read when their face is not cached (up to three for a paused
+      // profile, whose face is never cached and whose discovery rule bills its
+      // lookups), and only after a refusal.
       if (refused && likedAt && Date.parse(likedAt) < Date.parse(match.createdAt)) {
-        match.createdAt = likedAt;
+        const seen = await lastSeenAt(toUid);
+        match.createdAt = seen && Date.parse(seen) > Date.parse(likedAt) &&
+          Date.parse(seen) < Date.parse(match.createdAt) ? seen : likedAt;
         try {
           await matchRef.set(match);
           refused = false;
@@ -2955,14 +3028,13 @@
         // them on a stale timestamp and quietly ranking them lower. An empty
         // catch made that indistinguishable from success.
         //
-        // After a birthday it carries the new age as well (see `ageOnRecord`),
-        // in the same write, so it costs nothing extra. Only the projection's
-        // copy is rewritten: the private one is re-derived on every read, and
-        // leaving it as the last save stored it means every touch until that
-        // next save carries the age again, so one that fails is retried by the
-        // next rather than lost.
+        // It carries the age as well (see `ageOnRecord` and `ageToday`), in the
+        // same write, so a birthday since the last save reaches other decks for
+        // nothing extra. Only the projection's copy is rewritten: the private
+        // one is re-derived on every read. Every touch carries it, so one that
+        // fails is retried by the next rather than lost.
         const shadow = { lastActiveAt: iso };
-        const age = ageSinceSave(uid);
+        const age = ageToday(uid);
         if (age !== null) shadow['profile.age'] = age;
         await db().collection('discovery').doc(uid).update(shadow)
           .catch(function (err) {
@@ -3313,6 +3385,36 @@
       if (uid && Array.isArray(data.users) && data.users.indexOf(uid) === -1) {
         throw new Error('You are not part of that match.');
       }
+      // The like of the person ending it becomes a pass, before anything is
+      // removed. Deleting the match alone left both likes under it, and the
+      // create rule's only proof is that the other person liked the caller: so
+      // they could write the match again from the console, and any deck tab of
+      // either person's still showing the card, or a pending-match note on a
+      // device this did not run on, did write it, since recordSwipe and
+      // finishMatchCheck both repair a mutual pair with no match. With a pass
+      // on record the pair is no longer mutual: the other person has no like
+      // left to prove, and in the app only a fresh like after a rewind matches
+      // them again. First, so a failure past it leaves the conversation whole
+      // for a retry, where the reverse order would leave a retry no match to
+      // find and both likes still in place. A swipe is never updated under the
+      // rules, so the like is deleted and the pass created, as two writes: one
+      // batch doing both to the same swipe is refused (permission-denied,
+      // against the emulator). A failure between them leaves the ender no
+      // swipe under a live match, and a retry runs all of this again, the
+      // delete of the missing swipe included, and ends it. A match naming
+      // nobody else gets no pass, as in the demo adapter.
+      const other = uid ? otherOf(data, uid) : null;
+      if (other && other !== uid) {
+        const swipeRef = db().collection('swipes').doc(swipeId(uid, other));
+        await swipeRef.delete();
+        await swipeRef.set({
+          id: swipeId(uid, other),
+          from: uid,
+          to: other,
+          action: 'pass',
+          createdAt: nowIso()
+        });
+      }
       // Messages first: the delete rule checks membership of the parent match,
       // which stops being checkable the moment the match document is gone.
       await deleteMatchMessages(ref);
@@ -3344,13 +3446,30 @@
       // Update the conversation preview + the other side's unread counter.
       try {
         const snap = await matchRef.get();
-        const other = otherOf(snap.data() || {}, fromUid);
-        const patch = { lastMessage: body, lastMessageAt: message.createdAt };
+        const data = snap.data() || {};
+        const other = otherOf(data, fromUid);
+        const patch = {};
+        // The preview only when this message is the thread's latest. A message
+        // sent with no connection waits in the page and is committed when the
+        // connection comes back, which can be after the other person has
+        // written; an unconditional preview then put the older message back as
+        // the latest in both lists, and took `lastMessageAt`, which they sort
+        // by, back in time with it. The thread is ordered by `createdAt`, and
+        // this compares the same stamps. The count is owed either way. This
+        // reads and then writes, so a newer preview from the other side that
+        // lands between the two can still be replaced; a transaction would
+        // close that window, and would answer every such meeting with a
+        // rejected commit and a retry instead.
+        const shown = toIso(data.lastMessageAt);
+        if (!shown || Date.parse(message.createdAt) >= Date.parse(shown)) {
+          patch.lastMessage = body;
+          patch.lastMessageAt = message.createdAt;
+        }
         const FV = fieldValue();
         if (other) {
-          patch['unread.' + other] = FV ? FV.increment(1) : (Number(((snap.data() || {}).unread || {})[other]) || 0) + 1;
+          patch['unread.' + other] = FV ? FV.increment(1) : (Number((data.unread || {})[other]) || 0) + 1;
         }
-        await matchRef.update(patch);
+        if (Object.keys(patch).length) await matchRef.update(patch);
       } catch (err) {
         console.warn('[zc.store] Message sent but the conversation preview did not update.', err);
       }
@@ -3959,11 +4078,12 @@
    * `recordSwipe` for that pair again. The pair are matched and neither of them
    * will ever be told.
    *
-   * A scan cannot find them. "Mutual like with no match document" is
-   * byte-for-byte what a deliberately ended conversation looks like — `unmatch`
-   * deletes the match and leaves both swipes — so a sweep would reopen every
-   * conversation somebody had closed, on every page load. Measured against the
-   * emulator rather than reasoned about.
+   * A scan cannot find them. `unmatch` used to delete the match and leave both
+   * likes, so every conversation ended that way is still byte-for-byte "mutual
+   * like with no match document", and a sweep would reopen each of them on
+   * every page load. An unmatch now turns the ender's like into a pass, which
+   * no repair writes a match for, but that does not change the conversations
+   * already ended.
    *
    * So the failing client leaves a note before it starts, and the next page load
    * finishes what this device knows it began. Nothing is inferred, nothing is
@@ -4692,7 +4812,12 @@
     },
 
     /**
-     * Remove a match (and, in demo mode, its messages).
+     * Remove a match and its messages. Given the participant asking, as the
+     * page always gives it, first record their pass on the other person in
+     * place of their like, so the pair is no longer mutual and nothing that
+     * repairs a mutual pair with no match can write it again. Without `uid`
+     * there is neither that pass nor the check that the asker is in the
+     * match, and both likes stay under the deleted match.
      * @param {string} matchId match id
      * @param {string} uid the participant asking
      * @returns {Promise<{ok:boolean, removed:boolean}>}
@@ -4701,9 +4826,9 @@
       await ready;
       if (!matchId) throw new Error('A match id is required.');
       const outcome = await adapter.unmatch(matchId, uid);
-      // Whatever was owed for this pair is settled by the conversation ending:
-      // finishing the check afterwards would re-create the match the person just
-      // removed, on their next page load.
+      // Whatever was owed for this pair is settled by the conversation ending.
+      // The pass the adapter recorded already keeps a check finished afterwards
+      // from re-creating the match; spending the note saves that check its read.
       if (uid) clearPendingForPair(uid, matchId);
       return outcome;
     },
@@ -4963,8 +5088,11 @@
      * while it is discoverable, and, once it is paused, what its owner, its
      * matches and the people it liked still may.
      * Demo mode serves the stored document itself; firebase mode reads the
-     * discovery projection. Null when the account is gone or unreadable —
-     * callers should treat that as "a deleted account", not as an error.
+     * discovery projection. Null when the account is gone or this viewer may
+     * not read it, which are not told apart: a paused account that has ended
+     * its conversation with the viewer is null as well, once `unmatch` has
+     * turned its like into a pass (a conversation ended before `unmatch` did
+     * that still has the like). Either way it is not an error.
      * @param {string} uid the account to look up
      * @returns {Promise<Object|null>} UserDoc-shaped public profile or null
      */

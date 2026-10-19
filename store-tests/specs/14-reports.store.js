@@ -241,15 +241,18 @@ module.exports = {
     /* ---- the settings page still names a subject who has paused --------- */
 
     // settings.js resolves the name of every account a person has reported through
-    // getPublicProfiles, and shows "a deleted account" for one it cannot read. A
-    // subject who turns off "Show me in other people's decks" is readable now only
-    // by the accounts that know them. The report menu is in a conversation, so a
-    // reporter is a match, and the dialog's next question is whether to unmatch;
-    // unmatching deletes the match and leaves the like under it, which is what
-    // still names the subject here. The report itself opens nothing: anybody may
-    // file one about any published account and withdraw it again. And the face
-    // cache — one blob per browser, kept across a sign-out — must not hand the
-    // reporter's copy to the next account either.
+    // getPublicProfiles, and shows "an account you can no longer see" for one it
+    // cannot read. A subject who turns off "Show me in other people's decks" is
+    // readable now only by the accounts that know them. The report menu is in a
+    // conversation, so a reporter is a match, and the dialog's next question is
+    // whether to unmatch; unmatching deletes the match and turns the unmatcher's
+    // like into a pass. When the reporter unmatches, the subject's like on them
+    // stays, and that is what still names the subject here; when the subject ends
+    // it and pauses, nothing does, which is why the page's name for a face it
+    // cannot read has to be true of that as well as of an account that is gone. The
+    // report itself opens nothing: anybody may file one about any published account
+    // and withdraw it again. And the face cache — one blob per browser, kept across
+    // a sign-out — must not hand the reporter's copy to the next account either.
     const P = 'report-paused';
     const PR = 'report-paused-reporter';
     const STRANGER = 'report-paused-stranger';
@@ -259,9 +262,10 @@ module.exports = {
       await setDoc(doc(db, 'discovery', P), k.h.discoveryDoc(P, {
         preferences: Object.assign({}, k.h.discoveryDoc(P).preferences, { discoverable: false })
       }));
-      // Matched once, and since unmatched: both likes, no match document.
+      // Matched once, and since unmatched by the reporter: their pass, the
+      // subject's like, no match document.
       await setDoc(doc(db, 'swipes', P + '_' + PR), k.h.swipeDoc(P, PR, 'like'));
-      await setDoc(doc(db, 'swipes', PR + '_' + P), k.h.swipeDoc(PR, P, 'like'));
+      await setDoc(doc(db, 'swipes', PR + '_' + P), k.h.swipeDoc(PR, P, 'pass'));
       await setDoc(doc(db, 'reports', PR + '_' + P), k.h.reportDoc(PR, P));
     });
     let reporterSees = null;

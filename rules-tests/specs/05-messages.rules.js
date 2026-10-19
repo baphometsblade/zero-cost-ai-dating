@@ -75,6 +75,28 @@ module.exports = {
         Object.assign(h.messageDoc(ME, 'fast clock'), { createdAt: new Date(Date.now() + 23 * 3600000).toISOString() })
       ))));
 
+    // And from below, by the same day. With a ceiling alone, a participant could
+    // date a message at any earlier moment, and both threads file it there: above
+    // replies sent long before it was written, at the very top as a message from
+    // 2001, or outside the live window of a long conversation, where the other
+    // person's open thread never shows it.
+    t.check('a message dated a day and an hour before the server\'s clock is refused',
+      await ok(assertFails(as(ME).collection('matches/' + mine + '/messages').add(
+        Object.assign(h.messageDoc(ME, 'backdated'), { createdAt: new Date(Date.now() - 25 * 3600000).toISOString() })
+      ))));
+
+    t.check('so is one dated 2001',
+      await ok(assertFails(as(ME).collection('matches/' + mine + '/messages').add(
+        Object.assign(h.messageDoc(ME, 'backdated'), { createdAt: '2001-01-01T00:00:00.000Z' })
+      ))));
+
+    // The control on that side: a phone whose clock runs slow, or a message that
+    // waited in an open page for a connection, is not an attacker.
+    t.check('but one from a device clock running hours slow still sends',
+      await ok(assertSucceeds(as(ME).collection('matches/' + mine + '/messages').add(
+        Object.assign(h.messageDoc(ME, 'slow clock'), { createdAt: new Date(Date.now() - 23 * 3600000).toISOString() })
+      ))));
+
     t.check('a participant can send a message as themselves',
       await ok(assertSucceeds(as(ME).collection('matches/' + mine + '/messages').add(h.messageDoc(ME, 'hello')))));
 

@@ -198,9 +198,14 @@ function matchDoc(a, b, over) {
   }, over || {});
 }
 
-/** A chat message. */
+/**
+ * A chat message, stamped now, as the store stamps one. Not a fixed date like
+ * the other fixtures: firestore.rules refuses a message dated more than a day
+ * before the server's clock, and a fixture that old would make every refusal
+ * in 05-messages pass for that reason rather than its own.
+ */
 function messageDoc(from, text) {
-  return { from: from, text: text === undefined ? 'hello there' : text, createdAt: '2026-01-04T00:00:00.000Z' };
+  return { from: from, text: text === undefined ? 'hello there' : text, createdAt: new Date().toISOString() };
 }
 
 /** A report; the rules require the id to be `from_about`. */

@@ -105,17 +105,19 @@ module.exports = {
     // published account, a paused one included, and withdraw it again, so a read
     // it opened would be one a stranger holding the uid could grant themselves,
     // use and retract, leaving nothing in the queue. The settings page names a
-    // report it cannot read "a deleted account", as it does one it cannot fetch.
+    // report it cannot read "an account you can no longer see", as it does one
+    // it cannot fetch.
     t.check('but filing a report about them does not open it to the reporter',
       await ok(assertSucceeds(as(REPORTER).doc('reports/' + REPORTER + '_' + PAUSED)
         .set(h.reportDoc(REPORTER, PAUSED))))
         && await ok(assertFails(as(REPORTER).doc('discovery/' + PAUSED).get())));
 
-    // fetchProfiles asks about people who may have deleted their account since,
-    // and the settings page names each of those "a deleted account": a miss has
-    // always been an empty snapshot, and stays one. Beside a paused profile's
-    // refusal it tells somebody who already holds a uid that the account exists
-    // and has paused, which is less than the whole profile they could read before.
+    // fetchProfiles asks about people who may have deleted their account since, and
+    // the settings page names each of those "an account you can no longer see": a
+    // miss has always been an empty snapshot, and stays one. Beside a paused
+    // profile's refusal it tells somebody who already holds a uid that the account
+    // exists and has paused, which is less than the whole profile they could read
+    // before.
     t.check('a projection that does not exist still reads as missing',
       await ok(assertSucceeds(as(STRANGER).doc('discovery/never-published').get())));
 

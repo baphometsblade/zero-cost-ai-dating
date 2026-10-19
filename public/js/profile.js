@@ -333,11 +333,11 @@
   let tagOrder = [];
   // The stored value of every field, as snapshot() writes it, as of the last
   // load or save. Kept field by field because a save sends only the fields
-  // that differ from it, and the birthdate, which goes with every save (see
-  // buildPatch). A field is sent whole: the five personality sliders are one
-  // field, as are the interests and the photos, so when two profile tabs each
-  // move a different slider, the later save puts the earlier one's slider
-  // back.
+  // that differ from it, plus, on the save that completes a profile, the
+  // birthdate and age that go with the flag (see buildPatch). A field is sent
+  // whole: the five personality sliders are one field, as are the interests
+  // and the photos, so when two profile tabs each move a different slider,
+  // the later save puts the earlier one's slider back.
   let baseline = {};
   let savedText = 'Everything here is saved.';
   let saving = false;
