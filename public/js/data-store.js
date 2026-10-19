@@ -858,7 +858,8 @@
       // rethrows it as a stored-swipe failure, so the deck keeps the swipe, skips the
       // match burst and shows "Saved, but we could not check for a match just then. We will
       // try again next time you open the app." — and it will: the facade noted this pair
-      // before calling in here, and `reconcileMatches` finishes it on the next page load.
+      // (before calling in here, or for a pair decided earlier, once this rejection names
+      // the decision on record), and `reconcileMatches` finishes it on the next page load.
       // byte for byte what the Firestore adapter produces when `matchRef.set` fails.
       // Announcing a match that was never written is the one thing this must not do:
       // the person is told they matched, the conversation is not there on reload, and
@@ -2733,7 +2734,7 @@
    * original as its cause.
    *
    * When the pair was decided already, the rejection says so through
-   * `decidedEarlier`, as the answer would have had the match check finished.
+   * `decidedEarlier`, as the answer would have, had the match check finished.
    * "Stored" is then about the decision on record, not about this swipe, which
    * wrote nothing; without the mark the deck counted and taught it as new.
    * @param {*} err the rejection to mark
@@ -2762,8 +2763,9 @@
   }
 
   /**
-   * Mark a recordSwipe answer as one that found the pair already decided, so
-   * wrote no swipe, and name the decision that stands.
+   * Mark a recordSwipe answer (or the rejection of its match check) as one
+   * that found the pair already decided, so wrote no swipe, and name the
+   * decision that stands.
    *
    * That is not the same as writing nothing. The match check still runs on
    * that decision, and a mutual pair whose match document is missing (what a
@@ -4013,14 +4015,15 @@
 
   /** Remember that a match check is about to be attempted for this pair. */
   function notePendingMatch(fromUid, toUid, action) {
-    // A pass can never produce a match, so it can never leave one unfinished.
-    // No check pins this line and it would be dishonest to imply one does: a
-    // pass never reaches the match path at all, so its note is always cleared
-    // when the swipe write succeeds, and removing this guard changes nothing
-    // observable. It stays because it is true and it keeps the log to entries
-    // that could actually be owed. What IS pinned is the half a stale note can
-    // reach — `finishMatchCheck` reads the stored action, so a `pass` cannot
-    // become a match however the note got there.
+    // A pass on a pair nobody has decided can never produce a match, so it can
+    // never leave one unfinished, and it is not noted. A pass pressed on a pair
+    // whose like or super like already stands is the exception: recordSwipe
+    // runs the match check on the decision on record, and when that check
+    // fails the facade notes the pair afterwards, for that decision. Only a tab
+    // that leaves during that check loses it; noting every pass up front would
+    // cover that case too, at the price of a note per pass. What IS pinned is
+    // the half a stale note can reach — `finishMatchCheck` reads the stored
+    // action, so a `pass` cannot become a match however the note got there.
     if (!isPositive(normalizeAction(action))) return;
     const map = readPendingMatches();
     if (!isPlainObject(map[fromUid])) map[fromUid] = {};

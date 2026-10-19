@@ -208,7 +208,7 @@ module.exports = {
         return { birthdate: doc.profile.birthdate, bio: doc.profile.bio };
       });
     };
-    const olderTab = await ctx.session.context.newPage();
+    const olderTab = ctx.session.watch(await ctx.session.context.newPage());
     try {
       await olderTab.goto(ctx.base + '/profile.html', { waitUntil: 'domcontentloaded' });
       await olderTab.waitForSelector('#profile-main:not(.hidden)');
@@ -751,10 +751,10 @@ module.exports = {
     // dialogs are recorded and accepted, so it goes either way and the checks
     // read whether it was asked. The reload is the control: it shows the
     // question is there to be asked at all in this tab.
-    const other = await ctx.session.context.newPage();
+    const other = ctx.session.watch(await ctx.session.context.newPage());
     await other.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
     await other.waitForSelector('#match-list .match-row');
-    const editing = await ctx.session.context.newPage();
+    const editing = ctx.session.watch(await ctx.session.context.newPage());
     const editingAsked = [];
     editing.on('dialog', function (dialog) {
       editingAsked.push(dialog.type());
@@ -819,21 +819,9 @@ module.exports = {
      * @returns {Promise<void>}
      */
     async function renameInSettings(name) {
-      const settingsTab = await ctx.session.context.newPage();
       // Into the session's own list, so the spec's closing no-errors check covers
-      // this tab too. The CDN is aborted on purpose in demo mode, and the session
-      // writes those failures off by the same test.
-      settingsTab.on('pageerror', function (err) {
-        ctx.session.errors.push('pageerror @ ' + settingsTab.url() + ' :: ' + (err && err.message ? err.message : String(err)));
-      });
-      settingsTab.on('console', function (msg) {
-        if (msg.type() !== 'error') return;
-        const text = msg.text();
-        const where = (msg.location() || {}).url || '';
-        const cdnNoise = text.indexOf('e2e-unhandled-rejection:') !== 0 &&
-          (where ? /^https?:\/\/([a-z0-9-]+\.)*gstatic\.com\//i.test(where) : /gstatic\.com/i.test(text));
-        if (!cdnNoise) ctx.session.errors.push('console.error @ ' + (where || settingsTab.url()) + ' :: ' + text);
-      });
+      // this tab too.
+      const settingsTab = ctx.session.watch(await ctx.session.context.newPage());
       await settingsTab.goto(ctx.base + '/settings.html', { waitUntil: 'domcontentloaded' });
       await settingsTab.waitForFunction(function () {
         return document.getElementById('input-name').value !== '';

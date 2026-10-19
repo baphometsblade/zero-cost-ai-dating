@@ -712,7 +712,7 @@ service cloud.firestore {
       // super like aimed at you — an inbound like is data about you, and account
       // deletion must be able to purge it.
       //
-      // Not a pass aimed at you. Account deletion never asks for one, because a pass
+      // Not a pass aimed at you. Account deletion never queries for one, because a pass
       // is not yours to read, and deleting one is not harmless: the id is `from_to`,
       // so the person passed on knows it, and the deck leaves out everybody its
       // author has a swipe for, so a pass deleted is that person back in the deck.

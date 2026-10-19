@@ -187,7 +187,7 @@ module.exports = {
     // And so not a miss aimed at you either. Were a miss allowed to the target and
     // a pass refused, the refusal would be the pass, the oracle the read rule
     // refuses a miss aimed at you to deny.
-    t.check('nor a missing swipe aimed at you, so the refusal does not single out a pass',
+    t.check('nor delete a missing swipe aimed at you, so a refused delete does not single out a pass',
       await ok(assertFails(as(ME).doc('swipes/' + FOURTH + '_' + ME).delete())));
 
     // The pass is still its author's to rewind: the target branch narrowed, the

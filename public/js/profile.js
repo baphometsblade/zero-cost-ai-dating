@@ -1496,8 +1496,8 @@
     // when the account signed out or changed in another tab, and for the
     // landing page after this page's own Sign out. Either way the account the
     // edit was made as has gone, and asking held the way out at a "Leave
-    // site?" prompt that, answered "Stay", kept the signed-out editor on
-    // screen.
+    // site?" prompt that, answered "Stay", kept the editor of an account no
+    // longer here on screen.
     window.addEventListener('zc:leaving', function () { leaving = true; });
 
     // Back and Forward. Chromium puts the form's controls back the way they
