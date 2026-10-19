@@ -139,8 +139,11 @@ module.exports = {
     }
     const warnings = k.ctx.drainWarnings();
 
+    // Twice, and exactly twice: once dated now, and once more dated by the like it
+    // answers, which is what a device clock more than a day fast needs (see the end of
+    // this spec). A block refuses both, and nothing tries a third time.
     t.check('the refusal actually happened, so this spec is testing something',
-      tally.denied === 1, tally.denied + ' refused write(s)');
+      tally.denied === 2, tally.denied + ' refused write(s)');
 
     t.check('recordSwipe does not throw, so the deck cannot take the card back',
       threw === null, threw ? String(threw.message) : 'resolved');
@@ -333,5 +336,76 @@ module.exports = {
     // most likes get, and it says nothing that is wrong.
     t.check('and the refusals are not logged',
       recipWarnings.length === 0, k.show(recipWarnings));
+
+    /* ---- the other refusal a match document can meet: a fast clock ------ */
+
+    // firestore.rules also refuses a match stamped more than a day past the server's
+    // clock, and a device running that fast stamps every one of them so. That refusal
+    // came back as the same quiet "no match" a block gets, the facade then spent the
+    // note that would have retried it, and neither side's deck offers the other again
+    // once both have swiped: a mutual like lost, with one warning to show for it.
+    // Real, not injected: the shipped recordSwipe, signed in as the swiper, with every
+    // `new Date()` and `Date.now()` it makes running 25 hours ahead.
+    const fast = 'fast-me';
+    const fastLiker = 'fast-liker';
+    const fastBlocker = 'fast-blocker';
+    const likedAt = new Date(Date.now() - 3600000).toISOString();
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      const db = c.firestore();
+      await k.fs.setDoc(k.fs.doc(db, 'users', fast), k.h.userDoc(fast));
+      await k.fs.setDoc(k.fs.doc(db, 'users', fastLiker), k.h.userDoc(fastLiker));
+      await k.fs.setDoc(k.fs.doc(db, 'users', fastBlocker), k.h.userDoc(fastBlocker, { blocked: [fast] }));
+      await k.fs.setDoc(k.fs.doc(db, 'swipes', fastLiker + '_' + fast),
+        Object.assign(k.h.swipeDoc(fastLiker, fast, 'like'), { createdAt: likedAt }));
+      await k.fs.setDoc(k.fs.doc(db, 'swipes', fastBlocker + '_' + fast),
+        Object.assign(k.h.swipeDoc(fastBlocker, fast, 'like'), { createdAt: likedAt }));
+    });
+    const RealDate = Date;
+    class FastDate extends RealDate {
+      constructor(...args) {
+        if (args.length) super(...args);
+        else super(RealDate.now() + 25 * 3600000);
+      }
+      static now() { return RealDate.now() + 25 * 3600000; }
+    }
+    const fastOutcomes = {};
+    k.ctx.drainWarnings();
+    try {
+      k.ctx.ZC.firebase.db = k.rulesEnv.authenticatedContext(fast).firestore();
+      globalThis.Date = FastDate;
+      fastOutcomes.liked = await k.store.recordSwipe(fast, fastLiker, 'like').catch(answer);
+      fastOutcomes.blocked = await k.store.recordSwipe(fast, fastBlocker, 'like').catch(answer);
+    } finally {
+      globalThis.Date = RealDate;
+      k.ctx.ZC.firebase.db = openDb;
+    }
+    const fastWarnings = k.ctx.drainWarnings();
+    let fastMatch = null;
+    let blockedMatch = null;
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      const db = c.firestore();
+      fastMatch = (await k.fs.getDoc(k.fs.doc(db, 'matches', k.h.pairId(fast, fastLiker)))).data() || null;
+      blockedMatch = (await k.fs.getDoc(k.fs.doc(db, 'matches', k.h.pairId(fast, fastBlocker)))).data() || null;
+    });
+
+    const likedWarned = fastWarnings.filter(function (w) { return w.indexOf(k.h.pairId(fast, fastLiker)) !== -1; });
+    t.check('with the device clock more than a day fast, a mutual like still makes the match',
+      !!fastOutcomes.liked && fastOutcomes.liked.matched === true && fastOutcomes.liked.created === true &&
+        !!fastMatch && likedWarned.length === 0,
+      k.show({ answered: fastOutcomes.liked, stored: fastMatch ? 'exists' : 'MISSING', warnings: likedWarned }));
+
+    // Dated by the like it answers: a stamp the other person's device wrote, earlier
+    // than this one's, and one the rules accept.
+    t.check('dated by the like it answers, since the clock\'s own stamp is refused',
+      !!fastMatch && fastMatch.createdAt === likedAt,
+      k.show({ createdAt: fastMatch && fastMatch.createdAt, likedAt: likedAt }));
+
+    // The control: the block is still the quiet refusal it was, clock or no clock —
+    // no throw, no match, and one breadcrumb that does not say why.
+    const blockedWarned = fastWarnings.filter(function (w) { return w.indexOf(k.h.pairId(fast, fastBlocker)) !== -1; });
+    t.check('while somebody who blocked that account is still plainly no match',
+      noMatch(fastOutcomes.blocked) && blockedMatch === null && blockedWarned.length === 1 &&
+        !/permission|denied/i.test(blockedWarned[0]),
+      k.show({ answered: fastOutcomes.blocked, stored: blockedMatch ? 'EXISTS' : 'none', warnings: fastWarnings }));
   }
 };

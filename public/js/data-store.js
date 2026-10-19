@@ -2003,8 +2003,9 @@
    * or unreadable one is now as well. firestore.rules holds the projection's
    * copy to a day past the server's clock and the private one only to a size,
    * so a stamp stored while this device's clock ran more than a day fast would
-   * otherwise fail every profile save, projection and all, until real time
-   * caught it up.
+   * otherwise be refused in every save's projection until real time caught it
+   * up. While the clock is still that fast, clamping to it cannot help, and
+   * updateUser's second attempt is what lets the save through.
    * @param {*} raw the private document's lastActiveAt
    * @returns {string} an ISO timestamp
    */
@@ -2642,9 +2643,11 @@
    * and only once, and answered as "no match" when the rules refuse it.
    * @param {string} fromUid the swiper
    * @param {string} toUid the swiped
+   * @param {string|null} likedAt when the other person liked the swiper, as their
+   *   swipe records it: the date a match this device's clock cannot date gets
    * @returns {Promise<{matched:boolean, matchId:string|null, created:boolean}>}
    */
-  async function matchDocumentFor(fromUid, toUid) {
+  async function matchDocumentFor(fromUid, toUid, likedAt) {
     // Mutual like — create the match doc only when it is not already there.
     const matchId = pairId(fromUid, toUid);
     const matchRef = db().collection('matches').doc(matchId);
@@ -2654,15 +2657,17 @@
       const unread = {};
       unread[fromUid] = 0;
       unread[toUid] = 0;
+      const match = {
+        id: matchId,
+        users: [String(fromUid), String(toUid)].sort(),
+        createdAt: nowIso(),
+        lastMessage: null,
+        lastMessageAt: null,
+        unread: unread
+      };
+      let refused = false;
       try {
-        await matchRef.set({
-          id: matchId,
-          users: [String(fromUid), String(toUid)].sort(),
-          createdAt: nowIso(),
-          lastMessage: null,
-          lastMessageAt: null,
-          unread: unread
-        });
+        await matchRef.set(match);
       } catch (err) {
         // Only a rules refusal becomes a quiet no-match, and the expected reason for
         // one is the block rule: the other person has blocked this account, and the
@@ -2677,7 +2682,29 @@
         // since the pair may well be mutual and the document may land on a retry.
         // Those are the caller's to see, exactly as they were before any of this.
         if (!isPermissionDenied(err)) throw err;
+        refused = true;
+      }
 
+      // The block is not the only refusal, though: the rules also refuse a match
+      // dated more than a day past the server's clock, and a device running further
+      // ahead than that dates every match so. That refusal got the block's quiet
+      // no-match, the note that would have retried it was spent, and both people had
+      // already swiped, so neither deck would offer the other again: a mutual like,
+      // lost. This client cannot tell the two refusals apart, so it tries once more
+      // dated by the like it answers. That stamp is earlier, written by the other
+      // person's device, and accepted unless that device's clock ran fast as well. A
+      // block refuses both, and the blocked account still gets the same plain no-match.
+      if (refused && likedAt && Date.parse(likedAt) < Date.parse(match.createdAt)) {
+        match.createdAt = likedAt;
+        try {
+          await matchRef.set(match);
+          refused = false;
+        } catch (err) {
+          if (!isPermissionDenied(err)) throw err;
+        }
+      }
+
+      if (refused) {
         // The rejection is deliberately *not* logged with it. The whole point of this
         // path is not telling a blocked account that it was blocked, and a console
         // line carrying `permission-denied` does precisely that. This is not a seal —
@@ -2775,10 +2802,11 @@
       if (isPermissionDenied(err)) return { matched: false, matchId: null, created: false };
       throw err;
     }
-    if (!reverseSnap.exists || !isPositive((reverseSnap.data() || {}).action)) {
+    const reverse = reverseSnap.data() || {};
+    if (!reverseSnap.exists || !isPositive(reverse.action)) {
       return { matched: false, matchId: null, created: false };
     }
-    return matchDocumentFor(fromUid, toUid);
+    return matchDocumentFor(fromUid, toUid, toIso(reverse.createdAt));
   }
 
   /** The `from` uids of a snapshot of inbound swipes, positives only, deduped. */
@@ -2852,21 +2880,49 @@
       // are buffered until commit, so a replayed attempt does not republish
       // anything — the reason this used to sit outside does not hold.)
       // The cost is that a rejected projection now fails the whole save
-      // instead of warning: both documents are validated by the same rules
-      // from the same values, so that means a real bug, and stopping is better
-      // than a public profile that silently drifts from the private one.
+      // instead of warning. Both documents are validated from the same values,
+      // by rules that agree on every one of them but `lastActiveAt`, so any
+      // other refusal means a real bug, and stopping is better than a public
+      // profile that silently drifts from the private one.
+      //
+      // `lastActiveAt` is the exception: the projection's copy is held to a
+      // day past the server's clock and the private one only to a size, and
+      // projectStamp can clamp it to nothing better than this device's clock.
+      // On a device running more than a day fast, that is the clock that is
+      // wrong, and every save was refused: the block, the bio, the Pause
+      // switch, the plan. So a refused save is tried once more with the
+      // projection's stamp left as it is stored, which these rules held to the
+      // clock when it went in. A projection not written yet goes out without
+      // one, and stays out of the deck's newest-first walk until a touch the
+      // rules accept stamps it. The second attempt costs its read only after a
+      // refusal, and a refusal that was not about the stamp is refused again.
       const ref = db().collection('users').doc(uid);
       const shadow = db().collection('discovery').doc(String(uid));
-      return db().runTransaction(async function (tx) {
-        const snap = await tx.get(ref);
-        const base = snap.exists ? snap.data() || {} : missingUserBase(uid);
-        const merged = normalizeUser(deepMerge(base, patch || {}));
-        merged.uid = String(uid);
-        if (!merged.createdAt) merged.createdAt = nowIso();
-        merged.updatedAt = nowIso();
-        tx.set(ref, merged);
-        tx.set(shadow, projectDiscovery(merged));
-        return merged;
+      const save = function (stamped) {
+        return db().runTransaction(async function (tx) {
+          const snap = await tx.get(ref);
+          const base = snap.exists ? snap.data() || {} : missingUserBase(uid);
+          const merged = normalizeUser(deepMerge(base, patch || {}));
+          merged.uid = String(uid);
+          if (!merged.createdAt) merged.createdAt = nowIso();
+          merged.updatedAt = nowIso();
+          tx.set(ref, merged);
+          const projection = projectDiscovery(merged);
+          if (stamped) {
+            tx.set(shadow, projection);
+          } else {
+            // Each field it names is replaced whole, exactly as the plain set
+            // replaces it, and the one it leaves out keeps its stored value.
+            tx.set(shadow, projection, {
+              mergeFields: Object.keys(projection).filter(function (key) { return key !== 'lastActiveAt'; })
+            });
+          }
+          return merged;
+        });
+      };
+      return save(true).catch(function (err) {
+        if (!isPermissionDenied(err)) throw err;
+        return save(false);
       }).then(function (merged) {
         // After the commit, not inside the callback: an attempt Firestore
         // replays was never stored.

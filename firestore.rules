@@ -738,7 +738,8 @@ service cloud.firestore {
 
       // Exactly two participants, sorted, and the doc id derived from them. The caller
       // must be one of them, so nobody can invent a match between two other people.
-      function matchOk(d) {
+      // `before` is the unread map already stored, and empty for a create.
+      function matchOk(d, before) {
         return d.keys().hasOnly(['id', 'users', 'createdAt', 'lastMessage', 'lastMessageAt', 'unread'])
           && d.keys().hasAll(['users', 'createdAt'])
           && d.users is list
@@ -762,14 +763,28 @@ service cloud.firestore {
           // adds 1 per message, so its counts are integers. A million is a ceiling no
           // conversation reaches: a message is two writes, so it is a hundred days of
           // a Spark project's whole 20,000-write allowance spent on one person's inbox.
+          //
+          // The ceiling binds a count somebody writes, not one the other person's
+          // messages raise. Each send adds one with `FieldValue.increment(1)`, which
+          // lands one past whatever is stored, and with a bound on the value alone a
+          // participant who parked their own count at the ceiling turned every message
+          // the other person sent into a refused preview update. One past the stored
+          // count is always allowed, so no count either of them can write stops the
+          // other's next message, and the only way past the ceiling is one at a time.
           && (!('unread' in d) || (
             d.unread is map
             && d.unread.keys().hasOnly(d.users)
-            && (!(d.users[0] in d.unread) || (d.unread[d.users[0]] is int && d.unread[d.users[0]] >= 0
-                                               && d.unread[d.users[0]] <= 1000000))
-            && (!(d.users[1] in d.unread) || (d.unread[d.users[1]] is int && d.unread[d.users[1]] >= 0
-                                               && d.unread[d.users[1]] <= 1000000))
+            && countOk(d.unread, before, d.users[0])
+            && countOk(d.unread, before, d.users[1])
           ));
+      }
+
+      // One participant's unread count: a whole number, no more than the ceiling or no
+      // more than one past the count stored before this write. See matchOk.
+      function countOk(unread, before, u) {
+        return !(u in unread)
+          || (unread[u] is int && unread[u] >= 0
+              && (unread[u] <= 1000000 || unread[u] <= before.get(u, 0) + 1));
       }
 
       // The other side of a match document, from the caller's point of view.
@@ -850,7 +865,7 @@ service cloud.firestore {
       // spends, against a hard limit of ten per request that `likedByOther` already uses
       // two of.
       allow create: if isSignedIn()
-        && matchOk(request.resource.data)
+        && matchOk(request.resource.data, {})
         && likedByOther(request.resource.data)
         && !hasBlocked(otherOf(request.resource.data), request.auth.uid);
 
@@ -859,7 +874,7 @@ service cloud.firestore {
       allow update: if isSignedIn()
         && request.auth.uid in resource.data.users
         && request.resource.data.users == resource.data.users
-        && matchOk(request.resource.data);
+        && matchOk(request.resource.data, resource.data.get('unread', {}));
 
       // Delete: unmatching, by either participant.
       allow delete: if isSignedIn() && request.auth.uid in resource.data.users;

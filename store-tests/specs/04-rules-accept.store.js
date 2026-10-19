@@ -324,5 +324,74 @@ module.exports = {
         return key.length > 12 ? key.slice(0, 6) + '…(' + key.length + ')' : key;
       }), likeCount: kept.likeCount, passCount: kept.passCount })
     );
+
+    /* ---- a device clock more than a day fast, saving a block -------------- */
+
+    // The projection's lastActiveAt is held to a day past the server's clock and the
+    // private one is not, so a touch from a device running further ahead than that
+    // stores its stamp privately and has the public half refused. projectStamp clamps
+    // to the device's own clock, which is the one that is wrong, so the stamp every
+    // save then publishes is refused too — and the projection is written in the same
+    // transaction as the account, so the block, the bio, the Pause switch and the plan
+    // went with it. The shipped calls, as the account, against the real ruleset.
+    const fuid = 'rules-fast-clock';
+    const hourAgo = new Date(Date.now() - 3600000).toISOString();
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      await setDoc(doc(c.firestore(), 'users', fuid), k.h.userDoc(fuid, { lastActiveAt: hourAgo }));
+      await setDoc(doc(c.firestore(), 'discovery', fuid), k.h.discoveryDoc(fuid, { lastActiveAt: hourAgo }));
+    });
+    const RealDate = Date;
+    class FastDate extends RealDate {
+      constructor(...args) {
+        if (args.length) super(...args);
+        else super(RealDate.now() + 25 * 3600000);
+      }
+      static now() { return RealDate.now() + 25 * 3600000; }
+    }
+    const fastAnswer = function (p) {
+      return p.then(function () { return 'saved'; }, function (err) { return (err && err.code) || String(err); });
+    };
+    let fastTouch = null;
+    let fastBlock = null;
+    let fastBio = null;
+    const dbFast = k.ctx.ZC.firebase.db;
+    try {
+      k.ctx.ZC.firebase.db = k.rulesEnv.authenticatedContext(fuid, { email: fuid + '@example.com' }).firestore();
+      globalThis.Date = FastDate;
+      fastTouch = await k.store.touchActive(fuid).catch(function (err) { return (err && err.code) || String(err); });
+      fastBlock = await fastAnswer(k.store.updateUser(fuid, { blocked: ['rules-fast-harasser'] }));
+      fastBio = await fastAnswer(k.store.updateUser(fuid, { profile: { bio: 'Written on a fast clock.' } }));
+    } finally {
+      globalThis.Date = RealDate;
+      k.ctx.ZC.firebase.db = dbFast;
+    }
+    k.ctx.drainWarnings();
+    let fastUser = null;
+    let fastShadow = null;
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      fastUser = (await k.fs.getDoc(doc(c.firestore(), 'users', fuid))).data() || null;
+      fastShadow = (await k.fs.getDoc(doc(c.firestore(), 'discovery', fuid))).data() || null;
+    });
+
+    t.check(
+      'with the device clock more than a day fast, a block still saves',
+      fastBlock === 'saved' && !!fastUser && k.same(fastUser.blocked, ['rules-fast-harasser']),
+      k.show({ touch: fastTouch, block: fastBlock, stored: fastUser && fastUser.blocked })
+    );
+
+    t.check(
+      'and so does a profile edit, on the public profile as well as the private one',
+      fastBio === 'saved' && !!fastUser && fastUser.profile.bio === 'Written on a fast clock.' &&
+        !!fastShadow && fastShadow.profile.bio === 'Written on a fast clock.',
+      k.show({ save: fastBio, own: fastUser && fastUser.profile.bio, shown: fastShadow && fastShadow.profile.bio })
+    );
+
+    // What the save gives up to get through, and nothing more: the public activity
+    // stamp stays the one the rules last accepted rather than the clock's.
+    t.check(
+      'while the public activity stamp stays the one the rules last accepted',
+      !!fastShadow && fastShadow.lastActiveAt === hourAgo,
+      k.show({ shown: fastShadow && fastShadow.lastActiveAt, accepted: hourAgo, own: fastUser && fastUser.lastActiveAt })
+    );
   }
 };

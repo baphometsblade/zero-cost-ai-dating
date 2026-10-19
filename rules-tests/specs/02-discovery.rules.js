@@ -360,6 +360,30 @@ module.exports = {
     t.check('but a device clock running hours fast still refreshes',
       await ok(assertSucceeds(as(ME).doc('discovery/' + ME).update({ lastActiveAt: ahead(23) }))));
 
+    // And one running more than a day fast still saves the rest of the projection. That
+    // is what updateUser falls back to when the stamp is refused: every other field,
+    // and the stamp the rules last accepted left where it is, so a block or a bio does
+    // not wait on the device clock. A projection not written yet gets no stamp at all,
+    // which is why the key stays optional.
+    const storedStamp = async function () {
+      let stamp = null;
+      await seed(async function (admin) {
+        stamp = ((await admin.firestore().doc('discovery/' + ME).get()).data() || {}).lastActiveAt;
+      });
+      return stamp;
+    };
+    const unstamped = h.discoveryDoc(ME, { profile: Object.assign({}, h.discoveryDoc(ME).profile, { bio: 'Saved fast.' }) });
+    delete unstamped.lastActiveAt;
+    const stampBefore = await storedStamp();
+    t.check('a projection saved without its stamp is accepted, and keeps the one it had',
+      await ok(assertSucceeds(as(ME).doc('discovery/' + ME).set(unstamped, { mergeFields: Object.keys(unstamped) }))) &&
+        (await storedStamp()) === stampBefore,
+      'lastActiveAt before ' + stampBefore);
+
+    await seed(function (admin) { return admin.firestore().doc('discovery/' + ME).delete(); });
+    t.check('and so is one written for the first time that way, with no stamp at all',
+      await ok(assertSucceeds(as(ME).doc('discovery/' + ME).set(unstamped, { mergeFields: Object.keys(unstamped) }))));
+
     t.check('the owner can delete their projection',
       await ok(assertSucceeds(as(ME).doc('discovery/' + ME).delete())));
 

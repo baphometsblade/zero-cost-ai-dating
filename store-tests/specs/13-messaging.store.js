@@ -353,5 +353,45 @@ module.exports = {
     t.check('a connection that drops and comes back delivers the conversation again only if it changed',
       flipped.away && flipped.back && k.same(heard, [0]),
       k.show({ deliveries: heard, witnessFromCache: flips }));
+
+    /* ---- a count the other side parked, under the real rules -------------- */
+
+    // Each participant may write either count, and firestore.rules bounds the value
+    // a count may hold. A bound on the value alone made `increment(1)` a tripwire:
+    // the other person parked their own count at the ceiling, and from then on every
+    // message sent to them was stored with its preview update refused — no
+    // `lastMessage`, no new count, a warning on every send. The shipped send, signed
+    // in as its author, against the real ruleset.
+    const E = 'msg-e';
+    const parkedId = k.h.pairId(A, E);
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      await setDoc(doc(c.firestore(), 'matches', parkedId), k.h.matchDoc(A, E));
+    });
+    const park = {};
+    park['unread.' + E] = 1000000;
+    const parkedOk = await k.ok(k.testing.assertSucceeds(
+      k.fs.updateDoc(doc(k.rulesEnv.authenticatedContext(E).firestore(), 'matches', parkedId), park)));
+    const openDb = k.ctx.ZC.firebase.db;
+    let sentParked = null;
+    k.ctx.drainWarnings();
+    try {
+      k.ctx.ZC.firebase.db = k.rulesEnv.authenticatedContext(A).firestore();
+      sentParked = await k.store.sendMessage(parkedId, A, 'Are you there?')
+        .catch(function (err) { return { rejected: (err && err.code) || String(err) }; });
+    } finally {
+      k.ctx.ZC.firebase.db = openDb;
+    }
+    const parkedWarnings = k.ctx.drainWarnings();
+    let parkedMatch = null;
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      parkedMatch = (await k.fs.getDoc(doc(c.firestore(), 'matches', parkedId))).data() || null;
+    });
+    t.check('a count the other side parked at the ceiling does not stop a message updating the preview',
+      parkedOk && !!sentParked && !sentParked.rejected && !!parkedMatch &&
+        parkedMatch.lastMessage === 'Are you there?' && (parkedMatch.unread || {})[E] === 1000001 &&
+        parkedWarnings.length === 0,
+      k.show({ parked: parkedOk, sent: sentParked && (sentParked.rejected || 'stored'),
+        lastMessage: parkedMatch && parkedMatch.lastMessage, unread: parkedMatch && parkedMatch.unread,
+        warnings: parkedWarnings.map(function (w) { return w.slice(0, 90); }) }));
   }
 };
