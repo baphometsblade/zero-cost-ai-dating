@@ -189,15 +189,18 @@ anywhere else was free to rot. It now reads every document.
   unconditional allowance would answer "has Alice swiped on Bob?" for any pair, from the
   difference between an empty snapshot and a denial. A missing swipe aimed at you is refused
   exactly as a pass is, so a refusal cannot single out a pass, and the store reads that
-  refusal on the reciprocal swipe as "no like". Delete your own, or one aimed at you, or one
-  that is already gone. A missing one may be deleted by either party the id names, which is
-  wider than the read of a miss and can be: a delete answers the same whether or not the
-  swipe was there, so it tells the other party nothing. A second rewind of the same card —
-  from a second tab on the same deck, or a retry — then deletes nothing and succeeds, as it
-  does in demo mode, instead of coming back `permission-denied`. Account deletion purges the
-  likes aimed at the account; a pass aimed at it stays with its author, the only account that
-  can read it. No updates: a rewind deletes the swipe, and the next swipe on that card
-  creates it afresh.
+  refusal on the reciprocal swipe as "no like". Delete your own, whatever it says, or a like
+  or super like aimed at you, or one of your own that is already gone: who may delete a
+  swipe is exactly who may read it. A pass aimed at you is refused, because the person
+  passed on knows its `from_to` id and deleting it would put them back in its author's deck.
+  A missing swipe aimed at you is refused too; otherwise the refusal would single out a
+  pass. A second rewind of the same card — from a second tab on the same deck, or a retry —
+  then deletes nothing and succeeds, as it does in demo mode, instead of coming back
+  `permission-denied`. Account deletion purges the likes aimed at the account; a pass aimed
+  at it stays with its author, the only account that can read or delete it. If a liker
+  rewinds while the purge is deleting their like, the batch is refused and the purge asks
+  again once instead of failing. No updates: a rewind deletes the swipe, and the next swipe
+  on that card creates it afresh.
 
   A closed key list bounds how *many* fields a document may have and not how big one may
   be, which is a separate hole and was open in every collection: `createdAt` and its

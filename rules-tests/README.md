@@ -50,7 +50,7 @@ without a row here.
 | --- | --- |
 | `specs/01-users.rules.js` | `users/{uid}` — owner-only, and shape-validated on write |
 | `specs/02-discovery.rules.js` | `discovery/{uid}` — readable while discoverable, and only the public shape: interests from the editor's vocabulary, and a `lastActiveAt` in `toISOString()` shape no more than a day ahead, or none in the write at all: a projection saved without its stamp keeps the one it had, and one written first that way has none, which is how a device clock more than a day fast still saves a profile |
-| `specs/03-swipes.rules.js` | `swipes/{from_to}` — authored by you, immutable, id-pinned, a pass private to its author, probeable when absent only by its author, and deletable when absent only by the pair named in the id |
+| `specs/03-swipes.rules.js` | `swipes/{from_to}` — authored by you, immutable, id-pinned, a pass private to its author, probeable when absent only by its author, deletable by the one it is aimed at only while it is a like or a super like, and deletable when absent only by its author |
 | `specs/04-matches.rules.js` | `matches/{a_b}` — participants only, only with a reciprocal like, stamps no more than a day ahead (one 25 hours ahead is refused, and a match dated by the like it answers is accepted), whole-number unread counts that the other side's increment can always raise, even from the million ceiling, and probeable when absent only by the pair named in the id |
 | `specs/05-messages.rules.js` | `matches/{id}/messages` — participants only, append-only, self-authored, stamped no more than a day ahead |
 | `specs/06-reports.rules.js` | `reports/{from_about}` — bounded, author-only, unprobeable |
@@ -79,9 +79,12 @@ another's preconditions and mask a missing rule.
 - **`swipes/{from_to}`** — the id convention, authorship, immutability, a pass aimed at you
   being unreadable and impossible to list (and a missing swipe aimed at you refused alike,
   so the refusal does not reveal the pass), and deletes in both directions (rewind, and
-  account deletion purging inbound likes). That includes a second rewind of a swipe that is
-  already gone, which the id allows and which is refused to a stranger and to a signed-out
-  visitor.
+  account deletion purging inbound likes), inbound for likes only: a pass aimed at you
+  cannot be deleted, since its target knows the id and deleting it would put them back in
+  its author's deck, and neither can a missing swipe aimed at you, so the refusal does not
+  reveal the pass. That includes a second rewind of a swipe that is already gone, which the
+  id allows its author and which is refused to the person it was aimed at, to a stranger
+  and to a signed-out visitor.
 - **`matches/{a_b}`** — that a match cannot be created without proof the other person liked
   you first, which is what stops an account minting a match against a uid found through the
   open `discovery` collection and then messaging a stranger.

@@ -1082,7 +1082,7 @@ module.exports = {
         };
         return window.ZC.auth.signOut();
       });
-      const elsewhere = await ctx.session.context.newPage();
+      const elsewhere = ctx.session.watch(await ctx.session.context.newPage());
       await elsewhere.goto(base + '/index.html', { waitUntil: 'domcontentloaded' });
       await elsewhere.waitForFunction(function () { return !!(window.ZC && window.ZC.auth && window.ZC.auth.current); });
       await elsewhere.evaluate(function () { return window.ZC.auth.signOut(); });
@@ -1157,7 +1157,7 @@ module.exports = {
       try {
         await page.goto(base + '/matches.html?m=' + encodeURIComponent(heldId), { waitUntil: 'domcontentloaded' });
         const heldThere = await holdOne('Held while another tab signs out.');
-        const other = await ctx.session.context.newPage();
+        const other = ctx.session.watch(await ctx.session.context.newPage());
         await other.goto(base + '/index.html', { waitUntil: 'domcontentloaded' });
         await other.waitForFunction(function () { return !!(window.ZC && window.ZC.auth && window.ZC.auth.current); });
         await other.evaluate(function () { return window.ZC.auth.signOut(); });

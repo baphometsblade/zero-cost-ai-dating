@@ -723,7 +723,7 @@ module.exports = {
       await watcher.evaluate(function () {
         window.ZC.store.getUser = function () { return new Promise(function () {}); };
       });
-      const switcher = await solo.context.newPage();
+      const switcher = solo.watch(await solo.context.newPage());
       await switcher.goto(ctx.base + '/index.html', { waitUntil: 'domcontentloaded' });
       await switcher.evaluate(function () {
         localStorage.setItem('zc.demo.session', JSON.stringify({ uid: 'e2e-someone-else' }));

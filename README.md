@@ -890,6 +890,11 @@ These are real, and worth knowing before you show this to anyone:
   that shows no `beforeunload` prompt — iOS Safari is one —
   lets the page go without asking, and the message is lost. The send button stays busy until
   the connection returns, so a second message cannot be queued behind it.
+- **An unsaved profile edit goes when the session does.** The profile editor asks before it is
+  left with an edit unsaved, except when it leaves because the account signed out, here or in
+  another tab, or another account signed in in another tab. The edit belonged to the account
+  that left and could no longer be saved as it, so the page goes without asking and the edit
+  is lost.
 - **Discovery scans candidate pages and ranks them in the browser.** `listCandidates` walks
   the public `discovery` collection with a cursor (newest-active first, with cheap mutual
   gender/age pre-filters) until the deck is full or a scan cap is hit, and the ranking then
