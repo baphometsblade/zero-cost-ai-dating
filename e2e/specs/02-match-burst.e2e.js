@@ -221,15 +221,26 @@ module.exports = {
       });
     };
     const answered = await layers();
-    await page.keyboard.press('Escape');
+    // The Escape is held rather than pressed: a second keydown before the
+    // keyup is sent with `repeat` set, the way the operating system repeats a
+    // key held down. The first one closes the dialog and raises the overlay,
+    // and the repeat used to close the overlay too, before anybody had seen
+    // its openers.
+    await page.keyboard.down('Escape');
     const firstEscape = await layers();
+    await page.keyboard.down('Escape');
+    const heldEscape = await layers();
+    await page.keyboard.up('Escape');
     t.check('a match that lands under the shortcuts dialog waits for it to close, then takes the focus',
       asked && answered.dialog && !answered.burst && !firstEscape.dialog && firstEscape.burst && firstEscape.focusInBurst,
       JSON.stringify({ dialogOpened: asked, whenTheMatchLanded: answered, afterEscape: firstEscape }));
+    t.check('and the Escape that closed the dialog, held down, leaves the overlay up with the focus in it',
+      firstEscape.burst && !heldEscape.dialog && heldEscape.burst && heldEscape.focusInBurst,
+      JSON.stringify({ afterEscape: firstEscape, afterItsRepeat: heldEscape }));
     // And Escape closes it wherever the focus is. A click on its heading, where
     // nothing can take the focus, leaves the focus on <body>, and a handler on
     // the overlay itself never hears an Escape pressed there.
-    if (firstEscape.burst) await page.click('.match-burst h2');
+    if (heldEscape.burst) await page.click('.match-burst h2');
     const clicked = await page.evaluate(function () { return document.activeElement === document.body; });
     await page.keyboard.press('Escape');
     const secondEscape = await layers();

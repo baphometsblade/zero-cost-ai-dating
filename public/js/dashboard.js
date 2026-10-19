@@ -1541,9 +1541,13 @@
     // focus, leaves the focus on <body>: a handler on the overlay never heard
     // that Escape, and the deck's own stands down while an overlay is up, so
     // Escape did nothing until the focus was tabbed back into the overlay.
-    // closeBurst removes it.
+    // closeBurst removes it. A repeat is not a fresh press, by the same rule
+    // the deck's own keys keep: an overlay that waited on the shortcuts dialog
+    // goes up during the keydown that closes the dialog, so an Escape held a
+    // moment too long closed the overlay on its first repeat, before anybody
+    // had seen its openers.
     function onEscape(event) {
-      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      if (event.key !== 'Escape' || event.repeat || event.defaultPrevented) return;
       event.preventDefault();
       closeBurst();
     }
