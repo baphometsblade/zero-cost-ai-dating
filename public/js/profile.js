@@ -5,7 +5,8 @@
    sliders, an optional location, photo links and the visibility toggles.
    The page keeps a live completeness meter and a live copy of the card other
    people swipe on, and it refuses to lose your work: edits are guarded by
-   beforeunload until they are saved.
+   beforeunload until they are saved, or until the session they were made in
+   ends.
    Page script for profile.html. Adds nothing to ZC beyond ZC.profile.
    ========================================================================== */
 (function () {
@@ -1489,6 +1490,15 @@
       event.preventDefault();
       event.returnValue = '';
     });
+
+    // The question is for the person leaving. auth.js and app.js say
+    // `zc:leaving` just before the app itself leaves: for the sign-in page
+    // when the account signed out or changed in another tab, and for the
+    // landing page after this page's own Sign out. Either way the account the
+    // edit was made as has gone, and asking held the way out at a "Leave
+    // site?" prompt that, answered "Stay", kept the signed-out editor on
+    // screen.
+    window.addEventListener('zc:leaving', function () { leaving = true; });
 
     // Back and Forward. Chromium puts the form's controls back the way they
     // were left — all but pronouns, which is autocomplete=off — after the

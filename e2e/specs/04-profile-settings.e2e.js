@@ -742,19 +742,75 @@ module.exports = {
     // to carry on as the account that had just left: its open conversations
     // stayed on screen, the composer live, and a message sent from it was
     // stored under that account. Run last, because it ends the session.
+    //
+    // One of the other tabs is the profile editor with an edit not saved yet.
+    // It asks before it is left, and that question is the person's: the tab
+    // leaving because the account has gone is not them leaving. It asked
+    // anyway, so the way to the sign-in page waited on a "Leave site?" prompt,
+    // and answered "Stay" it kept the signed-out editor on screen. This tab's
+    // dialogs are recorded and accepted, so it goes either way and the checks
+    // read whether it was asked. The reload is the control: it shows the
+    // question is there to be asked at all in this tab.
     const other = await ctx.session.context.newPage();
     await other.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
     await other.waitForSelector('#match-list .match-row');
+    const editing = await ctx.session.context.newPage();
+    const editingAsked = [];
+    editing.on('dialog', function (dialog) {
+      editingAsked.push(dialog.type());
+      return dialog.accept();
+    });
+    await editing.goto(ctx.base + '/profile.html', { waitUntil: 'domcontentloaded' });
+    await editing.waitForSelector('#profile-main:not(.hidden)');
+    await editing.fill('#input-bio', 'An edit the reload is asked about.');
+    await editing.reload({ waitUntil: 'domcontentloaded' });
+    await editing.waitForSelector('#profile-main:not(.hidden)');
+    const askedOnReload = editingAsked.splice(0);
+    await editing.fill('#input-bio', 'An edit nobody saved before another tab signed out.');
     await page.goto(ctx.base + '/settings.html', { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('main [data-signout]');
     await page.click('main [data-signout]');
     await page.waitForURL(h.pageUrl('index'));
     await other.waitForURL(h.pageUrl('auth'), { timeout: 10000 }).catch(function () {});
+    await editing.waitForURL(h.pageUrl('auth'), { timeout: 10000 }).catch(function () {});
     const otherTab = other.url();
+    const editingTab = editing.url();
     await other.close();
+    await editing.close();
     t.check('signing out in one tab takes the other tabs off their signed-in pages',
       otherTab.indexOf(ctx.base + '/') === 0 && h.pageUrl('auth').test(otherTab) && /[?&]next=/.test(otherTab),
       otherTab);
+    t.check('the profile editor asks before an unsaved edit is reloaded away',
+      askedOnReload.length === 1 && askedOnReload[0] === 'beforeunload', JSON.stringify(askedOnReload));
+    t.check('but a sign-out in another tab takes it to the sign-in page without asking',
+      editingAsked.length === 0 && h.pageUrl('auth').test(editingTab) && /[?&]next=/.test(editingTab),
+      JSON.stringify({ asked: editingAsked, at: editingTab.replace(ctx.base, '') }));
+
+    // And with an unsaved edit, the profile page's own Sign out goes without
+    // asking: app.js says `zc:leaving` before it leaves for the landing page,
+    // for the same reason. Signed in again, because the checks above ended
+    // the session; it ends again here. The nav's Sign out is hidden at the
+    // mobile width, where Settings carries the control, so the click is
+    // dispatched to it: app.js handles it the same way at every width. The
+    // session accepts every native dialog (see harness.openSession), so the
+    // page goes either way and this records whether it was asked.
+    await h.signIn(page, ctx.base);
+    await page.goto(ctx.base + '/profile.html', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#profile-main:not(.hidden)');
+    await page.fill('#input-bio', 'An edit nobody saved before Sign out.');
+    const ownAsked = [];
+    const recordOwn = function (dialog) { ownAsked.push(dialog.type()); };
+    page.on('dialog', recordOwn);
+    try {
+      await page.locator('[data-zc-nav] [data-signout]').dispatchEvent('click');
+      await page.waitForURL(h.pageUrl('index'), { timeout: 10000 }).catch(function () {});
+    } finally {
+      page.off('dialog', recordOwn);
+    }
+    const signedOutTo = page.url();
+    t.check('and the profile page\'s own Sign out, with an edit unsaved, goes to the landing page without asking',
+      ownAsked.length === 0 && h.pageUrl('index').test(signedOutTo),
+      JSON.stringify({ asked: ownAsked, at: signedOutTo.replace(ctx.base, '') }));
 
     /**
      * Rename the account from Settings in a tab of its own, as somebody with
