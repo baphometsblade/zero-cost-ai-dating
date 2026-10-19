@@ -3167,8 +3167,9 @@
         // Whether the swipe is still there is not asked: another tab may have rewound
         // it first, or this may be a retry, and the delete goes ahead either way.
         // firestore.rules allows deleting a missing swipe to either person its id
-        // names, as it allows reading one, so a second undo answers `{ ok: true }`
-        // exactly as the demo adapter's does, and no read is spent finding out.
+        // names (wider than reading one, which only its author may), so a second
+        // undo answers `{ ok: true }` exactly as the demo adapter's does, and no
+        // read is spent finding out.
         tx.delete(swipeRef);
         return { ok: true };
       });

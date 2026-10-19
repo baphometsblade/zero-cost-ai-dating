@@ -49,10 +49,10 @@ without a row here.
 | Spec | The rule it executes |
 | --- | --- |
 | `specs/01-users.rules.js` | `users/{uid}` — owner-only, and shape-validated on write |
-| `specs/02-discovery.rules.js` | `discovery/{uid}` — world-readable, but only the public shape |
-| `specs/03-swipes.rules.js` | `swipes/{from_to}` — authored by you, immutable, id-pinned, and probeable — or deletable — when absent only by the pair named in the id |
-| `specs/04-matches.rules.js` | `matches/{a_b}` — participants only, only with a reciprocal like, and the same id-bounded probe when absent |
-| `specs/05-messages.rules.js` | `matches/{id}/messages` — participants only, append-only, self-authored |
+| `specs/02-discovery.rules.js` | `discovery/{uid}` — readable while discoverable, and only the public shape: interests from the editor's vocabulary, and a `lastActiveAt` in `toISOString()` shape no more than a day ahead |
+| `specs/03-swipes.rules.js` | `swipes/{from_to}` — authored by you, immutable, id-pinned, a pass private to its author, probeable when absent only by its author, and deletable when absent only by the pair named in the id |
+| `specs/04-matches.rules.js` | `matches/{a_b}` — participants only, only with a reciprocal like, stamps no more than a day ahead, whole-number unread counts, and probeable when absent only by the pair named in the id |
+| `specs/05-messages.rules.js` | `matches/{id}/messages` — participants only, append-only, self-authored, stamped no more than a day ahead |
 | `specs/06-reports.rules.js` | `reports/{from_about}` — bounded, author-only, unprobeable |
 | `specs/07-default-deny.rules.js` | everything else — denied by default |
 | `specs/08-budget.rules.js` | the rules file itself — how much of Firestore's 1000-expression-per-request ceiling `userDocOk` has left on the create, the routine update and the email-correcting update of the costliest document the store writes (a premium account with every optional field set, a location among them), and how long an `in` list the swipes read rule accepts before the same ceiling denies it. The second one binds the deck: `listCandidates` asks "have I swiped on these people" as `swipes where __name__ in [ids]`, the read rule is evaluated once per value, and going over comes back as a `permission-denied` naming nothing. Measured at 20; the store asks about 10 |
@@ -70,37 +70,46 @@ another's preconditions and mask a missing rule.
   refused, as is a list where each of those maps belongs. `learning.interestAffinity` is
   keyed by interest rather than by field, so it is bounded instead of closed: at most 60
   keys, with a cap on the characters of its keys and another on its values.
-- **`discovery/{uid}`** — readable by any signed-in user by design, and the closed key list
-  that makes that safe: `email`, `blocked`, `learning`, `usage`, `plan` and `birthdate` all
-  fail to smuggle in.
-- **`swipes/{from_to}`** — the id convention, authorship, immutability, and deletes in both
-  directions (rewind, and account deletion purging inbound likes), including a second
-  rewind of a swipe that is already gone, which is allowed by the id exactly as a read of a
-  miss is, and refused to a stranger and to a signed-out visitor.
+- **`discovery/{uid}`** — readable by any signed-in user while discoverable, by design, and
+  the closed key list that makes that safe: `email`, `blocked`, `learning`, `usage`, `plan`
+  and `birthdate` all fail to smuggle in. A paused projection is readable only by its owner,
+  a match and somebody it liked. A stranger can neither read one nor list them, and filing a
+  report about one does not open it. Somebody it passed on cannot read it either, because
+  that would expose the pass.
+- **`swipes/{from_to}`** — the id convention, authorship, immutability, a pass aimed at you
+  being unreadable and impossible to list (and a missing swipe aimed at you refused alike,
+  so the refusal does not reveal the pass), and deletes in both directions (rewind, and
+  account deletion purging inbound likes). That includes a second rewind of a swipe that is
+  already gone, which the id allows and which is refused to a stranger and to a signed-out
+  visitor.
 - **`matches/{a_b}`** — that a match cannot be created without proof the other person liked
   you first, which is what stops an account minting a match against a uid found through the
   open `discovery` collection and then messaging a stranger.
 - **`matches/{id}/messages`** — participants only, self-authored, 1–1000 characters, never
   editable, but deletable so unmatch and account deletion can purge a thread.
-- **`reports/{from_about}`** — the id that bounds the queue, the subject having to exist,
-  author-only visibility, and that a *missing* report also denies so its existence cannot
-  be probed.
+- **`reports/{from_about}`** — the id that bounds the queue, the subject having to exist (in
+  discovery, or as the reporter's match, so deleting a projection does not take a match out
+  of the queue), author-only visibility, and that a *missing* report also denies so its
+  existence cannot be probed.
 - **Absent documents, in all three of those** — the reports rule was alone in getting this
   right, and said so in a comment while the swipes rule two hundred lines above claimed a
   bare `resource == null` "leaks nothing". It does: an empty snapshot and a denial are
   different answers, so allowing every miss tells any signed-in caller whether the document
   they named exists. Swipes and matches carry deterministic ids built from the pair, so a
   probe answers "has Alice swiped on Bob" and "have those two matched" for uids anyone can
-  enumerate out of the world-readable `discovery` collection. A miss is now allowed only
-  when the id names the caller, which is every read the client actually makes, and both
-  specs check the other half — that a miss between two strangers is refused.
+  enumerate out of the public `discovery` collection. A miss is now allowed only
+  when the id names the caller (for a swipe, as its author), which is every read the client
+  needs answered. Both specs check the other half: that a miss between two strangers is
+  refused, and for swipes, a miss aimed at the caller too.
 - **Document size, as distinct from document shape** — a closed key list bounds how many
   fields a document may have and says nothing about how big one may be. Every timestamp in
   this project was checked as `is string`, which bounds nothing, so a swipe could be a
-  megabyte under a name that reads like `createdAt`. Every stamp is capped now; `unread`
-  may only be keyed by the two participants, with numeric counts; an `id` field must equal
-  the document id; and `discovery/{uid}`'s `location` — which sat on its key list with no
-  validator at all, in the only world-readable collection — is held to a coordinate pair.
+  megabyte under a name that reads like `createdAt`. Every stamp is capped now, and the ones
+  that order other people's screens are held to no more than a day past the server's clock;
+  `unread` may only be keyed by the two participants, with whole-number counts up to a
+  million; an `id` field must equal the document id; and `discovery/{uid}`'s `location` —
+  which sat on its key list with no validator at all, in the only public collection —
+  is held to a coordinate pair.
   Each of those has a check, and each check writes to its **own** document: they shared one
   at first, and a whole-suite mutation run showed the first write succeeding and turning
   the next into an update, refused by a different rule, green for the wrong reason.
@@ -120,9 +129,10 @@ another's preconditions and mask a missing rule.
   megabyte-long string under the name `hiking`. `docs/DEPLOY.md` listed exactly those as
   the hole that could not be closed, because the rules language cannot iterate a list.
   It cannot, and it does not need to: `join` turns a list into a string and a string can be
-  measured. Both the private document and the world-readable projection are held to it, and
-  each cap has a control alongside it — six photo links at the length the profile editor
-  allows must still save, or the bound is a broken feature rather than a bound.
+  measured. Both the private document and the public projection are held to it (the
+  projection's `interests` more tightly still, to the editor's vocabulary), and each cap has
+  a control alongside it — six photo links at the length the profile editor allows must
+  still save, or the bound is a broken feature rather than a bound.
 - **The catch-all** — undeclared collections, and undeclared subcollections under your own
   user document, are closed rather than open.
 - **The rules file's own budget.** Firestore evaluates at most 1000 expressions per request.

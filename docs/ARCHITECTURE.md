@@ -66,9 +66,11 @@ Rules that keep the graph acyclic:
   used to be described as depending on nothing at all, and it reads one thing ambiently: when a
   caller passes no `tagIndex` — and every page passes none — it takes `ZC.INTEREST_BY_SLUG`
   from `seed-data.js`, and that table adds the category bonus, up to an eighth of the interest
-  score. With no table it still runs, without the bonus, which is the configuration every
-  engine test ran in and no page does; `tests/matching-engine.test.js` now also scores with
-  `seed-data.js` loaded, and fails if the fallback to it is removed.
+  score. It also decides what `updateLearning` learns: with a table that holds anything, only
+  its slugs are learned and any other key is dropped. With no table it still runs, without
+  the bonus and learning every tag, which is the configuration every engine test ran in and
+  no page does; `tests/matching-engine.test.js` now also scores with `seed-data.js` loaded,
+  and fails if the fallback to it is removed.
 - **Only `data-store.js` touches `firebase.firestore()`.** Only `auth.js` touches
   `firebase.auth()`. Nothing else in the codebase references the SDK, so the demo-mode fallback
   has exactly two places to get right.
@@ -212,7 +214,7 @@ into the other and the matching engine cannot tell the difference.
     ageMin: number,        // >= 18
     ageMax: number,        // <= 100
     maxDistanceKm: number, // 1..500, where 500 means "anywhere"
-    notifications: boolean,
+    notifications: boolean, // false hides the nav's count badges and holds no listener for them
     theme: 'system' | 'light' | 'dark',
     discoverable: boolean
   },
@@ -244,9 +246,13 @@ In Firebase mode `users/{uid}` is readable **only by its owner**. What other peo
 `discovery/{uid}`, a projection the store mirrors automatically on every profile save:
 display name, `profileComplete`, `lastActiveAt`, the public `profile.*` subset (derived age
 but never the birthdate; coordinates rounded to ~1 km) and the mutual filter preferences
-(`interestedIn`, `ageMin`, `ageMax`, `maxDistanceKm`, `discoverable`). Email, birthdate,
-block lists, usage counters and learned affinities never leave the private document, and the
-rules close the projection's key list with `hasOnly` so a tampered client cannot widen it.
+(`interestedIn`, `ageMin`, `ageMax`, `maxDistanceKm`, `discoverable`). Because it holds the
+age and never the birthdate, a birthday changes nothing in it by itself: after one, the
+presence touch rewrites the projected age in the same `discovery/{uid}` update as
+`lastActiveAt`, so the new age reaches other decks on the person's next visit. Email,
+birthdate, block lists, usage counters and learned affinities never leave the private
+document, and the rules close the projection's key list with `hasOnly` so a tampered client
+cannot widen it.
 Candidate listing, the matches list and "who liked you" all read the projection; the demo
 adapter keeps a single local store since nothing ever leaves the browser there. "Who liked
 you" reads it only on the premium plan: the free plan's panel shows a number, and asks
@@ -300,7 +306,9 @@ Firestore half never could.
 `ZC.INTEREST_TAGS` is exactly 48 `{ slug, label, emoji, category }` entries across ten
 categories (`outdoors, arts, food, music, fitness, tech, travel, homebody, social, mindful`).
 Profiles store slugs only; labels and emoji are looked up through `ZC.INTEREST_BY_SLUG` at
-render time, so renaming a label never migrates data. The list is generated into
+render time, so renaming a label never migrates data. Adding or renaming a slug is different:
+`firestore.rules` accepts only these slugs in `discovery/{uid}`, so it needs a rules deploy
+as well, and `tests/limits.test.js` fails until the two lists agree. The list is generated into
 `public/js/seed-data.js` from `seed/profiles.json` by `scripts/build-seed.js`, and
 `npm run check:seed` fails if the generated file drifts.
 
@@ -329,6 +337,15 @@ demo cast never looks like it went quiet in 2026.
   `createdAt`), inbound likes by (`to`, `action`), matches by (`users` array-contains,
   `lastMessageAt`).
 - `listenMessages` is a real `onSnapshot` subscription; the returned function unsubscribes.
+  It listens with `includeMetadataChanges`, so a message this client wrote that the server
+  has not yet acknowledged arrives with `pending: true`, and arrives again without it once
+  the server has it. That happens on every send, online included, for the length of the
+  round trip. After the first delivery it passes a snapshot on only when a message changed,
+  its pending state included, so a connection dropping or returning on its own delivers
+  nothing, as the demo adapter's `deliver()` drops an unchanged list. matches.html draws a
+  pending message "Sending…", and asks before the page is left while a send is unfinished,
+  because offline persistence is off and leaving would lose a message the server does not
+  have.
 - Client-side filtering finishes the job the indexes cannot: mutual gender/age/distance
   filtering happens in the matching engine, not in the query, because Firestore cannot express
   a mutual predicate and the free plan has nowhere else to run one.
@@ -347,11 +364,13 @@ Seven keys, all under one prefix, each holding a JSON map keyed by id:
 | `zc.demo.reports` | `{ [reportId]: ReportDoc }` |
 | `zc.demo.seeded` | seed version marker |
 
-Plus `zc.demo.credentials` (owned by `auth.js`) and `zc.firebaseConfig` (owned by the settings
-page). Most access goes through a `readJson(key, fallback)` / `writeJson(key, value)` pair that
-swallows corrupt JSON, private-mode exceptions and quota errors, warns once, and keeps the UI
-alive. A demo user who fills their quota gets a toast, not a white screen. The exceptions are
-the readers whose empty answer somebody would be shown as a fact: the match stream the badge
+Plus `zc.demo.credentials` (owned by `auth.js`; the store's `resetDemo` only reads it, to keep
+the accounts made in this browser) and `zc.firebaseConfig` (written by the settings page; the
+settings page and the sign-in page can each remove it). Most access goes through a
+`readJson(key, fallback)` / `writeJson(key, value)` pair that swallows corrupt JSON,
+private-mode exceptions and quota errors, warns once, and keeps the UI alive. A demo user who
+fills their quota gets a toast, not a white screen. The exceptions are the readers whose empty
+answer somebody would be shown as a fact: the match stream the badge
 and the conversation list share, everything that says who liked you, the filed reports and
 `retractReport`, and the data export's swipes, matches and messages. They read through
 `readJsonResult` and reject, or report to their listener, instead of answering `{}` — read
@@ -376,12 +395,15 @@ deliberate exception — it swallows, because the Firestore adapter swallows, an
 
 `listenMessages` in demo mode has no server to push from, so it does both of the things a
 browser can: it listens for the `storage` event (another tab in the same profile) and polls a
-cheap signature of the thread every 1.5 s (same tab). Callers cannot tell the two adapters
-apart. `listenMatches`, `listenMatchViews` and `listenLikesReceived` ride the same plumbing, and
-exist because the nav badges AND the conversation list were both 20-second polls that
-re-read every match and a profile for each of them. They deliver rows and a count — no profiles, because a badge draws a number — and
-on Firestore they are `onSnapshot`, which bills its first delivery and then only what
-changes. `store-tests/specs/11-live-cost.store.js` measures that.
+cheap signature of the thread every 1.5 s (same tab). Callers cannot tell the two adapters apart
+but for one mark: a Firestore delivery can carry a message with `pending: true` while the server
+has not acknowledged it, and delivers it again unmarked once it has (see the Firestore adapter
+above). The demo adapter delivers only messages it has stored, so it never marks one.
+`listenMatches`, `listenMatchViews` and `listenLikesReceived` ride the same plumbing, and exist
+because the nav badges AND the conversation list were both 20-second polls that re-read every
+match and a profile for each of them. They deliver rows and a count — no profiles, because a
+badge draws a number — and on Firestore they are `onSnapshot`, which bills its first delivery
+and then only what changes. `store-tests/specs/11-live-cost.store.js` measures that.
 
 `listenMatchViews` is the same stream with the faces on: the MatchViews `getMatches`
 returns, pushed. It exists separately rather than as an option on `listenMatches` because
@@ -510,20 +532,21 @@ calls. **A like is two reads now.** `store-tests/specs/20-spend-cost.store.js` c
 and — because a cheaper second opinion is worth nothing — checks that the batch agrees with
 the single answer field for field.
 
-Every one of those is a page's own work. The cost every page pays FIRST went uncounted
-longest, and it is the one paid most often: each page is its own HTML document with a fresh
-SDK, so every navigation resolves the account (one read) and subscribes the nav badge, whose
-first snapshot bills every conversation it carries — **`1 + max(1, N)` reads per page load**,
-before any page-specific code runs. `store-tests/specs/21-navigation-cost.store.js` pins it as
-a known cost rather than a virtue. The fix is a schema change and is not built: the badge
-needs only the conversations with something unread, `unread` is a map keyed by uid, and
-`users array-contains` plus a range on a per-user map key is not an index anyone can declare.
-An `unreadFor` array maintained by `sendMessage` and `markRead` — both already write the
-match document, so no extra writes — would let the badge pay for what is unread instead of
-for everything. The premium likes listener on top of that paid `1 + 2M` for M people
-waiting, a `get` per sender to learn whether it was answered, billed even though a waiting
-sender's answer is a document that does not exist; it now goes through `alreadySwiped`, ten
-at a time, and pays `M + 1 + ⌈M/10⌉`.
+Every one of those is a page's own work. The cost every page pays FIRST went uncounted longest,
+and it is the one paid most often: each page is its own HTML document with a fresh SDK, so every
+navigation resolves the account (one read) and subscribes the nav badge, whose first snapshot
+bills every conversation it carries — **`1 + max(1, N)` reads per page load**, before any
+page-specific code runs. `store-tests/specs/21-navigation-cost.store.js` pins it as a known cost
+rather than a virtue. An account that has switched in-app notifications off does not subscribe
+the badge, so its pages do not pay the badge's `max(1, N)`. The fix is a schema change and is
+not built: the badge needs only the conversations with something unread, `unread` is a map keyed
+by uid, and `users array-contains` plus a range on a per-user map key is not an index anyone can
+declare. An `unreadFor` array maintained by `sendMessage` and `markRead` — both already write
+the match document, so no extra writes — would let the badge pay for what is unread instead of
+for everything. The premium likes listener on top of that paid `1 + 2M` for M people waiting, a
+`get` per sender to learn whether it was answered, billed even though a waiting sender's answer
+is a document that does not exist; it now goes through `alreadySwiped`, ten at a time, and pays
+`M + 1 + ⌈M/10⌉`.
 
 Midnight is the part that was not only about reads. The roll-over is persisted, through the
 same transaction a bump takes, so three parallel `canSpend` calls each found the same stale
@@ -559,8 +582,9 @@ asserted and the other remembered.
   a like landing between the read and the delete is caught on the replay rather than missed.
   Undoing a swipe that is already gone, for a pair with no match, answers `{ ok: true }` in
   both adapters: `firestore.rules` allows deleting a missing swipe to either person its id
-  names, as it allows reading one, and `store-tests/specs/08-conversation.store.js` undoes the same swipe
-  twice against the real rules.
+  names, which is wider than reading one (only its author may), and
+  `store-tests/specs/08-conversation.store.js` undoes the same swipe twice against the real
+  rules.
 - `getUsage` auto-resets when `usage.date` is not today, so daily limits need no scheduler.
 - `canSpend(uid, field)` returns `{ allowed, remaining, limit, plan }` by reading the plan
   limits out of `ZC.config`, and is called *before* every spend. `canSpendAll(uid)` returns
@@ -570,7 +594,10 @@ asserted and the other remembered.
 - `touchActive` is throttled to one *touch* per five minutes **across page loads** — and a
   touch is TWO writes, not one: `setLastActive` stamps `users/{uid}` and then
   `discovery/{uid}`, because the projection carries `lastActiveAt` too and every other deck
-  ranks on it. `store-tests/specs/03-writes.store.js` executes the timing, and
+  ranks on it. If there has been a birthday since the profile was last saved, the
+  `discovery/{uid}` update also carries the new `profile.age`; that is still two writes and
+  no read (`store-tests/specs/06-projection-order.store.js`).
+  `store-tests/specs/03-writes.store.js` executes the timing, and
   `specs/21-navigation-cost.store.js` the count. This used to hand the count to
   `specs/19-write-cost.store.js`, which has never called `touchActive` — so "two writes" was
   a sentence until it was moved somewhere that runs it. The throttle exists because
@@ -639,15 +666,16 @@ dependence — so the same deck renders in the same order on every device. `opts
 (premium only) enables the learned `affinity` term; when it is off the term is dropped and the
 remaining weights are renormalised to sum to 1 rather than scored as zero.
 
-`updateLearning(learning, candidate, action)` is pure and returns a new object: the caller
-persists it through `ZC.store.saveLearning` after the swipe animation, never blocking the UI
-on the write. Not `updateUser`, which is what this said and what the deck used to do — that
-spent a transaction on a value already final, rewrote the whole user document, and
-republished `discovery/{uid}` to mirror a field the projection has never carried. It also
-raced the usage bump's own transaction on the same document, so one of the two came back
-`FAILED_PRECONDITION` on every single like; the SDK replayed it and the data was always
-right, which is why it went unnoticed. `saveLearning` is one field write, no read, nothing
-to lose.
+`updateLearning(learning, candidate, action, opts)` is pure and returns a new object. With an
+interest table that holds anything (`opts.tagIndex`, else `ZC.INTEREST_BY_SLUG`) it learns only
+the tags the table holds, and drops any other key the previous map held. The caller persists it
+through `ZC.store.saveLearning` after the swipe animation, never blocking the UI on the write.
+Not `updateUser`, which is what this said and what the deck used to do — that spent a
+transaction on a value already final, rewrote the whole user document, and republished
+`discovery/{uid}` to mirror a field the projection has never carried. It also raced the usage
+bump's own transaction on the same document, so one of the two came back `FAILED_PRECONDITION`
+on every single like; the SDK replayed it and the data was always right, which is why it went
+unnoticed. `saveLearning` is one field write, no read, nothing to lose.
 
 Weights, component formulas and the reason thresholds are documented in the
 [README](../README.md#how-the-matching-engine-works).
