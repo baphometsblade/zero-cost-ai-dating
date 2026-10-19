@@ -41,6 +41,207 @@ module.exports = {
     const reloadedBio = await page.inputValue('#input-bio');
     t.check('the edit survives a reload', reloadedBio.indexOf(MARKER) !== -1);
 
+    /* ---- a rename made in Settings survives a profile save from an older tab ---- */
+
+    // The display name is edited in two places, Settings and this editor. The
+    // editor used to send every field it had loaded on every save, so with the
+    // profile open in one tab and a rename saved from Settings in another, the
+    // next profile save of anything at all — a bio edit — wrote the old name
+    // back. Both tabs then said saved, and the rename was gone.
+    const renamed = 'Renamed In Another Tab';
+    const settingsTab = await ctx.session.context.newPage();
+    // Into the session's own list, so the spec's closing no-errors check covers
+    // this tab too. The CDN is aborted on purpose in demo mode, and the session
+    // writes those failures off by the same test.
+    settingsTab.on('pageerror', function (err) {
+      ctx.session.errors.push('pageerror @ ' + settingsTab.url() + ' :: ' + (err && err.message ? err.message : String(err)));
+    });
+    settingsTab.on('console', function (msg) {
+      if (msg.type() !== 'error') return;
+      const text = msg.text();
+      const where = (msg.location() || {}).url || '';
+      const cdnNoise = text.indexOf('e2e-unhandled-rejection:') !== 0 &&
+        (where ? /^https?:\/\/([a-z0-9-]+\.)*gstatic\.com\//i.test(where) : /gstatic\.com/i.test(text));
+      if (!cdnNoise) ctx.session.errors.push('console.error @ ' + (where || settingsTab.url()) + ' :: ' + text);
+    });
+    await settingsTab.goto(ctx.base + '/settings.html', { waitUntil: 'domcontentloaded' });
+    await settingsTab.waitForFunction(function () {
+      return document.getElementById('input-name').value !== '';
+    });
+    await settingsTab.fill('#input-name', renamed);
+    await settingsTab.click('#save-account');
+    await settingsTab.waitForFunction(function () {
+      return document.getElementById('account-status').textContent.trim() === 'Saved.';
+    });
+    await settingsTab.close();
+    const nameBeforeSave = await page.inputValue('#input-name');
+    await page.fill('#input-bio', (await page.inputValue('#input-bio')) + ' Saved from the older tab.');
+    await page.click('#save-btn');
+    // Bounded, so a save that never lands is reported by the checks below.
+    await page.waitForFunction(function () {
+      return !document.getElementById('save-btn').hasAttribute('aria-busy') &&
+        /^Saved/.test(document.getElementById('save-status').textContent.trim());
+    }, null, { timeout: 5000 }).catch(function () {});
+    const afterOlderSave = await page.evaluate(async function () {
+      const doc = await window.ZC.store.getUser(window.ZC.auth.current.uid);
+      return {
+        stored: doc.displayName,
+        bioSaved: doc.profile.bio.indexOf('Saved from the older tab.') !== -1,
+        box: document.getElementById('input-name').value,
+        status: document.getElementById('save-status').textContent.trim(),
+        discardEnabled: !document.getElementById('discard-btn').disabled
+      };
+    });
+    // The name box still holding the old name is what makes this a test: a tab
+    // that had somehow picked the rename up would pass without the fix.
+    t.check('a profile save from a tab opened before a rename in Settings keeps the new name',
+      nameBeforeSave !== renamed && afterOlderSave.bioSaved && afterOlderSave.stored === renamed,
+      'box before ' + JSON.stringify(nameBeforeSave) + ', ' + JSON.stringify(afterOlderSave));
+    // "Saved just now." beside a name box that is not what is stored would be
+    // the same untruth the other way round. And measured: a save that takes the
+    // stored name as its baseline without putting it in the box leaves the page
+    // saying "Unsaved changes." about a form nobody has touched.
+    t.check('and the editor takes up the new name, so "Saved just now." is true of the whole form',
+      afterOlderSave.box === renamed && afterOlderSave.status === 'Saved just now.' &&
+      !afterOlderSave.discardEnabled, JSON.stringify(afterOlderSave));
+
+    /* ---- what Back brings back is what is stored, and what Save writes ---- */
+
+    // After Back, Chromium puts the form's controls back the way they were left
+    // (all but those marked autocomplete=off), after the `load` event and
+    // before `pageshow`, and fires no input event. In demo mode the editor has painted from the stored document by
+    // then, so the boxes showed the abandoned edit while the editor still held
+    // the stored text: "Everything here is saved.", Discard off, and a Save that
+    // wrote the stored text and said "Saved just now." over the one on screen.
+    // What the control held at `pageshow`, before any page script's own
+    // listener runs, is recorded so the check can tell the browser restored
+    // something: without that, a browser that restores nothing passes it.
+    await page.addInitScript(function () {
+      window.addEventListener('pageshow', function () {
+        const value = function (name) {
+          const node = document.getElementById(name);
+          return node ? node.value : null;
+        };
+        window.__e2eAtPageshow = { bio: value('input-bio'), ageMin: value('age-min'), distance: value('distance') };
+      });
+    });
+    const leftBehind = ' Typed, then left behind.';
+    const bioBeforeLeaving = await page.inputValue('#input-bio');
+    await page.fill('#input-bio', bioBeforeLeaving + leftBehind);
+    // A real link, the way a person leaves; the session accepts "Leave site?".
+    await Promise.all([
+      page.waitForURL(h.pageUrl('dashboard')),
+      page.locator('a[href*="dashboard"]:visible').first().click()
+    ]);
+    await page.waitForSelector('#deck-stack .swipe-card');
+    await page.goBack();
+    await page.waitForFunction(function () {
+      return !!window.__e2eAtPageshow &&
+        !document.getElementById('profile-main').classList.contains('hidden');
+    });
+    const afterBack = await page.evaluate(async function (mark) {
+      const doc = await window.ZC.store.getUser(window.ZC.auth.current.uid);
+      const box = document.getElementById('input-bio').value;
+      return {
+        restored: (window.__e2eAtPageshow.bio || '').indexOf(mark) !== -1,
+        boxHasEdit: box.indexOf(mark) !== -1,
+        boxIsStored: box.trim() === doc.profile.bio,
+        countAgrees: document.getElementById('bio-count').textContent === box.length + ' / 500',
+        status: document.getElementById('save-status').textContent.trim(),
+        discardEnabled: !document.getElementById('discard-btn').disabled
+      };
+    }, leftBehind);
+    // Either answer is honest: the box shows what is stored and the page says
+    // saved, or it shows something else and the page says unsaved.
+    t.check('after Back, the bio box, its counter and the save line agree with one another',
+      afterBack.restored && afterBack.countAgrees &&
+      afterBack.boxIsStored === !/unsaved/i.test(afterBack.status) &&
+      afterBack.boxIsStored === !afterBack.discardEnabled,
+      (afterBack.restored ? '' : 'the browser restored nothing, so this tested nothing — ') +
+      JSON.stringify(afterBack));
+    await page.click('#save-btn');
+    // Bounded, so a save that never lands is reported by the check below.
+    await page.waitForFunction(function () {
+      return !document.getElementById('save-btn').hasAttribute('aria-busy') &&
+        /^Saved/.test(document.getElementById('save-status').textContent.trim());
+    }, null, { timeout: 5000 }).catch(function () {});
+    const savedAfterBack = await page.evaluate(async function () {
+      const doc = await window.ZC.store.getUser(window.ZC.auth.current.uid);
+      return {
+        box: document.getElementById('input-bio').value.trim(),
+        stored: doc.profile.bio,
+        status: document.getElementById('save-status').textContent.trim()
+      };
+    });
+    t.check('and Save after Back stores exactly what the box shows',
+      savedAfterBack.status === 'Saved just now.' && savedAfterBack.stored === savedAfterBack.box,
+      'status ' + JSON.stringify(savedAfterBack.status) + ', box ends ' +
+      JSON.stringify(savedAfterBack.box.slice(-30)) + ', stored ends ' + JSON.stringify(savedAfterBack.stored.slice(-30)));
+
+    /* ---- an ordinary load leaves alone what is already on screen ---- */
+
+    // `pageshow` ends every load, not only Back, and on this page `load` waits
+    // for the person's photos, so the editor can be in use before either fires.
+    // Repainting the whole form there wiped what the person had in front of
+    // them: the error a Save had just shown, and a date typed halfway. The
+    // photo is held until both are in place, and the check says so if the load
+    // was not held. A context of its own, so the held photo stays out of the
+    // account the rest of this spec uses, and with the service worker kept
+    // out, so the photo's request goes straight from the page to the route.
+    const held = await h.openSession(ctx.session.context.browser(), ctx.viewport, { serviceWorkers: 'block' });
+    try {
+      const heldPage = held.page;
+      let releasePhoto = null;
+      const photoGate = new Promise(function (resolve) { releasePhoto = resolve; });
+      await held.context.route('https://photo.e2e.invalid/**', async function (route) {
+        await photoGate;
+        await route.fulfill({
+          status: 200,
+          contentType: 'image/png',
+          body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64')
+        });
+      });
+      await h.signIn(heldPage, ctx.base);
+      await heldPage.evaluate(function () {
+        return window.ZC.store.updateUser(window.ZC.auth.current.uid,
+          { profile: { photos: ['https://photo.e2e.invalid/held.png'] } });
+      });
+      await heldPage.addInitScript(function () {
+        window.addEventListener('pageshow', function () { window.__e2eShown = true; });
+      });
+      await heldPage.goto(ctx.base + '/profile.html', { waitUntil: 'domcontentloaded' });
+      await heldPage.waitForSelector('#profile-main:not(.hidden)');
+      await heldPage.fill('#input-name', '');
+      await heldPage.click('#save-btn');
+      await heldPage.fill('#input-birthdate', '');
+      await heldPage.click('#input-birthdate');
+      await heldPage.keyboard.type('1');
+      const beforeLoad = await heldPage.evaluate(function () {
+        return {
+          held: document.readyState !== 'complete' && !window.__e2eShown,
+          error: document.getElementById('error-name').textContent.trim(),
+          halfTyped: document.getElementById('input-birthdate').validity.badInput
+        };
+      });
+      releasePhoto();
+      await heldPage.waitForFunction(function () { return window.__e2eShown === true; });
+      const afterLoad = await heldPage.evaluate(function () {
+        return {
+          error: document.getElementById('error-name').textContent.trim(),
+          name: document.getElementById('input-name').value,
+          halfTyped: document.getElementById('input-birthdate').validity.badInput
+        };
+      });
+      t.check('a load that ends after the editor is in use keeps the error on screen and a date typed halfway',
+        beforeLoad.held && beforeLoad.error !== '' && beforeLoad.halfTyped &&
+          afterLoad.error === beforeLoad.error && afterLoad.name === '' && afterLoad.halfTyped &&
+          held.errors.length === 0,
+        (beforeLoad.held ? '' : 'the photo did not hold the load, so this tested nothing — ') +
+          JSON.stringify({ beforeLoad: beforeLoad, afterLoad: afterLoad, errors: held.errors.slice(0, 3) }));
+    } finally {
+      await held.context.close();
+    }
+
     /* ---- a location label emptied by hand stays empty ---- */
 
     // The label box and the coordinates are separate things: emptying the box
@@ -192,6 +393,44 @@ module.exports = {
     /* ---- settings ---- */
     await page.goto(ctx.base + '/settings.html', { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#theme-group');
+
+    // The same restore on this page: the discovery sliders came back from Back
+    // where they had been left, unsaved, while their read-outs had been painted
+    // from the stored preferences — "25 to 44" beside a handle at 40, and a
+    // Save that wrote the handles. The page-show recorder above is still armed.
+    await page.waitForFunction(function () { return document.getElementById('input-name').value !== ''; });
+    await page.locator('#age-min').fill('40');
+    await page.locator('#distance').fill('20');
+    await Promise.all([
+      page.waitForURL(h.pageUrl('dashboard')),
+      page.locator('a[href*="dashboard"]:visible').first().click()
+    ]);
+    await page.waitForSelector('#deck-stack .swipe-card');
+    await page.goBack();
+    await page.waitForFunction(function () {
+      return !!window.__e2eAtPageshow && document.getElementById('input-name').value !== '';
+    });
+    const sliders = await page.evaluate(async function () {
+      const doc = await window.ZC.store.getUser(window.ZC.auth.current.uid);
+      const prefs = doc.preferences || {};
+      const min = Number(document.getElementById('age-min').value);
+      const max = Number(document.getElementById('age-max').value);
+      const km = Number(document.getElementById('distance').value);
+      return {
+        restored: window.__e2eAtPageshow.ageMin === '40' && window.__e2eAtPageshow.distance === '20' &&
+          prefs.ageMin !== 40 && prefs.maxDistanceKm !== 20,
+        handles: min + '-' + max + ', ' + km + ' km',
+        stored: prefs.ageMin + '-' + prefs.ageMax + ', ' + prefs.maxDistanceKm + ' km',
+        ageAgrees: document.getElementById('age-value').textContent === (min === max ? min + ' only' : min + ' to ' + max),
+        distanceAgrees: document.getElementById('distance-value').textContent ===
+          (km >= 500 ? 'Anywhere' : 'Up to ' + km + ' km away'),
+        ageValue: document.getElementById('age-value').textContent,
+        distanceValue: document.getElementById('distance-value').textContent
+      };
+    });
+    t.check('after Back, the discovery read-outs describe the sliders beside them',
+      sliders.restored && sliders.ageAgrees && sliders.distanceAgrees,
+      (sliders.restored ? '' : 'the browser restored nothing, so this tested nothing — ') + JSON.stringify(sliders));
     // Each wait is bounded and its answer is the check. With no bound of its
     // own, a theme that never applied ran out the session's twenty-second
     // default and threw, recorded as "spec ran to completion", and the check

@@ -1178,6 +1178,26 @@
       me = doc;
       render(me);
       wire();
+      // Back and Forward. Chromium puts this page's form controls back the way
+      // they were left (all but those marked autocomplete=off, such as the
+      // delete confirmation), after the `load` event and before `pageshow`, and
+      // fires no input event; in demo mode this page has painted from the
+      // stored document by then. So the discovery sliders came back where they
+      // had been left, unsaved, beside read-outs describing the stored values,
+      // and Save wrote the sliders. Painting again from the document makes
+      // every control render() paints, and its read-out, show what is stored,
+      // as on any other load. The Firebase config box is not one of them: it is
+      // filled only while empty, so text typed there and not saved is left as
+      // restored, and nothing in it counts until Save. Only after Back or
+      // Forward: `pageshow` also ends every ordinary load, where a repaint
+      // would undo whatever was changed before it, and Chromium restores
+      // nothing on a reload. A page restored whole from the back/forward cache
+      // kept its state along with its controls.
+      window.addEventListener('pageshow', function (event) {
+        const entry = performance.getEntriesByType('navigation')[0];
+        if (event.persisted || !entry || entry.type !== 'back_forward') return;
+        render(me);
+      });
       // Async on purpose: the rest of the page must not wait on this list,
       // and loadReports handles its own failures.
       loadReports();
