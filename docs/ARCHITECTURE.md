@@ -725,7 +725,7 @@ Page guards live in `auth.js` and run first in each controller:
 
 | Guard | Behaviour |
 | --- | --- |
-| `requireAuth()` | Redirects to `auth.html` (preserving `?next=`) and never resolves when signed out. Once it has resolved, the page also leaves for `auth.html?next=…` if another tab signs out or signs in as someone else — as soon as the new account's uid is known, not after its profile loads. The page's own sign-out and account deletion call `endingSession()` first, so they are not mistaken for that. |
+| `requireAuth()` | Redirects to `auth.html` (preserving `?next=`) and never resolves when signed out. Once it has resolved, the page also leaves for `auth.html?next=…` if another tab signs out or signs in as someone else — as soon as the new account's uid is known, not after its profile loads. The page's own sign-out (`ZC.auth.signOut`, which sets the same mark itself) and account deletion (`endingSession()`) mark the session as ending here first, so they are not mistaken for that. Every navigation `auth.js` makes goes through `leaveTo`, which first fires a `zc:leaving` event on `window`, and `app.js` fires the same before its Sign out leaves; `matches.js` drops its "a message is still sending" `beforeunload` question on it, so that question never holds a page whose session has ended. (The profile page's unsaved-changes question does not listen for it yet.) |
 | `requireGuest()` | The inverse, for `auth.html`. |
 | `requireProfile()` | `requireAuth` plus a redirect to `profile.html?onboarding=1&next=<this page>` when the profile is incomplete. "Start matching" then goes on to `resolveNext('dashboard.html')`: the page that was asked for, or the deck when there is none or it is unsafe. |
 

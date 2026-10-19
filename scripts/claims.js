@@ -41,7 +41,7 @@
  */
 const CLAIMS = {
   unit: {
-    total: 315,
+    total: 316,
     how: 'npm test',
     note: 'Node\'s built-in runner, no install'
   },
@@ -51,17 +51,17 @@ const CLAIMS = {
     note: 'the twelve browser-only specs, both viewports, Firebase spec skipped'
   },
   e2eFirebase: {
-    total: 489,
+    total: 491,
     how: 'npm run test:e2e, with the Firestore and Auth emulators up',
     note: 'the same twelve specs plus the thirteenth, which drives the real SDK'
   },
   rules: {
-    total: 259,
+    total: 269,
     how: 'npm run test:rules',
     note: 'firestore.rules executed against the emulator'
   },
   store: {
-    total: 303,
+    total: 310,
     how: 'npm run test:store',
     note: 'the shipped data-store.js driven against the emulator'
   }

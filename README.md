@@ -274,7 +274,7 @@ npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.
 
 ### Unit suites
 
-Fourteen suites on Node's built-in runner — **315 checks**, no install, no browser, seconds:
+Fourteen suites on Node's built-in runner — **316 checks**, no install, no browser, seconds:
 
 | Suite | What it pins down |
 | --- | --- |
@@ -286,7 +286,7 @@ Fourteen suites on Node's built-in runner — **315 checks**, no install, no bro
 | `tests/injection.test.js` | No shipped script can hand a browser a string to parse as markup or run as code — `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, `srcdoc`, `eval`, `new Function`, string-bodied timers, `javascript:` URLs — with comments and string literals blanked first, so a sink named in prose is not mistaken for one in use. Shipped means every `.js` file under `public/`, the service worker included, and the body of every inline `<script>` in a page — today only `404.html`'s, which the CSP lets run by its hash, and a hash pins the bytes, not what they do. In a dating app almost every string on screen was typed by somebody else. |
 | `tests/limits.test.js` | Every bound in this app is written down twice — once in `public/js/profile.js`, which enforces it while you type and names it in the message, and once in `firestore.rules`, because a client-side limit is a courtesy. This reads both files and refuses to let them drift: no limit the form accepts may be one the rules refuse, the private document and the public projection must state each bound identically, and the rules' photo-link allowance must be exactly six of what the editor permits per link. Plus the two rules that made those caps necessary: every key a `hasOnly` allowlist admits must be one something in the same validator looks at, and a list whose *length* is bounded must have its *contents* bounded too, counted per occurrence, because one element can be a megabyte. And every closed vocabulary the rules pin — report reasons, genders, themes, plans, interest slugs — must be exactly the list the client offers, because the client validates against its own copy and cannot see the rules refuse a slug it added: a report reason added to the dialog alone would be an abuse report that cannot be filed, refused with nothing named. The first of the two rules above found `discovery/{uid}.personality` accepting anything at all, three lines from the `location` field that had the same defect and was caught by eye rounds earlier; it reads code with the comments stripped, because deleting a rule and leaving `// TODO: validate 'personality' here.` behind is the likeliest shape a real edit takes and the first version of the check passed against exactly that. |
 | `tests/matching-engine.test.js` | Every hard filter including the mutual gender/age cases, the neutral missing-location path, score bounds, determinism, tokeniser and cosine behaviour (letter folds and modifier letters included), whole-word quoting in bio reasons and icebreakers, learning clamp/prune/cap, learning only vocabulary tags (with `seed-data.js` loaded, as pages run it) and dropping any other key a stored map holds, a forged future `lastActiveAt` scoring as unknown, ranking tie-breaks, weight renormalisation, and a golden end-to-end score. |
-| `tests/projection.test.js` | What is public about an account, agreed in one place. The key set `projectDiscovery()` emits must equal the closed `hasOnly` lists in `firestore.rules`, and drift either way is named. So must the keys a private user document is written with, against `userDocOk`'s list and each nested validator's: the document the shipped store creates for a new account, at the top level and in each of its maps but `learning.interestAffinity`, whose keys are interest tags and so an open set, and the location the profile editor writes, which a new account does not have — a key the client writes and the rules do not allow is a refused sign-up or profile save in Firebase mode only, where no demo-mode test would see it. And, separately, a fully populated private account is projected and searched for sentinels, so `email`, `birthdate`, `blocked`, `learning` or `usage` cannot reach the public half even if somebody widens the rules to let them. And what is published must be what the projection's own, tighter rules accept: only interests from the vocabulary, and no `lastActiveAt` later than now, whatever the private document holds — the projection is written in the same transaction as the profile, so a refused value would fail the whole save. |
+| `tests/projection.test.js` | What is public about an account, agreed in one place. The key set `projectDiscovery()` emits must equal the closed `hasOnly` lists in `firestore.rules`, and drift either way is named. So must the keys a private user document is written with, against `userDocOk`'s list and each nested validator's: the document the shipped store creates for a new account, at the top level and in each of its maps but `learning.interestAffinity`, whose keys are interest tags and so an open set, and the location the profile editor writes, which a new account does not have — a key the client writes and the rules do not allow is a refused sign-up or profile save in Firebase mode only, where no demo-mode test would see it. And, separately, a fully populated private account is projected and searched for sentinels, so `email`, `birthdate`, `blocked`, `learning` or `usage` cannot reach the public half even if somebody widens the rules to let them. And what is published must be what the projection's own, tighter rules accept: only interests from the vocabulary, and no `lastActiveAt` later than now, whatever the private document holds — the projection is written in the same transaction as the profile, so a refused value would fail the whole save (a refused activity stamp instead costs a second attempt that leaves the published one as stored). |
 | `tests/pwa.test.js` | The manifest and the service worker carry no root-anchored assumptions, so the same `public/` installs and serves offline under a GitHub Pages project subpath as well as at a site root. And a new worker's install asks the server for the shell rather than the browser's HTTP cache, so the offline copy it stores is one deploy, not files from either side of one; has every file in hand before it stores any, so an install that fails partway leaves the cache its predecessor serves offline as it was; and reads each file as it arrives, because holding two dozen responses unread against the six connections a browser opens to a host left the new worker installing for good. And offline, a page is the copy its last online visit stored, whatever URL that visit asked for: a clean URL as Firebase Hosting answers (`/matches`, `/`), a query string, or a Pages project's bare subpath. The worker used to store each visit under that URL and look pages up offline by file name, so on Hosting the offline page stayed the one it installed with while every visit refreshed the page's scripts. And a visit stores what it fetched the way the install does, rebuilt from its decoded bytes whether it was redirected or not: on Hosting a visit used to write the page, its scripts and its stylesheets back with the headers of their compressed bytes ("gzip, 3238 bytes" over 10,014 for the matches page), over the install's clean copies. |
 | `tests/seed.test.js` | The shape of all 32 seeded profiles against the data model, unique uids and emails, valid interest slugs, ages consistent with birthdates, and `seed-data.js` being in sync with `seed/profiles.json`. |
 | `tests/static.test.js` | Parses every HTML page: no dead local `src`/`href`, correct script load order (plus the one script every page but 404's loads in its `<head>`, the stored theme, held to the key and themes `app.js` uses), no inline script whose hash the CSP does not list and no `style=` attribute or `on*=` handler (the CSP would block them), no class token that the CSS does not define, and `lang` + `title` + viewport + description on every page. Then two things the pages depend on without naming them. The service worker's precache list names every file Hosting deploys, in any folder — the worker itself aside — and nothing that does not exist, so a file added in a folder of its own cannot ship uncached and missing offline. And every glyph the stylesheets generate carries alternative text, because generated content is read aloud: a decorative one is given `''`, and the plan rows' ✓ and ✕, the only thing separating an included feature from a missing one, are announced as *Included:* and *Not included:*. Last, the plans page's placeholder usage rows are the rows `subscription.js` draws, label for label: they hold the plan cards where they will stay while today's counters load, and one short would move the cards by its height on every visit. And the matches page ships its conversation card visible, leaving the loading state to the stylesheet: a page and its scripts can come from two deploys, and a card shipped hidden for this deploy's `matches.js` to reveal stayed hidden, conversations and all, under the previous deploy's. And three promises the two workflows make: CI's `emulator` job drives the store suite through the compat SDK the pages load, CI's `emulators:exec` run of the browser suite fails the Firebase spec rather than letting it skip, and the Pages deploy waits for CI and publishes only a commit CI passed. |
@@ -323,7 +323,7 @@ Firebase rather than `localStorage`: the real SDK, real Auth, real Firestore, an
 read back out of the emulator instead of off the page. It drives the pages **with their real
 CSP meta tag** — the emulators are reached through the page's own origin rather than by
 relaxing the policy, which is the whole reason it can exist; the Limitations section explains
-the constraint it is working around. With both emulators up the run is **489 checks**, all
+the constraint it is working around. With both emulators up the run is **491 checks**, all
 passing.
 
 It did not start that way. On its first run one check was red, and it had found a real bug:
@@ -345,7 +345,7 @@ readable by other accounts, that nobody can mint a match with a stranger and the
 them, that the abuse queue cannot be enumerated — is a claim about one file,
 `firestore.rules`, because there is no server to enforce anything else. Reading it
 carefully is not evidence. `rules-tests/` executes it against the Firestore emulator:
-**259 checks**, including the attacks each rule exists to stop.
+**269 checks**, including the attacks each rule exists to stop.
 
 ```sh
 npm install --prefix /tmp/zc-rules @firebase/rules-unit-testing firebase-tools
@@ -363,7 +363,7 @@ The daily usage counter is the one piece of client logic where reading the code 
 as weak an argument as it was for the rules: whether two concurrent bumps collapse into one
 is a property of a real database, not of anything visible in the file. `store-tests/` loads
 the **shipped** `public/js/data-store.js` into Node — `window` aliased to `globalThis`,
-`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **303
+`ZC.firebase.db` pointed at the emulator through the compat SDK — and drives it: **310
 checks**, including 20 concurrent `bumpUsage` calls on one document storing exactly 20, the
 midnight roll-over happening inside the same transaction, a bump writing `usage` and nothing
 else, 30 bumps each with a whole-document save in flight across it storing exactly 30, an
@@ -462,7 +462,7 @@ the browser suite twice: once bare, which is what a contributor with nothing ins
 and which proves the Firebase spec skips rather than silently passing, and once inside
 `emulators:exec` with `--require=firebase`, which turns a skip of the Firebase spec into a
 failing check. That makes it the only run in which every spec must execute, and therefore the
-only one that can hold the 489-check total to account. The `emulator` job drives the store
+only one that can hold the 491-check total to account. The `emulator` job drives the store
 suite through the compat SDK the pages load (firebase@10.12.2, installed apart from the
 testing library and passed in as `ZC_STORE_SDK`), and `npm test` fails if that pin and the
 pages' script tags disagree. There are no secrets and no deploy step — deploying stays a
@@ -636,8 +636,10 @@ These are real, and worth knowing before you show this to anyone:
   did, and the demo adapter's working copy of the same check hid the difference. It is
   gone, and the comment in its place says where the enforcement really is.
   One more honest edge, since the point of all this is not telling somebody they were
-  blocked: the refused match write is a 403 in the network tab whatever the app does with
-  it, so anyone driving the SDK themselves can see the denial. What the app controls is
+  blocked: the refused match writes — two of them, since the client tries once more dated by the
+  like it answers in case its own clock was the reason — are 403s in the network tab whatever
+  the app does with them, so anyone driving the SDK themselves can see the denial. What the app
+  controls is
   whether it *volunteers* the reason, and it no longer does — the console line names the
   document that was not written and nothing else. That removes the casual tell and not the
   determined one, which is the most a client-side project can claim.
@@ -881,8 +883,11 @@ These are real, and worth knowing before you show this to anyone:
   not proxied, scanned or moderated.
 - **In firebase mode, a message sent with no connection waits in the page.** Offline
   persistence is not enabled, so the SDK holds the write in that page's memory until the
-  server takes it. The chat draws it "Sending…" rather than as sent, and asks before the page
-  is left while it waits. A browser that shows no `beforeunload` prompt — iOS Safari is one —
+  server takes it. The chat draws it "Sending…" rather than as sent, and asks before the page is
+  left while it waits — except when the page leaves because the account signed out, or another
+  account signed in, here or in another tab: the held write belongs to the account that left and
+  is not sent after that, so the page goes without asking and the message is lost. A browser
+  that shows no `beforeunload` prompt — iOS Safari is one —
   lets the page go without asking, and the message is lost. The send button stays busy until
   the connection returns, so a second message cannot be queued behind it.
 - **Discovery scans candidate pages and ranks them in the browser.** `listCandidates` walks

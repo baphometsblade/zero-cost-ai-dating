@@ -142,9 +142,9 @@ Open [`firestore.rules`](../firestore.rules). It is the only server-side securit
 has, so it is worth the five minutes.
 
 Everything below is also *executed* — `npm run test:rules` runs the real rules file against
-the Firestore emulator, **259 checks** including the attacks each rule exists to stop. If you
+the Firestore emulator, **269 checks** including the attacks each rule exists to stop. If you
 change the data model, run it. See [`rules-tests/README.md`](../rules-tests/README.md).
-`npm run test:emulator` adds the store suite to the same emulator boot: **303 more checks** that
+`npm run test:emulator` adds the store suite to the same emulator boot: **310 more checks** that
 drive the shipped `public/js/data-store.js` against a real Firestore, which is where the
 daily counter's transaction is proven — see [`store-tests/README.md`](../store-tests/README.md).
 
@@ -205,8 +205,10 @@ anywhere else was free to rot. It now reads every document.
   that reads like a timestamp. Every stamp is now capped, and the ones that order other
   people's screens — `discovery.lastActiveAt`, a match's `createdAt` and `lastMessageAt`, a
   message's `createdAt` — must be a `toISOString()` stamp no more than a day past the
-  server's clock; `matches.unread` may only be keyed by the two participants, with
-  whole-number counts up to a million; an `id` field must equal the document id; and
+  server's clock; `matches.unread` may only be keyed by the two participants, with whole-number
+  counts a write may set up to a million and a message's `increment(1)` may always raise by one,
+  so a count parked at the ceiling cannot stop the other person's messages; an `id` field must
+  equal the document id; and
   `discovery/{uid}`'s `location` — which was on its key list with **no validator at
   all**, in the one public collection — is held to a coordinate pair with a short
   label. `personality` was on that same public key list with no validator either,
@@ -292,7 +294,7 @@ firebase use --add          # pick your project, alias it "default"
 Then:
 
 ```bash
-npm test                    # 14 suites, 315 checks, no install required
+npm test                    # 14 suites, 316 checks, no install required
 npm run deploy              # firebase deploy --only hosting,firestore
 ```
 
@@ -489,7 +491,7 @@ the suite still fails: *connect-src allows only what the three Firebase SDKs the
 can contact*, in the same file, holds every source in that directive to a list of the
 sources the shipped code actually connects to, each with its reason, and names both
 loopback origins as sources nothing in this app connects to. Be clear about what that does
-**not** catch — add them to that list as well and the suite goes quiet again, all 315
+**not** catch — add them to that list as well and the suite goes quiet again, all 316
 checks passing, and the weakened policy deploys to everyone. Change the meta copy only, and
 change it back.
 
@@ -515,7 +517,7 @@ two-line change to your own workflow. It is, though, the route that never touche
 | `auth/unauthorized-domain` on Google sign-in | Add the domain under Authentication → Settings → Authorized domains. |
 | `auth/operation-not-allowed` | The provider is not enabled in the console (step 3). |
 | Discover errors with `failed-precondition` and a console link | A composite index is still building, or was never deployed. Run `firebase deploy --only firestore:indexes` and wait. |
-| `permission-denied` on a write | The rules rejected it. Check the field limits in step 5 — an over-long bio or a 13th interest is the usual culprit. A device clock more than a day fast is another: messages, matches, profile saves and the activity refresh all carry stamps the rules hold to no more than a day past the server's clock. |
+| `permission-denied` on a write | The rules rejected it. Check the field limits in step 5 — an over-long bio or a 13th interest is the usual culprit. A device clock more than a day fast is another: messages and the activity refresh carry stamps the rules hold to no more than a day past the server's clock, and are refused. A profile save is tried once more without republishing the activity stamp, and a match the clock cannot date is dated by the like it answers, so those two still go through. |
 | Everything works locally but not deployed | `npm run serve` bypasses `firebase.json` entirely, so headers and `cleanUrls` only exist in production. Use `firebase hosting:channel:deploy preview` to test the real configuration for free. |
 | Rules changes seem to have no effect | Rules deploy separately from hosting: `firebase deploy --only firestore:rules`. |
 
