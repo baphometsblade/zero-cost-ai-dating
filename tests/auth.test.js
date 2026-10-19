@@ -869,6 +869,22 @@ test('a page that signed itself out follows later session changes once it is sho
     'the page leaves, as one that never signed itself out does');
 });
 
+test('a restored page follows the session as it is stored now, not as the page last heard it', async function () {
+  // A browser need not deliver another page's storage event to a page in the
+  // back-forward cache, so a page shown again can still hold an account that
+  // has since signed out elsewhere. The restore reads the stored session
+  // itself rather than trusting what this page last heard.
+  const auth = await resetWorld();
+  locationShim.pathname = '/matches.html';
+  await auth.signInAsDemoUser();
+  await auth.requireAuth();
+  backing.delete(SESSION_KEY);
+  assert.equal(auth.current.uid, DEMO_UID, 'the page never heard the sign-out');
+  assert.equal(showPage(true), true, 'shown again, it does not hand the restore on to the page scripts');
+  assert.deepEqual(locationShim.replaced, ['auth.html?next=%2Fmatches.html'],
+    'and it leaves for the sign-in page');
+});
+
 test('resolveNext hands onboarding back the page it was asked for, and nothing it should not', async function () {
   const auth = await resetWorld();
   locationShim.pathname = '/profile.html';

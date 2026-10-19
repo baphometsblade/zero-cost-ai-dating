@@ -1316,9 +1316,10 @@ module.exports = {
       // Chromium restores nothing from the cache itself, so the restore is the
       // synthetic pagehide/pageshow pair the demo specs use, around
       // `ZC.auth.signOut`, which is what the nav's Sign out runs before it
-      // leaves. `pagehide` comes first, so the page's listeners are down
-      // before the account goes, and an error logged after it is one the
-      // restore caused.
+      // leaves. `pagehide` comes first, so matches.js's listeners are down
+      // before the account goes; app.js's badge listeners stop once the
+      // sign-out has settled, and report nothing as errors on the way. So an
+      // error logged after the restore is one the restore caused.
       await page.goto(base + '/matches.html?m=' + encodeURIComponent(heldId), { waitUntil: 'domcontentloaded' });
       await page.waitForURL(h.pageUrl('auth'));
       await page.waitForSelector('#auth-form');

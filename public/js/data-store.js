@@ -2107,7 +2107,8 @@
 
   /**
    * The account's age by this device's date, for the presence touch to
-   * publish, or null when no birthdate is known.
+   * publish, or null when no birthdate is known or the age it gives is not
+   * one the rules accept (18 to 120).
    *
    * Every time, and not only when it differs from the age the private
    * document stored. That comparison was what this used to make, and the
@@ -2742,7 +2743,9 @@
       // three days quiet in the other person's list, and its header said "matched"
       // and the like's date. Their `lastActiveAt` is held to the server's clock by
       // the rule this write is held to (see `lastSeenAt`), so it passes here too.
-      // It costs a read when their face is not cached, and only after a refusal.
+      // It costs a read when their face is not cached (up to three for a paused
+      // profile, whose face is never cached and whose discovery rule bills its
+      // lookups), and only after a refusal.
       if (refused && likedAt && Date.parse(likedAt) < Date.parse(match.createdAt)) {
         const seen = await lastSeenAt(toUid);
         match.createdAt = seen && Date.parse(seen) > Date.parse(likedAt) &&

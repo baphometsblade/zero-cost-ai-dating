@@ -330,9 +330,10 @@
 
      A session this page ends on purpose (its own sign-out, deleting the
      account) is marked first, because that code already knows where it is
-     going next. The mark lasts until the back-forward cache hands the page
-     back, if it ever does (see the `pageshow` listener in section 11): by
-     then that code has gone where it was going. */
+     going next. The mark lasts until the sign-out or deletion that set it
+     fails, or until the back-forward cache hands the page back, if it ever
+     does (see the `pageshow` listener in section 11): by then that code has
+     gone where it was going. */
   let guardedUid = null;
   let endingHere = false;
 
@@ -1259,8 +1260,9 @@
   // away. app.js's Sign out goes on to the landing page with a history entry,
   // and Hosting sends pages no-cache rather than no-store, so Back can bring
   // back the very page that signed out. It came back as the account that had
-  // left: the conversation open, the composer live, and a message sent from
-  // it stored as that account. Only events moved a guarded page on, and the
+  // left: the conversation open, the composer live, and in demo mode a
+  // message sent from it stored as that account (in Firebase mode the rules
+  // refuse it). Only events moved a guarded page on, and the
   // page's own sign-out had already set `endingHere`, which nothing cleared
   // once that sign-out had worked, so the page also ignored every change after
   // it, and a restore after someone else had signed in took on the new account

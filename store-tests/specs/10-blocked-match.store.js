@@ -416,7 +416,7 @@ module.exports = {
     // says "matched" and its date. Dated by a like twenty days old, a match made
     // now went below a conversation that had been quiet for three days, in the
     // list of the other person, whose clock is right. They were on the app ten
-    // minutes ago here, and that stamp went through the same rule.
+    // minutes ago here, and a stamp like that goes through the same rule.
     const oldLiker = 'fast-old-liker';
     const talker = 'fast-old-talker';
     const oldLike = new Date(Date.now() - 20 * 86400000).toISOString();

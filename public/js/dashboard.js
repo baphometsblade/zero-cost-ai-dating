@@ -440,16 +440,16 @@
      5. Controls, usage hint and the daily-limit banner
      ------------------------------------------------------------------------ */
 
-  // Spends the counters in `state.budget` do not include yet. canSpend()
+  // Spends the counters in `state.budget` are not known to include yet. canSpend()
   // answers from the stored counter, and that counter only learns about a
   // swipe once the write resolves — so without this every swipe in a fast run
   // is measured against the same pre-run count, and the daily limit can be
   // overrun by however many writes are in flight.
   const reserved = { likes: 0, superLikes: 0 };
 
-  // How many reservations, since the page loaded, stand for nothing the store
-  // cannot see any more: the spend is in the stored counter now, or never will
-  // be, because an earlier decision stood or the count failed. Any read asked
+  // How many reservations, since the page loaded, stand for a spend the store
+  // can already see, or never will: the spend is in the stored counter now, or
+  // never will be, because an earlier decision stood or the count failed. Any read asked
   // for after that includes all there is to know about the spend, so its
   // reservation is given back in the same step that applies that read, before
   // anything paints; `givenBack` is how many have been. Kept a moment longer,
@@ -492,8 +492,9 @@
   }
 
   /**
-   * Mark a reservation as standing for nothing the store cannot see; see
-   * `settled`. The next read asked for gives it back.
+   * Mark a reservation as standing for a spend the store can already see, or
+   * never will; see `settled`. The next read asked for that is applied with a
+   * real answer gives it back.
    * @param {string|null} field usage counter, or null for a free action
    * @returns {void}
    */
@@ -737,8 +738,9 @@
     } catch (err) {
       console.warn('[zc] Could not read the daily limits:', err);
     }
-    // A read overtaken by a newer one gives nothing back either: the newer one
-    // was asked for later, so it includes everything this one would have.
+    // A read overtaken by a newer one gives nothing back: the newer one was
+    // asked for later, so it includes everything this one would have, and
+    // gives it back if it is applied with a real answer.
     if (token !== budgetRead) return;
     fields.forEach(function (field) {
       const answer = all && all[field];
