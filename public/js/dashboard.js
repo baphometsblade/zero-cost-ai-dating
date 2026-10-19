@@ -440,12 +440,28 @@
      5. Controls, usage hint and the daily-limit banner
      ------------------------------------------------------------------------ */
 
-  // Spends whose store write has not landed yet. canSpend() answers from the
-  // stored counter, and that counter only learns about a swipe once the write
-  // resolves — so without this every swipe in a fast run is measured against
-  // the same pre-run count, and the daily limit can be overrun by however many
-  // writes are in flight.
+  // Spends the counters in `state.budget` do not include yet. canSpend()
+  // answers from the stored counter, and that counter only learns about a
+  // swipe once the write resolves — so without this every swipe in a fast run
+  // is measured against the same pre-run count, and the daily limit can be
+  // overrun by however many writes are in flight.
   const reserved = { likes: 0, superLikes: 0 };
+
+  // How many reservations, since the page loaded, stand for nothing the store
+  // cannot see any more: the spend is in the stored counter now, or never will
+  // be, because an earlier decision stood or the count failed. Any read asked
+  // for after that includes all there is to know about the spend, so its
+  // reservation is given back in the same step that applies that read, before
+  // anything paints; `givenBack` is how many have been. Kept a moment longer,
+  // the spend is counted twice, once by the counter and once by its own
+  // reservation. It used to be given back only after the re-read had been
+  // painted, and with two likes left that paint said none were: it disabled
+  // the Like button under the keyboard that had just pressed it, so the deck
+  // moved the focus onto the card, and the next Enter opened the explanation
+  // instead of liking. A like pressed before that re-read had come back was
+  // measured the same way, and refused with a like still left.
+  const settled = { likes: 0, superLikes: 0 };
+  const givenBack = { likes: 0, superLikes: 0 };
 
   /**
    * What is left of a daily budget once the swipes still being written are
@@ -462,8 +478,10 @@
   }
 
   /**
-   * Give a reservation back, once the store has been re-read and knows about
-   * the spend it was standing in for.
+   * Give a reservation back straight away, for a swipe that spent nothing: its
+   * write failed, or its card had gone. No read will ever include it, so there
+   * is nothing to wait for. A spend that went through is given back by the read
+   * that includes it instead; see `settled`.
    * @param {string|null} field usage counter, or null for a free action
    * @returns {void}
    */
@@ -471,6 +489,42 @@
     if (!field || reserved[field] === undefined) return;
     reserved[field] = Math.max(0, reserved[field] - 1);
     paintBudgets();
+  }
+
+  /**
+   * Mark a reservation as standing for nothing the store cannot see; see
+   * `settled`. The next read asked for gives it back.
+   * @param {string|null} field usage counter, or null for a free action
+   * @returns {void}
+   */
+  function settleReservation(field) {
+    if (field && settled[field] !== undefined) settled[field] += 1;
+  }
+
+  /**
+   * The settled spends a read asked for now will include. Taken as the
+   * question is asked: one settled while the read is in flight may have landed
+   * after the read did.
+   * @returns {{likes:number, superLikes:number}}
+   */
+  function settledSoFar() {
+    return { likes: settled.likes, superLikes: settled.superLikes };
+  }
+
+  /**
+   * Give back the reservations a read includes, once its answer for `field` is
+   * in `state.budget` and before anything paints. Only for a real answer: an
+   * estimate stands in for a read that never came back, and includes nothing.
+   * @param {string} field usage counter the read answered
+   * @param {{likes:number, superLikes:number}} included `settledSoFar()` from when the read was asked for
+   * @returns {void}
+   */
+  function giveBackIncluded(field, included) {
+    if (reserved[field] === undefined) return;
+    const owed = included[field] - givenBack[field];
+    if (owed <= 0) return;
+    reserved[field] = Math.max(0, reserved[field] - owed);
+    givenBack[field] = included[field];
   }
 
   /** True when the field has a known, exhausted budget. */
@@ -671,6 +725,7 @@
     // straddles midnight is then asked again by `watchDay`, rather than being
     // filed under a day it may not belong to.
     budgetDay = ZC.util.todayKey();
+    const included = settledSoFar();
     const fields = ['likes', 'superLikes', 'rewinds'];
     // One call, not three. `canSpendAll` answers every field from a single read
     // of `users/{uid}`; three `checkBudget` calls in a Promise.all read the same
@@ -682,10 +737,13 @@
     } catch (err) {
       console.warn('[zc] Could not read the daily limits:', err);
     }
+    // A read overtaken by a newer one gives nothing back either: the newer one
+    // was asked for later, so it includes everything this one would have.
     if (token !== budgetRead) return;
     fields.forEach(function (field) {
       const answer = all && all[field];
       state.budget[field] = isBudget(answer) ? answer : estimatedBudget();
+      if (isBudget(answer)) giveBackIncluded(field, included);
     });
     paintBudgets();
     watchDay();
@@ -918,8 +976,10 @@
     // the stored counter *and* the swipes still being written, which the store
     // cannot see yet.
     if (field) {
+      const included = settledSoFar();
       const budget = await checkBudget(field);
       state.budget[field] = budget;
+      if (!budget.estimated) giveBackIncluded(field, included);
       if (!budget.allowed || remainingOf(field) <= 0) {
         state.busy = false;
         resetCard(card);
@@ -927,7 +987,7 @@
         refuse(field, budget);
         return;
       }
-      // Held until persistSwipe() has re-read the counter it belongs to.
+      // Held until a read that includes the spend is applied; see `settled`.
       reserved[field] += 1;
       // And repainted, or the reservation is invisible. `remainingOf` subtracts
       // `reserved` precisely so the hint can drop the moment a swipe is
@@ -1165,11 +1225,15 @@
         toast('Your daily count could not be updated. The swipe itself is saved.', 'warn');
       }
     }
+    // From here the stored counter says all it ever will about this swipe, so
+    // any read asked for from now on gives its reservation back as it is
+    // applied: the one below, or the budget check of a swipe pressed while the
+    // learning map saves, whichever comes back first.
+    settleReservation(entry.field);
     // Then the learning map, after the bump rather than across it. The deck is
     // still not waiting: commit() left persistSwipe unawaited long ago.
     if (!earlier) await persistLearning(entry.result.profile, entry.action);
     await refreshBudgets();
-    releaseReservation(entry.field);
   }
 
   /** Undo a failed swipe locally so the deck matches what was actually stored. */

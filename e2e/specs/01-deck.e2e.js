@@ -632,6 +632,207 @@ module.exports = {
       '; ' + decidedThere.name + ': the like elsewhere ' + beforeFailed.made + '; toasts ' + JSON.stringify(afterFailed.toasts));
     await h.closeBurst(page);
 
+    /* ---- the second-to-last like ---- */
+
+    // A like is reserved the moment it is pressed, and the reservation has to
+    // go in the same step as the first read of the counter that includes the
+    // like, or for that moment the like is counted twice. It used to be given
+    // back only after that read had been painted. With two likes left the
+    // paint in between said none were, and disabled the Like button under the
+    // keyboard that had just pressed it: the button was enabled again in the
+    // same task, but Chromium had already taken the focus off it, and the deck
+    // paid the focus back onto the card, where the next Enter opened the
+    // explanation instead of liking. Every change to the button and to the
+    // hint is recorded as it is made, because that state was put right before
+    // anything could have been read off the screen.
+    //
+    // And a like pressed while the one before it had been counted but not yet
+    // re-read was measured against a counter that already held the first like
+    // AND the first like's reservation: with two left it was refused as over
+    // the limit. The learning save comes between the count and the re-read, so
+    // holding it open holds the deck in that window for as long as it takes.
+    //
+    // In a session of its own, because each check spends the last of a day's
+    // likes and a few cards, and by this point this page's deck has too few
+    // cards left.
+    const spare = await h.openSession(page.context().browser(), ctx.viewport);
+    try {
+      const p = spare.page;
+      await h.signIn(p, ctx.base);
+      const mine = await p.evaluate(function () { return window.ZC.auth.current.uid; });
+      const stackOf = function () {
+        return p.evaluate(function () {
+          return Array.prototype.map.call(
+            document.querySelectorAll('#deck-stack .swipe-card:not([data-exiting])'),
+            function (node) { return node.dataset.uid || ''; });
+        });
+      };
+      // Two likes left, two cards in the stack, and on top somebody who has
+      // not liked us, so no match overlay goes up and takes the keyboard.
+      const twoLikesLeft = async function () {
+        const limit = await p.evaluate(function (uid) {
+          const store = window.ZC.store;
+          return Promise.all([store.canSpend(uid, 'likes'), store.getUsage(uid)]).then(function (got) {
+            const usage = got[1];
+            return store.updateUser(uid, {
+              usage: { date: usage.date, likes: got[0].limit - 2, superLikes: usage.superLikes, rewinds: usage.rewinds }
+            }).then(function () { return got[0].limit; });
+          });
+        }, mine);
+        await p.goto(ctx.base + '/dashboard.html', { waitUntil: 'domcontentloaded' });
+        await p.waitForSelector('#deck-stack .swipe-card');
+        const shown = await becomes(p, function (all) {
+          return (document.getElementById('usage-hint').textContent || '').indexOf('2 of ' + all + ' likes left') === 0;
+        }, limit);
+        if (!shown) return false;
+        const likers = await p.evaluate(function (uid) {
+          return window.ZC.store.getLikesReceived(uid).then(function (list) {
+            return list.map(function (doc) { return doc.uid; });
+          });
+        }, mine);
+        for (let i = 0; i < 25; i += 1) {
+          const stack = await stackOf();
+          if (stack.length < 2) return false;
+          if (likers.indexOf(stack[0]) === -1) return true;
+          await p.keyboard.press('ArrowLeft');
+          if (!(await movedOff(p, stack[0]))) return false;
+        }
+        return false;
+      };
+      // The day's likes as stored, looked at until they are all spent or five
+      // seconds have passed. Polled in the page, for the reason `storedAction`
+      // gives.
+      const allLikesSpent = function () {
+        return p.evaluate(function (uid) {
+          const store = window.ZC.store;
+          const deadline = Date.now() + 5000;
+          function poll() {
+            return Promise.all([store.getUsage(uid), store.canSpend(uid, 'likes')]).then(function (got) {
+              if (got[0].likes === got[1].limit || Date.now() > deadline) return { likes: got[0].likes, limit: got[1].limit };
+              return new Promise(function (resolve) { window.setTimeout(resolve, 50); }).then(poll);
+            });
+          }
+          return poll();
+        }, mine);
+      };
+      const said = function () {
+        return p.evaluate(function () { return (document.getElementById('deck-status').textContent || '').trim(); });
+      };
+
+      const fromButton = await twoLikesLeft();
+      const onButton = await stackOf();
+      // The deck re-reads its budgets once a like has been counted, and that
+      // read coming back is the last thing the like does. It is counted here,
+      // so the check waits for it rather than for a length of time.
+      await p.evaluate(function () {
+        const store = window.ZC.store;
+        const like = document.getElementById('btn-like');
+        const hint = document.getElementById('usage-hint');
+        const seen = { reads: 0, disabled: 0, hints: [], canSpendAll: store.canSpendAll };
+        window.__zcSeen = seen;
+        seen.watch = new window.MutationObserver(function (records) {
+          records.forEach(function (record) {
+            // No old value: the attribute was not there, so this is the
+            // button becoming disabled.
+            if (record.target === like) {
+              if (record.oldValue === null) seen.disabled += 1;
+              return;
+            }
+            Array.prototype.forEach.call(record.addedNodes, function (node) {
+              seen.hints.push((node.textContent || '').split(' · ')[0]);
+            });
+          });
+        });
+        seen.watch.observe(like, { attributes: true, attributeFilter: ['disabled'], attributeOldValue: true });
+        seen.watch.observe(hint, { childList: true });
+        store.canSpendAll = function () {
+          return seen.canSpendAll.apply(store, arguments).then(function (answer) {
+            seen.reads += 1;
+            return answer;
+          });
+        };
+      });
+      await p.focus('#btn-like');
+      await p.keyboard.press('Enter');
+      const reread = fromButton && await becomes(p, function () { return window.__zcSeen.reads > 0; });
+      const pressed = await p.evaluate(function () {
+        const seen = window.__zcSeen;
+        const active = document.activeElement;
+        window.ZC.store.canSpendAll = seen.canSpendAll;
+        seen.watch.disconnect();
+        delete window.__zcSeen;
+        return {
+          disabled: seen.disabled,
+          hints: seen.hints,
+          focus: !active || active === document.body ? 'body' : (active.id || active.className),
+          likeDisabled: document.getElementById('btn-like').disabled
+        };
+      });
+      const likedFromButton = reread ? await storedAction(p, mine, onButton[0]) : null;
+      // What the person does next: Enter again, for the last like.
+      await p.keyboard.press('Enter');
+      const lastLike = reread ? await storedAction(p, mine, onButton[1]) : null;
+      const afterLast = await said();
+      // Counted before the page is reloaded under it, so the count cannot land
+      // on top of the two likes the next check starts from.
+      if (lastLike === 'like') await allLikesSpent();
+      t.check('with two likes left, Enter on the Like button likes and leaves the focus on the button, which stays enabled, so the next Enter likes too',
+        reread && likedFromButton === 'like' && pressed.focus === 'btn-like' && !pressed.likeDisabled &&
+          pressed.disabled === 0 && pressed.hints.length > 0 &&
+          pressed.hints.every(function (text) { return text.indexOf('1 of ') === 0; }) && lastLike === 'like',
+        (fromButton ? '' : 'the deck never showed two likes left with somebody who has not liked us on top; ') +
+        (reread ? '' : 'the like never re-read its budget; ') +
+        'stored ' + (likedFromButton || 'nothing') + ', focus then on ' + pressed.focus +
+        ', the button disabled ' + pressed.disabled + ' time(s) and ' + (pressed.likeDisabled ? 'still is' : 'enabled after') +
+        ', hints ' + JSON.stringify(pressed.hints) + '; the next Enter: ' + (lastLike || 'no like') +
+        ', said ' + JSON.stringify(afterLast));
+      await h.closeBurst(p);
+
+      const inWindow = await twoLikesLeft();
+      const pair = await stackOf();
+      await p.evaluate(function () {
+        const store = window.ZC.store;
+        const held = { saveLearning: store.saveLearning, release: null };
+        window.__zcHeld = held;
+        // Only the first like's save is held. The second like's bookkeeping
+        // runs after the first one's, so it reaches its own save once this is
+        // let go.
+        store.saveLearning = function () {
+          const args = arguments;
+          store.saveLearning = held.saveLearning;
+          return new Promise(function (resolve) { held.release = resolve; })
+            .then(function () { return held.saveLearning.apply(store, args); });
+        };
+      });
+      await p.keyboard.press('ArrowRight');
+      // `persistSwipe` saves the learning map after the count has landed, so a
+      // held save means the first like is counted and not yet re-read.
+      const between = inWindow && await movedOff(p, pair[0]) &&
+        await becomes(p, function () { return !!window.__zcHeld.release; });
+      if (between) await p.keyboard.press('ArrowRight');
+      const tookSecond = between && await movedOff(p, pair[1]);
+      const refused = await said();
+      await p.evaluate(function () {
+        const held = window.__zcHeld;
+        window.ZC.store.saveLearning = held.saveLearning;
+        delete window.__zcHeld;
+        if (held.release) held.release();
+      });
+      const spentBoth = await allLikesSpent();
+      const secondStored = tookSecond ? await storedAction(p, mine, pair[1]) : null;
+      t.check('and a like pressed while the one before it is between its count and the re-read is measured against that like once, not twice',
+        tookSecond && secondStored === 'like' && spentBoth.likes === spentBoth.limit,
+        (inWindow ? '' : 'the deck never showed two likes left with somebody who has not liked us on top; ') +
+        (between ? '' : 'the first like never reached its learning save; ') +
+        'the second like ' + (tookSecond ? 'was taken and stored as ' + (secondStored || 'nothing') : 'left its card on top') +
+        ', said ' + JSON.stringify(refused) + '; likes ' + spentBoth.likes + ' of ' + spentBoth.limit + ' spent');
+      await h.closeBurst(p);
+    } finally {
+      await spare.context.close();
+    }
+    t.check('and that session logged no console errors, page errors or unhandled rejections',
+      spare.errors.length === 0, spare.errors.slice(0, 3).join(' | '));
+
     /* ---- the shortcuts modal ---- */
     await page.click('#btn-shortcuts');
     await page.waitForSelector('.modal[role="dialog"]');
