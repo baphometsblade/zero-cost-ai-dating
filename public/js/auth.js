@@ -330,7 +330,9 @@
 
      A session this page ends on purpose (its own sign-out, deleting the
      account) is marked first, because that code already knows where it is
-     going next. */
+     going next. The mark lasts until the back-forward cache hands the page
+     back, if it ever does (see the `pageshow` listener in section 11): by
+     then that code has gone where it was going. */
   let guardedUid = null;
   let endingHere = false;
 
@@ -1250,6 +1252,43 @@
     adoptDemoSession(uid).then(function () { followSessionChange(); }, function (err) {
       console.warn('[zc.auth] Could not follow the session change.', err);
     });
+  });
+
+  // A page the back-forward cache hands back is the same document, with none
+  // of the boot path run again, and the session may have changed while it was
+  // away. app.js's Sign out goes on to the landing page with a history entry,
+  // and Hosting sends pages no-cache rather than no-store, so Back can bring
+  // back the very page that signed out. It came back as the account that had
+  // left: the conversation open, the composer live, and a message sent from
+  // it stored as that account. Only events moved a guarded page on, and the
+  // page's own sign-out had already set `endingHere`, which nothing cleared
+  // once that sign-out had worked, so the page also ignored every change after
+  // it, and a restore after someone else had signed in took on the new account
+  // while still showing, and sending as, the old one. Shown again, its
+  // sign-out is over: the mark goes, and the session is read as it is now.
+  // In demo mode that is the stored record rather than `api.current`: whether
+  // a change made on another page reached this one while it was in the cache
+  // is up to the browser.
+  window.addEventListener('pageshow', function (event) {
+    if (!event || !event.persisted) return;
+    endingHere = false;
+    if (!guardedUid) return;
+    let uid = null;
+    if (MODE === 'demo') {
+      uid = sessionUid(readJson(SESSION_KEY, null));
+    } else {
+      const fb = fbAuth();
+      uid = fb && fb.currentUser ? fb.currentUser.uid : null;
+    }
+    followSessionChange(uid);
+    if (guardedUid) return;
+    // Leaving. The page scripts' own `pageshow` handlers would take the page
+    // up again as the account that has gone: matches.js subscribes the list
+    // and the open conversation again for it, and clears that conversation's
+    // unread count in its name when there is one. This file loads before
+    // app.js and every page script, so this listener runs ahead of theirs and
+    // can stop them.
+    event.stopImmediatePropagation();
   });
 
   // A backstop so a blocked Firebase never leaves pages waiting forever.

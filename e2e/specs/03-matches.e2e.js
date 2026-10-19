@@ -1419,6 +1419,111 @@ module.exports = {
     t.check('and leaves the ended conversation\'s box and Send button disabled',
       endedRefusal.boxDisabled && endedRefusal.sendDisabled, JSON.stringify(endedRefusal));
 
+    /* ---- Sign out, then Back ---- */
+
+    // The nav's Sign out goes on to the landing page with a history entry, and
+    // Hosting sends these pages no-cache, not no-store, which leaves them free
+    // to go into the back-forward cache. Back then hands the same document
+    // back with nothing re-run: the conversation open, the composer live, and
+    // nobody signed in. It stayed up as the account that had signed out, and a
+    // message sent from it was stored as that account. Signed in as somebody
+    // else and then Back, it took on the new account and went on showing, and
+    // sending as, the old one.
+    //
+    // This Chromium restores nothing from the cache itself, so the document is
+    // kept another way: the landing page answers the Sign out with 204 No
+    // Content, which leaves the page where it was with the real sign-out done,
+    // and the restore is the synthetic pagehide/pageshow pair used above. A
+    // session of its own with the service worker kept out, so the stubs are
+    // what answer, and the sign-in page is a stub too, so nothing there acts
+    // on the made-up account below.
+    const back = await h.openSession(page.context().browser(), ctx.viewport, { serviceWorkers: 'block' });
+    try {
+      const bp = back.page;
+      const isLanding = function (url) { return h.pageUrl('index').test(url.href); };
+      const isSignIn = function (url) { return h.pageUrl('auth').test(url.href); };
+      const pageNow = function () {
+        return bp.evaluate(function () {
+          const input = document.getElementById('chat-input');
+          return {
+            at: window.location.pathname + window.location.search,
+            who: window.ZC.auth.current ? window.ZC.auth.current.uid : null,
+            chatOpen: !document.getElementById('chat').classList.contains('hidden'),
+            composerLive: !!input && !input.disabled
+          };
+        });
+      };
+      // Signs the demo account in, opens Sam's conversation and signs out with
+      // the nav's button, keeping the document. Resolves with where it is.
+      const signOutKept = async function () {
+        await h.signIn(bp, ctx.base);
+        await bp.goto(ctx.base + '/matches.html', { waitUntil: 'domcontentloaded' });
+        await bp.waitForSelector('#match-list .match-row');
+        await openConversation(bp, 'Sam');
+        let answered;
+        const kept = new Promise(function (resolve) { answered = resolve; });
+        await bp.route(isLanding, async function (route) {
+          await route.fulfill({ status: 204, body: '' });
+          answered();
+        });
+        await bp.route(isSignIn, function (route) {
+          return route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>held</title>' });
+        });
+        // Dispatched: the nav's links are hidden at the mobile width, and
+        // app.js handles the click the same way at every width.
+        await bp.locator('[data-zc-nav] [data-signout]').dispatchEvent('click');
+        await kept;
+        await bp.unroute(isLanding);
+        return (await pageNow()).at;
+      };
+      const nextOf = function (href) {
+        try { return new URL(href).searchParams.get('next') || ''; } catch (err) { return ''; }
+      };
+
+      const signedOutOn = await signOutKept();
+      await bp.evaluate(function () {
+        window.dispatchEvent(new Event('pagehide'));
+        window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+      });
+      await bp.waitForURL(isSignIn, { timeout: 10000 }).catch(function () {});
+      const leftFor = bp.url();
+      const leftTitle = await bp.title();
+      t.check('a conversation handed back by the back-forward cache after Sign out leaves for the sign-in page',
+        /^\/matches(\.html)?\?m=/.test(signedOutOn) && h.pageUrl('auth').test(leftFor) && leftTitle === 'held' &&
+          nextOf(leftFor) === signedOutOn,
+        JSON.stringify({ signedOutOn: signedOutOn, at: leftFor.replace(ctx.base, ''), title: leftTitle }));
+
+      // The same account signing in again while the page is away gets its
+      // page back, as it was. And the page goes on following the session: a
+      // tab signing in as somebody else afterwards moves it on, as it does a
+      // page that never signed itself out.
+      await bp.unroute(isSignIn);
+      const againOn = await signOutKept();
+      await bp.evaluate(function () { window.dispatchEvent(new Event('pagehide')); });
+      const other = back.watch(await back.context.newPage());
+      await h.signIn(other, ctx.base);
+      await other.goto(ctx.base + '/index.html', { waitUntil: 'domcontentloaded' });
+      await bp.waitForFunction(function () { return !!window.ZC.auth.current; });
+      await bp.evaluate(function () {
+        window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+      });
+      await bp.waitForSelector('#chat:not(.hidden)');
+      const restored = await pageNow();
+      t.check('and one handed back with its own account signed in again stays, conversation and all',
+        restored.at === againOn && restored.who === 'demo-you' && restored.chatOpen && restored.composerLive,
+        JSON.stringify(restored));
+      await other.evaluate(function () {
+        localStorage.setItem('zc.demo.session', JSON.stringify({ uid: 'e2e-someone-else' }));
+      });
+      await bp.waitForURL(isSignIn, { timeout: 10000 }).catch(function () {});
+      const movedTo = bp.url();
+      t.check('but leaves for the sign-in page once another tab signs in as somebody else',
+        h.pageUrl('auth').test(movedTo) && nextOf(movedTo) === againOn, movedTo.replace(ctx.base, ''));
+      t.check('and the tabs doing it log no errors', back.errors.length === 0, back.errors.slice(0, 3).join(' | '));
+    } finally {
+      await back.context.close();
+    }
+
     /* ---- "Yesterday" is the calendar's yesterday, on the days clocks change ---- */
 
     // The separator used to take "yesterday" as whatever day it was 24 hours

@@ -123,8 +123,10 @@ const DEMO_UID = 'demo-you';
 function loadAuth() {
   delete require.cache[AUTH_PATH];
   delete window.ZC.auth;
-  // Only the listener of the instance under test may see a storage event.
+  // Only the listeners of the instance under test may see a storage event or
+  // a page being shown again.
   windowListeners.storage = [];
+  windowListeners.pageshow = [];
   const realSetTimeout = globalThis.setTimeout;
   globalThis.setTimeout = function (fn, ms) {
     const timer = realSetTimeout(fn, ms);
@@ -206,6 +208,22 @@ function sha256Hex(salt, password) {
 /** Fire the window 'storage' event the way another tab would. */
 function fireStorage(key) {
   (windowListeners.storage || []).forEach(function (cb) { cb({ key: key }); });
+}
+
+/**
+ * Fire the window 'pageshow' event: `persisted` true is the back-forward
+ * cache handing a page back, false is an ordinary load ending.
+ * @param {boolean} persisted whether the page is being restored
+ * @returns {boolean} whether a listener stopped the event reaching the rest
+ */
+function showPage(persisted) {
+  let stopped = false;
+  window.dispatchEvent({
+    type: 'pageshow',
+    persisted: persisted,
+    stopImmediatePropagation: function () { stopped = true; }
+  });
+  return stopped;
 }
 
 /* ------------------------------------------------------------------------
@@ -789,6 +807,66 @@ test('a guard that sends the page away says zc:leaving on window first, and one 
   } finally {
     window.removeEventListener('zc:leaving', onLeaving);
   }
+});
+
+test('a guarded page the back-forward cache hands back after its own Sign out leaves for the sign-in page', async function () {
+  const auth = await resetWorld();
+  locationShim.pathname = '/matches.html';
+  locationShim.search = '?m=demo-you_sam-whitfield';
+  await auth.signInAsDemoUser();
+  assert.equal((await auth.requireAuth()).uid, DEMO_UID);
+
+  // The page's own Sign out. app.js goes to the landing page after it, with
+  // a history entry, so Back can hand this same document back, conversation,
+  // composer and all, with nobody signed in. It stayed up as the account that
+  // had left, and a message sent from it was stored as that account.
+  assert.deepEqual(await auth.signOut(), { ok: true });
+  assert.deepEqual(locationShim.replaced, [], 'its own Sign out leaves where to go to app.js');
+  assert.equal(showPage(false), false, 'an ordinary load ending is not a restore');
+  assert.deepEqual(locationShim.replaced, []);
+
+  const stopped = showPage(true);
+  assert.deepEqual(locationShim.replaced, ['auth.html?next=%2Fmatches.html%3Fm%3Ddemo-you_sam-whitfield'],
+    'shown again with nobody signed in, it leaves the way a sign-out in another tab makes it leave');
+  assert.equal(stopped, true, 'and the page scripts do not pick the conversation back up on the way out');
+
+  // A page shown again with its own account still signed in stays, and the
+  // page scripts get their restore.
+  locationShim.replaced.length = 0;
+  const still = await resetWorld();
+  locationShim.pathname = '/matches.html';
+  await still.signInAsDemoUser();
+  await still.requireAuth();
+  assert.equal(showPage(true), false);
+  assert.deepEqual(locationShim.replaced, [], 'nothing changed under it, so it stays');
+});
+
+test('a page that signed itself out follows later session changes once it is shown again', async function () {
+  const auth = await resetWorld();
+  locationShim.pathname = '/matches.html';
+  await auth.signInAsDemoUser();
+  await auth.requireAuth();
+  await auth.signOut();
+
+  // Signed back in as the same account on another page, then Back: the
+  // restored page is that account's again, and stays.
+  backing.set(SESSION_KEY, JSON.stringify({ uid: DEMO_UID }));
+  fireStorage(SESSION_KEY);
+  await tick();
+  showPage(true);
+  assert.deepEqual(locationShim.replaced, [], 'its own account is signed in again');
+  assert.equal(auth.current.uid, DEMO_UID);
+
+  // Somebody else signs in, in another tab. The mark its own Sign out set,
+  // to keep that sign-out from being taken for another tab's doing, used to
+  // last as long as the page did, and the page ignored every change after
+  // it: it took on the new account while still showing the old one's
+  // conversation, and sending as it.
+  await store.createUser('other-tab', { email: 'other@example.com', displayName: 'Other' });
+  backing.set(SESSION_KEY, JSON.stringify({ uid: 'other-tab' }));
+  fireStorage(SESSION_KEY);
+  assert.deepEqual(locationShim.replaced, ['auth.html?next=%2Fmatches.html'],
+    'the page leaves, as one that never signed itself out does');
 });
 
 test('resolveNext hands onboarding back the page it was asked for, and nothing it should not', async function () {

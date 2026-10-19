@@ -1234,6 +1234,44 @@ module.exports = {
         page.off('dialog', recordLeaving);
       }
 
+      /* ---- Sign out, then Back ---- */
+
+      // The page a Sign out leaves can come back whole from the back-forward
+      // cache: Hosting sends these pages no-cache, not no-store, and Back
+      // re-runs none of the boot path. The conversation came back as the
+      // account that had signed out, under the guest's header, and its list
+      // was subscribed again for an account nobody was signed in as. This
+      // Chromium restores nothing from the cache itself, so the restore is the
+      // synthetic pagehide/pageshow pair the demo specs use, around
+      // `ZC.auth.signOut`, which is what the nav's Sign out runs before it
+      // leaves. `pagehide` comes first, so the page's listeners are down
+      // before the account goes, and an error logged after it is one the
+      // restore caused.
+      await page.goto(base + '/matches.html?m=' + encodeURIComponent(heldId), { waitUntil: 'domcontentloaded' });
+      await page.waitForURL(h.pageUrl('auth'));
+      await page.waitForSelector('#auth-form');
+      await page.fill('#input-email', heldEmail);
+      await page.fill('#input-password', password);
+      await page.click('#submit-btn');
+      await page.waitForURL(h.pageUrl('matches'));
+      await page.waitForFunction(function (want) {
+        return ((document.getElementById('chat-log') || {}).textContent || '').indexOf(want) !== -1;
+      }, ASKED);
+      const signedOutOn = await page.evaluate(async function () {
+        window.dispatchEvent(new Event('pagehide'));
+        const result = await window.ZC.auth.signOut();
+        return { at: window.location.pathname + window.location.search, ok: !!result && result.ok === true };
+      });
+      await page.evaluate(function () {
+        window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+      });
+      await page.waitForURL(h.pageUrl('auth'), { timeout: 10000 }).catch(function () {});
+      const shownAgainAt = page.url();
+      t.check('a conversation handed back by the back-forward cache after Sign out leaves for the sign-in page',
+        signedOutOn.ok && h.pageUrl('auth').test(shownAgainAt) &&
+          new URL(shownAgainAt).searchParams.get('next') === signedOutOn.at,
+        JSON.stringify({ signedOutOn: signedOutOn, at: shownAgainAt.replace(base, '') }));
+
       /* ---- two accounts whose identity the app did not choose ---- */
 
       // Both are made in the Auth emulator directly, the way a provider makes
