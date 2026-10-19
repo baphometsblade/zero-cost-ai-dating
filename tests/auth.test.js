@@ -77,9 +77,14 @@ const documentShim = {
 // what auth.js says on window (`zc:leaving`) can be heard.
 const windowListeners = {};
 
+// Whether the browser says it has a connection. Node 20 has no navigator at
+// all, and Node 22's has no onLine.
+const navigatorShim = { onLine: true };
+
 globalThis.window = globalThis;
 Object.defineProperty(globalThis, 'localStorage', { value: localStorageShim, configurable: true, writable: true });
 Object.defineProperty(globalThis, 'location', { value: locationShim, configurable: true, writable: true });
+Object.defineProperty(globalThis, 'navigator', { value: navigatorShim, configurable: true, writable: true });
 globalThis.document = documentShim;
 globalThis.addEventListener = function (type, cb) {
   windowListeners[type] = (windowListeners[type] || []).concat(cb);
@@ -123,10 +128,11 @@ const DEMO_UID = 'demo-you';
 function loadAuth() {
   delete require.cache[AUTH_PATH];
   delete window.ZC.auth;
-  // Only the listeners of the instance under test may see a storage event or
-  // a page being shown again.
+  // Only the listeners of the instance under test may see a storage event, a
+  // page being shown again or the browser coming back online.
   windowListeners.storage = [];
   windowListeners.pageshow = [];
+  windowListeners.online = [];
   const realSetTimeout = globalThis.setTimeout;
   globalThis.setTimeout = function (fn, ms) {
     const timer = realSetTimeout(fn, ms);
@@ -148,6 +154,7 @@ function loadAuth() {
 async function resetWorld() {
   backing.clear();
   failWrites = null;
+  navigatorShim.onLine = true;
   locationShim.pathname = '/dashboard.html';
   locationShim.search = '';
   locationShim.replaced.length = 0;
@@ -300,13 +307,29 @@ test('signUp validates the email, the password length and the display name', asy
     'a punycode TLD is a TLD');
   assert.equal((await auth.signUp('li@例子.中国', 'longenough', 'Li')).ok, true,
     'a TLD in another script is a TLD');
+  // The vowel signs and viramas of Devanagari, Tamil and Sinhala are combining
+  // marks, not letters, and a browser hands these over as typed whenever it
+  // is not the one punycoding the field: a password manager filling it, or a
+  // browser that does not convert type=email values.
+  assert.equal((await auth.signUp('raj@example.भारत', 'longenough', 'Raj')).ok, true,
+    'a Devanagari TLD is a TLD');
+  assert.equal((await auth.signUp('kumar@example.இந்தியா', 'longenough', 'Kumar')).ok, true,
+    'a Tamil TLD is a TLD');
+  assert.equal((await auth.signUp('nimal@example.ලංකා', 'longenough', 'Nimal')).ok, true,
+    'a Sinhala TLD is a TLD');
+  // Marks ride on letters; they are not letters of their own.
+  assert.equal((await auth.signUp('mark@example.\u093E\u0947', 'longenough', 'Mark')).error,
+    'That email address does not look right.', 'a TLD of marks alone is not one');
+  assert.equal((await auth.signUp('one@example.\u092D\u093E', 'longenough', 'One')).error,
+    'That email address does not look right.', 'nor is one letter wearing a mark');
 
   // An 8-character password is exactly on the allowed side of the boundary.
   assert.equal((await auth.signUp('alice@example.com', 'eightchr', 'Al')).ok, true);
 
   // Nothing that failed validation left a trace.
   assert.deepEqual(Object.keys(raw(CREDENTIALS_KEY)).sort(),
-    ['alice@example.com', 'ivan@xn--80a1acny.xn--p1ai', 'li@例子.中国'].sort());
+    ['alice@example.com', 'ivan@xn--80a1acny.xn--p1ai', 'li@例子.中国',
+      'raj@example.भारत', 'kumar@example.இந்தியா', 'nimal@example.ලංකා'].sort());
   assert.equal(auth.current.email, 'alice@example.com');
 });
 
@@ -1052,6 +1075,10 @@ test('the demo backend declines Google sign-in and password resets, helpfully', 
    so what auth.js asked it to write can be read back.
    ------------------------------------------------------------------------ */
 
+// The last booted instance's onAuthStateChanged callback, so a test can
+// change who is signed in under it the way another tab does.
+let authStateChanged = null;
+
 /**
  * Boot auth.js in firebase mode with `user` signed in.
  * @param {Object} user what firebase.User would carry: uid, email, displayName
@@ -1061,7 +1088,7 @@ async function bootFirebase(user) {
   const priorMode = window.ZC.config.mode;
   window.ZC.config.mode = 'firebase';
   window.ZC.firebase = {
-    auth: { onAuthStateChanged: function (next) { next(user); return function () {}; } }
+    auth: { onAuthStateChanged: function (next) { authStateChanged = next; next(user); return function () {}; } }
   };
   try {
     const auth = loadAuth();
@@ -1137,4 +1164,263 @@ test('a refused identity repair keeps the stored document rather than a blank st
   locationShim.replaced.length = 0;
   assert.equal(await navigates(auth.requireProfile()), 'resolved');
   assert.deepEqual(locationShim.replaced, [], 'and no guard sends it through onboarding');
+});
+
+/**
+ * Make store.getUser fail the way Firestore's does with no connection, until
+ * the test says the store is `reachable`. Counts every read asked for.
+ * @returns {{reads:number, reachable:boolean, held:?Promise, restore:Function}}
+ */
+function unreachableReads() {
+  const real = store.getUser;
+  const state = { reads: 0, reachable: false, held: null };
+  store.getUser = async function (uid) {
+    state.reads += 1;
+    if (state.held) await state.held;
+    if (state.reachable) return real.call(store, uid);
+    const err = new Error('Failed to get document because the client is offline.');
+    err.code = 'unavailable';
+    throw err;
+  };
+  state.restore = function () { store.getUser = real; };
+  return state;
+}
+
+/** The outcome of a guard after a short wait: its doc, its error, or 'pending'. */
+function outcomeOf(promise) {
+  return Promise.race([
+    promise.then(function (doc) { return doc; }, function (err) { return err; }),
+    tick(25).then(function () { return 'pending'; })
+  ]);
+}
+
+// Opening a page with no connection: the read of users/{uid} fails, and the
+// page gets an in-memory stand-in with profileComplete false, so that a store
+// it cannot reach degrades the app rather than locking the account out.
+// requireProfile took that stand-in for the stored profile and sent a finished
+// account to onboarding, which is where it stayed once the connection was
+// back. The service worker serves the page offline, so this is how an
+// installed app opens with no signal.
+test('a finished profile that could not be read offline is not sent to onboarding, and opens once the connection is back', async function () {
+  await resetWorld();
+  await store.createUser('fb-ava', { email: 'ava@example.com', displayName: 'Ava' });
+  await store.updateUser('fb-ava', { profileComplete: true });
+
+  const reads = unreachableReads();
+  navigatorShim.onLine = false;
+  try {
+    const auth = await quiet(function () {
+      return bootFirebase({ uid: 'fb-ava', email: 'ava@example.com', displayName: 'Ava' });
+    });
+    locationShim.pathname = '/matches.html';
+    locationShim.replaced.length = 0;
+    const guard = auth.requireProfile();
+    assert.equal(await outcomeOf(guard), 'pending', 'the page waits');
+    assert.deepEqual(locationShim.replaced, [], 'and is not sent to onboarding');
+
+    // The connection comes back, and with it the stored profile.
+    reads.reachable = true;
+    navigatorShim.onLine = true;
+    window.dispatchEvent(new Event('online'));
+    const doc = await Promise.race([guard, tick(200).then(function () { return 'still waiting'; })]);
+    assert.equal(doc && doc.profileComplete, true, 'the guard lets the finished profile through');
+    assert.equal(doc.uid, 'fb-ava');
+    assert.equal(auth.doc, doc, 'and it is the profile now published');
+    assert.deepEqual(locationShim.replaced, []);
+
+    // With the stored profile in hand, coming back online again reads nothing.
+    const before = reads.reads;
+    window.dispatchEvent(new Event('online'));
+    await tick(25);
+    assert.equal(reads.reads, before, 'no read is spent on a profile already read');
+  } finally {
+    reads.restore();
+  }
+});
+
+// The browser says it is online, so no 'online' event is coming to read the
+// profile again, and the guard cannot tell the page what it does not know.
+// It says it failed, for the page to show its own error.
+test('a profile that could not be read while online fails the guard rather than sending it to onboarding', async function () {
+  await resetWorld();
+  await store.createUser('fb-bo', { email: 'bo@example.com', displayName: 'Bo' });
+  await store.updateUser('fb-bo', { profileComplete: true });
+
+  const reads = unreachableReads();
+  try {
+    const auth = await quiet(function () {
+      return bootFirebase({ uid: 'fb-bo', email: 'bo@example.com', displayName: 'Bo' });
+    });
+    locationShim.pathname = '/dashboard.html';
+    locationShim.replaced.length = 0;
+    const outcome = await outcomeOf(auth.requireProfile());
+    assert.ok(outcome instanceof Error, 'the guard rejects, for the page to show its own error: ' + outcome);
+    assert.deepEqual(locationShim.replaced, [], 'and nothing is sent to onboarding');
+  } finally {
+    reads.restore();
+  }
+});
+
+// The connection can come back between the failed read and the guard: the
+// page asks once its scripts have settled, and by then the second read may
+// already be out. That read is the answer the guard waits for, not a reason
+// to give up.
+test('a guard asked while the second read is out waits for that read', async function () {
+  await resetWorld();
+  await store.createUser('fb-eve', { email: 'eve@example.com', displayName: 'Eve' });
+  await store.updateUser('fb-eve', { profileComplete: true });
+
+  const reads = unreachableReads();
+  navigatorShim.onLine = false;
+  try {
+    const auth = await quiet(function () {
+      return bootFirebase({ uid: 'fb-eve', email: 'eve@example.com', displayName: 'Eve' });
+    });
+    let release = null;
+    reads.held = new Promise(function (resolve) { release = resolve; });
+    reads.reachable = true;
+    navigatorShim.onLine = true;
+    window.dispatchEvent(new Event('online'));
+
+    locationShim.pathname = '/matches.html';
+    locationShim.replaced.length = 0;
+    const guard = auth.requireProfile();
+    assert.equal(await outcomeOf(guard), 'pending', 'the guard waits for the read that is out');
+    release();
+    const doc = await outcomeOf(guard);
+    assert.equal(doc && doc.profileComplete, true, 'and lets the finished profile through: ' + doc);
+    assert.deepEqual(locationShim.replaced, []);
+  } finally {
+    reads.restore();
+  }
+});
+
+// The browser can say it is back online while the store is still out of
+// reach. The second read then fails as well, and its stand-in knows no more
+// about the stored profile than the first one did. Nothing else is coming to
+// read it, so the guard says it failed, and it still never sends the account
+// to onboarding.
+test('a second read that fails too fails the guard, and still does not send it to onboarding', async function () {
+  await resetWorld();
+  await store.createUser('fb-fay', { email: 'fay@example.com', displayName: 'Fay' });
+  await store.updateUser('fb-fay', { profileComplete: true });
+
+  const reads = unreachableReads();
+  navigatorShim.onLine = false;
+  try {
+    const auth = await quiet(function () {
+      return bootFirebase({ uid: 'fb-fay', email: 'fay@example.com', displayName: 'Fay' });
+    });
+    locationShim.pathname = '/matches.html';
+    locationShim.replaced.length = 0;
+    const guard = auth.requireProfile();
+    assert.equal(await outcomeOf(guard), 'pending', 'the page waits for a connection');
+
+    const before = reads.reads;
+    navigatorShim.onLine = true;
+    const outcome = await quiet(function () {
+      window.dispatchEvent(new Event('online'));
+      return outcomeOf(guard);
+    });
+    assert.equal(reads.reads, before + 1, 'coming back online read the profile once more');
+    assert.ok(outcome instanceof Error, 'that read failing too fails the guard: ' + outcome);
+    assert.deepEqual(locationShim.replaced, [], 'and nothing is sent to onboarding');
+  } finally {
+    reads.restore();
+  }
+});
+
+// The other way to the stand-in: the read worked, found no document, and the
+// create was refused. That account really has no profile, so onboarding is
+// the right place for it, and still where the guard sends it.
+test('an account with no document, whose create was refused, still goes to onboarding', async function () {
+  await resetWorld();
+  const realCreate = store.createUser;
+  store.createUser = async function () {
+    const err = new Error('Missing or insufficient permissions.');
+    err.code = 'permission-denied';
+    throw err;
+  };
+  try {
+    const auth = await quiet(function () {
+      return bootFirebase({ uid: 'fb-cy', email: 'cy@example.com', displayName: 'Cy' });
+    });
+    locationShim.pathname = '/dashboard.html';
+    locationShim.replaced.length = 0;
+    assert.equal(await outcomeOf(auth.requireProfile()), 'pending');
+    assert.deepEqual(locationShim.replaced, ['profile.html?onboarding=1&next=%2Fdashboard.html']);
+  } finally {
+    store.createUser = realCreate;
+  }
+});
+
+// The read that replaces a stand-in is out on the network for as long as the
+// network takes. An account that signs out meanwhile, in another tab, has to
+// stay signed out when it lands.
+test('a guard waiting offline for an account that then signs out does not send it on to onboarding', async function () {
+  // The guard waits for the read that coming back online starts. By then the
+  // account may have gone, signed out in another tab, and the page has already
+  // left for the sign-in page. What the guard was waiting for is no longer this
+  // page's to act on: answered as an unfinished profile, it sent the page on
+  // from the sign-in page to onboarding as well.
+  await resetWorld();
+  await store.createUser('fb-eve', { email: 'eve@example.com', displayName: 'Eve' });
+  await store.updateUser('fb-eve', { profileComplete: true });
+
+  const reads = unreachableReads();
+  navigatorShim.onLine = false;
+  try {
+    const auth = await quiet(function () {
+      return bootFirebase({ uid: 'fb-eve', email: 'eve@example.com', displayName: 'Eve' });
+    });
+    locationShim.pathname = '/matches.html';
+    locationShim.replaced.length = 0;
+    const guard = auth.requireProfile();
+    assert.equal(await outcomeOf(guard), 'pending', 'the page waits for the connection');
+
+    authStateChanged(null);
+    await tick();
+    reads.reachable = true;
+    navigatorShim.onLine = true;
+    window.dispatchEvent(new Event('online'));
+    await tick(50);
+    assert.deepEqual(locationShim.replaced, ['auth.html?next=%2Fmatches.html'],
+      'it leaves for the sign-in page, and goes nowhere after it');
+  } finally {
+    reads.restore();
+  }
+});
+
+test('a second read that lands after the account has signed out publishes nothing', async function () {
+  await resetWorld();
+  await store.createUser('fb-di', { email: 'di@example.com', displayName: 'Di' });
+  await store.updateUser('fb-di', { profileComplete: true });
+
+  const reads = unreachableReads();
+  navigatorShim.onLine = false;
+  try {
+    const auth = await quiet(function () {
+      return bootFirebase({ uid: 'fb-di', email: 'di@example.com', displayName: 'Di' });
+    });
+    assert.equal(auth.current.uid, 'fb-di');
+
+    let release = null;
+    reads.held = new Promise(function (resolve) { release = resolve; });
+    reads.reachable = true;
+    navigatorShim.onLine = true;
+    const before = reads.reads;
+    window.dispatchEvent(new Event('online'));
+    await tick(25);
+    assert.equal(reads.reads, before + 1, 'the connection coming back reads the profile again');
+
+    authStateChanged(null);
+    await tick();
+    assert.equal(auth.current, null, 'signed out in another tab');
+    release();
+    await tick(25);
+    assert.equal(auth.current, null, 'and still signed out once that read has landed');
+    assert.equal(auth.doc, null);
+  } finally {
+    reads.restore();
+  }
 });

@@ -1401,6 +1401,92 @@ module.exports = {
         !!staleDoc && staleDoc.email === staleEmail && staleDoc.profileComplete === true,
         staleDoc ? 'email=' + JSON.stringify(staleDoc.email) : 'no document');
 
+      /* ---- a finished account opening a page with no connection ---- */
+
+      // The service worker serves the page offline, which is how an installed
+      // app opens with no signal. Its read of users/{uid} fails, and auth.js
+      // publishes a blank in-memory stand-in rather than lock the account out;
+      // the guard took that stand-in's profileComplete false for the stored
+      // profile's and sent this finished account to onboarding, where it
+      // stayed once the connection was back.
+      //
+      // The worker never answers for another origin, so the SDK's scripts are
+      // handed back from the bytes the page loaded online, as a browser's HTTP
+      // cache would. This session's cannot be relied on to: Playwright turns
+      // the HTTP cache off in any context that routes (see 07-offline).
+      const sdkLoads = [];
+      const keepSdk = function (response) {
+        if (!/^https:\/\/www\.gstatic\.com\//.test(response.url())) return;
+        sdkLoads.push(response.body().then(function (body) { return [response.url(), body]; }));
+      };
+      page.on('response', keepSdk);
+      await page.goto(base + '/matches.html', { waitUntil: 'load' });
+      page.off('response', keepSdk);
+      // Booted to the end, so this page has nothing left to read when the
+      // connection goes: `load` can come before Firebase has restored the
+      // session, and this page's own read then failed instead.
+      await page.waitForSelector('#match-list:not(.hidden), #list-empty:not(.hidden)');
+      const sdkBytes = new Map(await Promise.all(sdkLoads));
+      const sdkRoute = function (route) {
+        const body = sdkBytes.get(route.request().url());
+        if (!body) return route.abort();
+        return route.fulfill({ status: 200, contentType: 'text/javascript; charset=utf-8', body: body });
+      };
+      await ctx.session.context.route('**://www.gstatic.com/**', sdkRoute);
+      // auth.js says so when the read fails, and only then does the connection
+      // come back: a read that got through would find the finished profile and
+      // prove nothing. Heard from the page opened offline only, from the moment
+      // it replaces the one before.
+      let replaced = false;
+      const committed = function (frame) { if (frame === page.mainFrame()) replaced = true; };
+      let heard = null;
+      const readFailed = new Promise(function (resolve) {
+        heard = function (msg) {
+          if (replaced && msg.text().indexOf('Could not reach the profile store') !== -1) resolve(true);
+        };
+        page.on('console', heard);
+      });
+      page.on('framenavigated', committed);
+      let failedOffline = false;
+      let openedAt = '';
+      let opened = null;
+      ctx.session.expectNetworkErrors(true);
+      ctx.session.expectConsoleError(/Could not reach Cloud Firestore backend/);
+      try {
+        await ctx.session.context.setOffline(true);
+        await page.goto(base + '/matches.html', { waitUntil: 'domcontentloaded' });
+        failedOffline = await Promise.race([readFailed, new Promise(function (resolve) {
+          setTimeout(resolve, 20000, false).unref();
+        })]);
+        page.off('console', heard);
+        page.off('framenavigated', committed);
+        await ctx.session.context.setOffline(false);
+        // The list, or its error, appears only once requireProfile has
+        // settled, and the profile editor or its error only on onboarding.
+        await page.waitForSelector('#match-list:not(.hidden), #list-empty:not(.hidden), #list-error:not(.hidden), ' +
+          '#profile-main:not(.hidden), #profile-error:not(.hidden)');
+        openedAt = page.url();
+        opened = await page.evaluate(function () {
+          const shown = function (id) {
+            const node = document.getElementById(id);
+            return !!node && !node.classList.contains('hidden');
+          };
+          return {
+            list: shown('match-list') || shown('list-empty'),
+            complete: !!(window.ZC.auth.doc && window.ZC.auth.doc.profileComplete)
+          };
+        });
+      } finally {
+        await ctx.session.context.setOffline(false);
+        await ctx.session.context.unroute('**://www.gstatic.com/**', sdkRoute);
+        ctx.session.expectConsoleError(null);
+        ctx.session.expectNetworkErrors(false);
+      }
+      t.check('a finished account opening a page with no connection is not sent to onboarding, and the page opens once it is back',
+        failedOffline && h.pageUrl('matches').test(openedAt) && !!opened && opened.list && opened.complete,
+        (failedOffline ? 'read failed offline' : 'the offline read never failed') + ' · ' +
+          openedAt.replace(base, '') + ' ' + JSON.stringify(opened));
+
       /**
        * Sign in through auth.html as an account made in the Auth emulator.
        * @param {string} address its email; the password is the spec's own
