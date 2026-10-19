@@ -24,6 +24,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -353,6 +354,49 @@ test('CI drives the store suite through the compat SDK the pages load', function
   assert.ok(handed, 'ci.yml never hands the store suite ZC_STORE_SDK');
   assert.equal(handed[1], '${{ runner.temp }}/' + install[1] + '/node_modules',
     'ZC_STORE_SDK does not point at the prefix firebase@$FIREBASE_SDK_VERSION is installed into');
+});
+
+test('the store runner takes a relative ZC_STORE_SDK against the working directory', function () {
+  // CI hands the store suite an absolute ZC_STORE_SDK, but a local run need
+  // not, and a relative one holding exactly the pages' SDK used to be refused
+  // as holding none: Module.createRequire throws on a relative path, and
+  // context.js read the throw as "not installed". The pin still has to refuse
+  // a relative path that holds nothing, and then say which directory it took
+  // the path to mean, since the runner's working directory is the one
+  // rules-tests/emulate.js starts it in, not necessarily the shell's.
+  const context = require(path.join(ROOT, 'store-tests', 'context.js'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zc-store-sdk-'));
+  const sdk = path.join(dir, 'sdk', 'node_modules');
+  const empty = path.join(dir, 'empty', 'node_modules');
+  const saved = process.env.ZC_STORE_SDK;
+  const verdicts = {};
+  try {
+    // A stand-in for `npm install firebase@<the pages' version>`: the two
+    // compat entry points context.js loads, reporting that version.
+    const compat = path.join(sdk, 'firebase', 'compat');
+    fs.mkdirSync(compat, { recursive: true });
+    fs.writeFileSync(path.join(compat, 'app.js'),
+      'exports.SDK_VERSION = ' + JSON.stringify(context.shippedSdkVersion()) + ';\n' +
+      'exports.initializeApp = function () {};\n', 'utf8');
+    fs.writeFileSync(path.join(compat, 'firestore.js'), '', 'utf8');
+    fs.mkdirSync(empty, { recursive: true });
+    process.env.ZC_STORE_SDK = sdk;
+    verdicts.absolute = context.sdkProblem();
+    process.env.ZC_STORE_SDK = path.relative(process.cwd(), sdk);
+    verdicts.relative = context.sdkProblem();
+    process.env.ZC_STORE_SDK = path.relative(process.cwd(), empty);
+    verdicts.empty = context.sdkProblem();
+  } finally {
+    if (saved === undefined) delete process.env.ZC_STORE_SDK;
+    else process.env.ZC_STORE_SDK = saved;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  assert.equal(verdicts.absolute, null, 'the stand-in SDK is refused by its absolute path: ' + verdicts.absolute);
+  assert.equal(verdicts.relative, null, 'a relative ZC_STORE_SDK holding the pages\' SDK is refused: ' + verdicts.relative);
+  assert.match(String(verdicts.empty), /holds no firebase compat SDK/,
+    'a relative ZC_STORE_SDK holding nothing is not refused: ' + verdicts.empty);
+  assert.ok(String(verdicts.empty).includes(empty),
+    'the refusal of a relative ZC_STORE_SDK never names the directory it looked in: ' + verdicts.empty);
 });
 
 test('CI\'s emulator run of the browser suite fails, rather than skips, the Firebase spec', function () {

@@ -49,11 +49,16 @@ function shippedSdkVersion() {
 
 /**
  * Load a module from one node_modules directory and nowhere else.
- * @param {string} root a node_modules directory
+ * @param {string} root a node_modules directory, absolute or relative to the
+ *   working directory
  * @param {string} name the module to load
  * @returns {Object|null} the module, or null when `root` does not hold it
  */
 function loadFrom(root, name) {
+  // createRequire throws on a relative path, and the catch below would report
+  // that as the package not being there, so a relative root is taken against
+  // the working directory first: the way Node takes a relative NODE_PATH.
+  root = path.resolve(root);
   let resolved;
   try {
     resolved = Module.createRequire(path.join(root, 'noop.js')).resolve(name);
@@ -117,13 +122,17 @@ function loadCompat() {
 function sdkProblem() {
   const pinned = process.env.ZC_STORE_SDK;
   if (!pinned) return null;
+  // A relative pin is taken against this process's working directory, which
+  // under rules-tests/emulate.js is the repository root rather than wherever
+  // the shell was, so the message says which directory that came to.
+  const named = 'ZC_STORE_SDK=' + pinned + (path.isAbsolute(pinned) ? '' : ' (' + path.resolve(pinned) + ')');
   const firebase = loadCompat();
   if (!firebase) {
-    return 'ZC_STORE_SDK=' + pinned + ' holds no firebase compat SDK. Install the version the pages load:\n' +
+    return named + ' holds no firebase compat SDK. Install the version the pages load:\n' +
       '  npm install --prefix <dir> firebase@' + shippedSdkVersion() + '   and set ZC_STORE_SDK=<dir>/node_modules';
   }
   if (firebase.SDK_VERSION !== shippedSdkVersion()) {
-    return 'ZC_STORE_SDK=' + pinned + ' holds firebase ' + firebase.SDK_VERSION + ', but the pages load ' +
+    return named + ' holds firebase ' + firebase.SDK_VERSION + ', but the pages load ' +
       shippedSdkVersion() + ' (public/dashboard.html). A pinned run has to drive the store through the\n' +
       'SDK that ships; install firebase@' + shippedSdkVersion() + ' there, or move the pages and CI together.';
   }
