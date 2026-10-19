@@ -1072,6 +1072,23 @@ module.exports = {
     t.check('and they are back in the box of the conversation they were written for when it is opened again',
       backHome.box === MEANT && backHome.sends === 1, JSON.stringify(backHome));
 
+    // Given back once, and only once. From then on they are the box's, like
+    // anything typed there, so switching away and back finds it empty, as it
+    // does for any conversation reopened. Given back every time, they would
+    // come back after they had been sent, and the next Enter would send them
+    // again.
+    if (ctx.viewport.key !== 'desktop') await page.click('#chat-back');
+    await openConversation(page, 'Sam');
+    await page.waitForFunction(function (id) {
+      return /Sam/.test(document.getElementById('chat-peer-name').textContent) && window.ZC.util.qs('m') !== id;
+    }, devinId);
+    if (ctx.viewport.key !== 'desktop') await page.click('#chat-back');
+    await openConversation(page, 'Devin');
+    await page.waitForFunction(function (id) { return window.ZC.util.qs('m') === id; }, devinId);
+    const reopened = await page.evaluate(function () { return document.getElementById('chat-input').value; });
+    t.check('and only once: opened a second time, its box does not get them again',
+      reopened === '', JSON.stringify(reopened));
+
     // In their own conversation the words go back ahead of whatever was typed
     // there since, and the box holds 1000 characters. A pair longer than that
     // loses the end of the later text, and the toast used to say "Your text is

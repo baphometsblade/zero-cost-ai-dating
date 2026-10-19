@@ -1098,10 +1098,11 @@
    * list and can never be opened again. If it has already left, the toast
    * says the message was not sent and why; if it leaves later, `onViews` says
    * so then. Against the emulator the refusal arrived first and the list's
-   * delivery of the ending after it, so the first toast promises the box only
-   * if the conversation can still be opened, and the second does not have to
-   * take anything back. That map lives in this page's memory only: nothing
-   * about it is stored.
+   * delivery of the ending after it, so the first toast cannot know whether
+   * the conversation will last: it says where the words will be if it does,
+   * and the second says what became of them if it does not. That map lives
+   * in this page's memory only, and nothing about it is stored, which is why
+   * the toast says "on this page".
    * @param {Object} match the MatchView the send was made in
    * @param {string} text the words that were sent
    * @returns {void}
@@ -1126,7 +1127,7 @@
       return;
     }
     state.unsent[match.matchId] = { text: text, name: name };
-    toast('Your message to ' + name + ' could not be sent. If you can still open that conversation, the message will be back in its box.', 'error');
+    toast('Your message to ' + name + ' could not be sent. Open that conversation again on this page and it will be back in its box.', 'error');
     announce('Your message to ' + name + ' could not be sent.');
   }
 
@@ -1352,7 +1353,7 @@
 
     // A draft handed over by the match burst goes in before anything else can
     // steal the composer. Otherwise, the words of a send to this conversation
-    // that failed while another one was open (see giveBack). The two never
+    // that failed while it was not the one open (see giveBack). The two never
     // meet: the draft goes into the first conversation opened, before
     // anything can have been sent.
     if (state.draft) {
