@@ -262,9 +262,10 @@ module.exports = {
       await setDoc(doc(db, 'discovery', P), k.h.discoveryDoc(P, {
         preferences: Object.assign({}, k.h.discoveryDoc(P).preferences, { discoverable: false })
       }));
-      // Matched once, and since unmatched: both likes, no match document.
+      // Matched once, and since unmatched by the reporter: their pass, the
+      // subject's like, no match document.
       await setDoc(doc(db, 'swipes', P + '_' + PR), k.h.swipeDoc(P, PR, 'like'));
-      await setDoc(doc(db, 'swipes', PR + '_' + P), k.h.swipeDoc(PR, P, 'like'));
+      await setDoc(doc(db, 'swipes', PR + '_' + P), k.h.swipeDoc(PR, P, 'pass'));
       await setDoc(doc(db, 'reports', PR + '_' + P), k.h.reportDoc(PR, P));
     });
     let reporterSees = null;

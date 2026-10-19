@@ -208,7 +208,8 @@ anywhere else was free to rot. It now reads every document.
   that reads like a timestamp. Every stamp is now capped, and the ones that order other
   people's screens — `discovery.lastActiveAt`, a match's `createdAt` and `lastMessageAt`, a
   message's `createdAt` — must be a `toISOString()` stamp no more than a day past the
-  server's clock; `matches.unread` may only be keyed by the two participants, with whole-number
+  server's clock, and a message's `createdAt` no more than a day before it either;
+  `matches.unread` may only be keyed by the two participants, with whole-number
   counts a write may set up to a million and a message's `increment(1)` may always raise by one,
   so a count parked at the ceiling cannot stop the other person's messages; an `id` field must
   equal the document id; and
@@ -253,12 +254,13 @@ anywhere else was free to rot. It now reads every document.
 - `matches/{matchId}` — read and update only if you are one of the two `users`; create only
   with `users.size() == 2`, yourself among them, an id equal to the sorted join, proof the
   other person actually liked you first, **and** that they have not blocked you. That last
-  clause is what makes a block durable: unmatching removes the match document but not the
-  like underneath it, so without it the other side could write the document again and
-  resume the conversation. The rule reads their private `users/{uid}` document to check —
-  which a rule may do and no client can. Absent documents are held to the id as swipes are,
-  though either of the pair may probe one rather than an author alone, for a fact worth
-  hiding rather more: whether two named people have matched.
+  clause is what makes a block durable whatever the likes say. An unmatch now also turns the
+  ender's like into a pass, which leaves the other side no like to prove; but a conversation
+  ended before that still has both likes under it, and without the clause the other side
+  could write the document again and resume it. The rule reads their private `users/{uid}`
+  document to check — which a rule may do and no client can. Absent documents are held to
+  the id as swipes are, though either of the pair may probe one rather than an author alone,
+  for a fact worth hiding rather more: whether two named people have matched.
 - `matches/{matchId}/messages/{msgId}` — read if you participate in the parent match; create
   only as yourself with 1–1000 characters of text. Never editable; deletable by participants
   so unmatch and account deletion can purge the conversation before the match goes.
@@ -520,7 +522,7 @@ two-line change to your own workflow. It is, though, the route that never touche
 | `auth/unauthorized-domain` on Google sign-in | Add the domain under Authentication → Settings → Authorized domains. |
 | `auth/operation-not-allowed` | The provider is not enabled in the console (step 3). |
 | Discover errors with `failed-precondition` and a console link | A composite index is still building, or was never deployed. Run `firebase deploy --only firestore:indexes` and wait. |
-| `permission-denied` on a write | The rules rejected it. Check the field limits in step 5 — an over-long bio or a 13th interest is the usual culprit. A device clock more than a day fast is another: messages and the activity refresh carry stamps the rules hold to no more than a day past the server's clock, and are refused. A profile save is tried once more without republishing the activity stamp, and a match the clock cannot date is dated by the like it answers, so those two still go through. |
+| `permission-denied` on a write | The rules rejected it. Check the field limits in step 5 — an over-long bio or a 13th interest is the usual culprit. A device clock more than a day fast is another: messages and the activity refresh carry stamps the rules hold to no more than a day past the server's clock, and are refused. A clock more than a day slow has its messages refused too, as does a message that waited more than a day in an open page for a connection; the words go back in the conversation's box. A profile save is tried once more without republishing the activity stamp, and a match the clock cannot date is dated by the like it answers, or by the other person's last visit when that is later, so those two still go through. |
 | Everything works locally but not deployed | `npm run serve` bypasses `firebase.json` entirely, so headers and `cleanUrls` only exist in production. Use `firebase hosting:channel:deploy preview` to test the real configuration for free. |
 | Rules changes seem to have no effect | Rules deploy separately from hosting: `firebase deploy --only firestore:rules`. |
 

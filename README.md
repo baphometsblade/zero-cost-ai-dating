@@ -278,7 +278,7 @@ Fourteen suites on Node's built-in runner — **330 checks**, no install, no bro
 
 | Suite | What it pins down |
 | --- | --- |
-| `tests/auth.test.js` | The real `public/js/auth.js` on the demo backend, nothing mocked but the browser globals it reaches for: the salted credential vault (including the documented weak fallback when `crypto.subtle` is absent), sign-up and sign-in, the session record, `onChange`, and the three route guards. The guards' `?next=` is held to this site against every trick it has met: protocol-relative, absolute, `javascript:`, backslashes, and a tab, newline or carriage return after the first slash, which the URL parser deletes and which once turned `/\t/evil.example` into `//evil.example` — an open redirect that fired on opening the link. Addresses on internationalised domains sign up as typed and as a browser's email field punycodes them. |
+| `tests/auth.test.js` | The real `public/js/auth.js`, nothing mocked but the browser globals it reaches for, on the demo backend. Its firebase-backend checks also stand in for `onAuthStateChanged`, over the demo store, and where a connection must be gone they make that store's reads fail the way Firestore's do. Covered: the salted credential vault (including the documented weak fallback when `crypto.subtle` is absent), sign-up and sign-in, the session record, `onChange`, and the three route guards, including a guarded page the back-forward cache hands back after its own Sign out, which leaves for the sign-in page and goes on following the session after that. The guards' `?next=` is held to this site against every trick it has met: protocol-relative, absolute, `javascript:`, backslashes, and a tab, newline or carriage return after the first slash, which the URL parser deletes and which once turned `/\t/evil.example` into `//evil.example` — an open redirect that fired on opening the link. Addresses on internationalised domains sign up as typed (Indic top-level domains, whose vowel signs are combining marks, included) and as a browser's email field punycodes them. A profile that could not be read is never sent to onboarding: `requireProfile` waits for the read that replaces it (one already out, or, offline, the one coming back online starts), and otherwise rejects for the page to show its own error, as it does when that second read fails too with the browser still online. |
 | `tests/csp-sync.test.js` | The `<meta http-equiv>` copy of the Content-Security-Policy on every page equals the `firebase.json` header minus `frame-ancestors`, and sits before the first `<link>` and `<script>` — two copies of a policy drift apart unless something forces them together. And `connect-src`, the directive an injected script would send your data out through, may hold only the page's own origin and hosts under `googleapis.com`, where the three Firebase SDKs the pages load were measured to connect and nowhere else, each source listed in the test with its reason, so widening it is a deliberate edit rather than a quiet one. |
 | `tests/contrast.test.js` | Reads the three palette blocks out of `style.css` and holds the flat fill/ink pairs — and body text on each neutral surface — to WCAG AA in light and in both darks, and the deck's four action glyphs to the threshold their size calls for, at rest and on hover. A label on a two-stop gradient — the primary and send buttons, your own chat bubbles, the "how it works" numerals, the plan ribbon, the premium badge — has no single background but does have a worst one, so every rule in either stylesheet that declares such a fill as its background and a text colour beside it is found and held to AA at the lowest point along the whole line, not just at its two stops, because the darkest point of a gradient need not be a stop. Those six must keep being found, so a sweep that stopped finding rules fails rather than passing, and the heart in the wordmark is exempt by name, as WCAG exempts a logo; the lowest label today is 5.07:1. Glass over photos, `color-mix` and text clipped to its own gradient have no second flat colour to measure against, so they are left out and said so rather than measured badly. It found white text on dark's `--danger` at 2.85:1, on the button that deletes your account. |
 | `tests/data-store.test.js` | The demo storage adapter, loaded for real in Node against a `localStorage` shim: seeding (32 profiles, inbound likes, both conversations, idempotency, force re-seed), user create/update deep-merge semantics with wholesale `interestAffinity` replacement, swipe/match/undo idempotency, messaging with unread counters and the 1000-char cap, daily usage limits per plan, the reports lifecycle (file, list, retract, purge on account deletion), a pass aimed at a deleted account staying with its author as it must in firebase mode, a paused profile's face shown only to the accounts the rules show it to, a reset that keeps the accounts made in this browser, and export/import/reset round-trips. A store that cannot be read is a failure rather than an empty answer wherever a page would show the empty answer as a fact: your filed reports, retracting one (which would otherwise say it had already been removed), and the swipes, matches and messages the data export writes out as your whole record. And `getMatches` and `getMatch` hand over the same public projection of the other person that the live list does, as the Firestore adapter's do — never their address, birthdate or block list. |
@@ -628,18 +628,21 @@ These are real, and worth knowing before you show this to anyone:
   thing a block is supposed not to announce, and there is no server to filter for them.
   What a block does do is stop them reaching you: `firestore.rules` refuses to create a
   match when the other party has blocked the caller, and a rule may read a private
-  document no client can. That also makes **unmatching durable when it came with a
-  block** — unmatch alone deletes the match and not the like underneath it, so the other
-  side could otherwise write the match document again and carry on.
+  document no client can. That also keeps **a block durable whatever the likes say**. An
+  unmatch on its own now turns the ender's like into a pass, so the other side has no like
+  left to prove and cannot write the match document again, and neither can a stale deck tab
+  or a pending-match note on either side. A conversation ended before that change still has
+  both likes under it, though, and for those the block is what stops the other side writing
+  it again.
   The Firebase adapter used to carry a "and they have not blocked me" filter that ran
   against a projection with no `blocked` field: it excluded nobody while looking like it
   did, and the demo adapter's working copy of the same check hid the difference. It is
   gone, and the comment in its place says where the enforcement really is.
   One more honest edge, since the point of all this is not telling somebody they were
   blocked: the refused match writes — two of them, since the client tries once more dated by the
-  like it answers in case its own clock was the reason — are 403s in the network tab whatever
-  the app does with them, so anyone driving the SDK themselves can see the denial. What the app
-  controls is
+  like it answers, or by the other person's last visit when that is later, in case its own clock
+  was the reason — are 403s in the network tab whatever the app does with them, so anyone
+  driving the SDK themselves can see the denial. What the app controls is
   whether it *volunteers* the reason, and it no longer does — the console line names the
   document that was not written and nothing else. That removes the casual tell and not the
   determined one, which is the most a client-side project can claim.
@@ -654,17 +657,17 @@ These are real, and worth knowing before you show this to anyone:
   is producing one.
 
   What ships now is the reconciliation pass this bullet used to say had not been written.
-  It is a **note, not a sweep**, and the difference is the whole design: `unmatch` deletes
-  the match document and leaves *both* swipes, so "mutual like with no match document" is
-  byte-for-byte what a deliberately ended conversation looks like — a sweep would reopen
-  every one of them, on every page load. `store-tests/specs/16-reconcile.store.js` executes
-  that rather than arguing it: swap the note for the sweep and a conversation somebody
-  ended comes back. So the failing client writes a note before it starts, and the next page
-  load finishes what **this device** knows it began: three reads and one write, and **zero
-  reads on a page load that owes nothing**, which is what makes running it on every page
-  free. The repair reads the swipe rather than trusting the note, because the rules prove
-  only that the other person liked *me* and never look at my side — a note that outlived
-  its swipe would otherwise be a server-permitted resurrection.
+  It is a **note, not a sweep**, and the difference is the whole design: `unmatch` used to
+  delete the match document and leave *both* swipes, so every conversation ended that way is
+  still byte-for-byte "mutual like with no match document", and a sweep would reopen each of
+  them on every page load. An unmatch now turns the ender's like into a pass, which no repair
+  writes a match for, and `store-tests/specs/16-reconcile.store.js` executes what it leaves.
+  So the failing client writes a note before it starts, and the next page load finishes what
+  **this device** knows it began: three reads and one write, and **zero reads on a page load
+  that owes nothing**, which is what makes running it on every page free. The repair reads
+  the swipe rather than trusting the note, because the rules prove only that the other person
+  liked *me* and never look at my side — a note that outlived its swipe would otherwise be a
+  server-permitted resurrection.
 
   The limit that remains, and it is real: it is **device-local**. A note lives in that
   browser's `localStorage`, so a check lost on a phone is not finished by the same account
@@ -828,9 +831,11 @@ These are real, and worth knowing before you show this to anyone:
     anything executed them — "a *three writes* that was four for a mutual like", caught by a
     person reading carefully. `store-tests/specs/19-write-cost.store.js` now runs it: a pass
     is **2**, an ordinary like **3**, a mutual like **4**, a like on a pair already passed
-    **0**, a message **2** (the message and the conversation row it moves), a profile save
-    **2** (the private document and its projection, in one transaction) — and every check
-    names the documents, because three writes to the wrong places is also three writes.
+    **0**, a message **2** (the message and the conversation row it moves), ending that
+    one-message conversation **4** (the like deleted and a pass created in its place, then
+    the message and the match), a profile save **2** (the private document and its
+    projection, in one transaction) — and every check names the documents, because three
+    writes to the wrong places is also three writes.
     Against the free tier's **20,000 writes a day**, three a like is about 6,600 likes
     across the whole deployment — passes are cheaper at two, so a real day's mix buys
     somewhat more than that.
@@ -889,7 +894,14 @@ These are real, and worth knowing before you show this to anyone:
   is not sent after that, so the page goes without asking and the message is lost. A browser
   that shows no `beforeunload` prompt — iOS Safari is one —
   lets the page go without asking, and the message is lost. The send button stays busy until
-  the connection returns, so a second message cannot be queued behind it.
+  the connection returns, so a second message cannot be queued behind it. If the other person
+  wrote meanwhile, the held message still counts as unread for them but does not replace their
+  newer message as the conversation's preview. If the connection takes more than a day to
+  return, the rules refuse the held message, which would otherwise be filed a day or more up
+  the thread. The words of a refused message go back to the box of the conversation they were
+  written for, never to whichever conversation is open: with another one open, they wait for
+  theirs to be opened again on that page, and if theirs has ended the page says the message
+  was not sent.
 - **An unsaved profile edit goes when the session does.** The profile editor asks before it is
   left with an edit unsaved, except when it leaves because the account signed out, here or in
   another tab, or another account signed in in another tab. The edit belonged to the account

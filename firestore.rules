@@ -619,9 +619,11 @@ service cloud.firestore {
       // published account and withdraw it again, so a read it opened would be one a
       // stranger holding the uid could grant themselves, use and retract, leaving
       // nothing in the queue. The report menu is in a conversation, so a reporter
-      // is a match; unmatching deletes the match and leaves the like under it, and
-      // the like keeps the name. A report the page cannot read it names "a deleted
-      // account", as it names one it cannot fetch.
+      // is a match. A reporter who ends the conversation turns only their own like
+      // into a pass, and the subject's like, left under it, keeps the name. A subject
+      // who ends it turns theirs into a pass, and once they have paused, the reporter
+      // is none of the accounts above. The settings page names a subject it cannot
+      // read "an account you can no longer see", as it names one it cannot fetch.
       //
       // The rules are not a filter, so a query is allowed only when every document
       // it could return is: the deck's query names `discoverable == true` and is,
@@ -891,11 +893,12 @@ service cloud.firestore {
       // lost. It reads the swipe back before creating anything, precisely because this
       // rule proves the OTHER person liked you and never looks at your own side.
       //
-      // ...and not once they have blocked you. Unmatching alone is not durable: it deletes
-      // the match document but not the like underneath it, so `likedByOther` still holds
-      // and the other side can simply write the document again and carry on messaging.
-      // The report dialog's "Block and unmatch" is the flow that has to survive that, and
-      // this is what makes it survive.
+      // ...and not once they have blocked you. An unmatch now turns the ender's own like
+      // into a pass, so `likedByOther` fails for the other side afterwards
+      // (store-tests/specs/08-conversation.store.js runs it), but a conversation ended
+      // before that still has both likes under it, and a blocked account is the one whose
+      // client should not be trusted to leave it alone. The report dialog's "Block and
+      // unmatch" is the flow that has to survive that, and this is what makes it survive.
       //
       // Only that direction is checked. "I blocked them" is enforced by my own client,
       // and a tampered client that matched somebody it had itself blocked would only be

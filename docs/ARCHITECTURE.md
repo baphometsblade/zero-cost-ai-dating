@@ -214,7 +214,9 @@ into the other and the matching engine cannot tell the difference.
     ageMin: number,        // >= 18
     ageMax: number,        // <= 100
     maxDistanceKm: number, // 1..500, where 500 means "anywhere"
-    notifications: boolean, // false hides the nav's count badges and holds no listener for them
+    notifications: boolean, // false hides the nav's count badges and holds no listener for them,
+                            // at once in every open tab of the browser that saved it, and on
+                            // another device from its next page load
     theme: 'system' | 'light' | 'dark',
     discoverable: boolean
   },
@@ -247,9 +249,11 @@ In Firebase mode `users/{uid}` is readable **only by its owner**. What other peo
 display name, `profileComplete`, `lastActiveAt`, the public `profile.*` subset (derived age
 but never the birthdate; coordinates rounded to ~1 km) and the mutual filter preferences
 (`interestedIn`, `ageMin`, `ageMax`, `maxDistanceKm`, `discoverable`). Because it holds the
-age and never the birthdate, a birthday changes nothing in it by itself: after one, the
-presence touch rewrites the projected age in the same `discovery/{uid}` update as
-`lastActiveAt`, so the new age reaches other decks on the person's next visit. Email,
+age and never the birthdate, a birthday changes nothing in it by itself: every presence touch
+writes the age its device's date gives into the same `discovery/{uid}` update as
+`lastActiveAt`, so the new age reaches other decks on the person's next visit, and an age
+published by a device whose date was behind (a slow clock, or a time zone the birthday has not
+reached) is put right by the next visit from one whose date is not. Email,
 birthdate, block lists, usage counters and learned affinities never leave the private
 document, and the rules close the projection's key list with `hasOnly` so a tampered client
 cannot widen it.
@@ -336,6 +340,10 @@ demo cast never looks like it went quiet in 2026.
   (`profileComplete`, `preferences.discoverable`, `lastActiveAt`), swipes by (`from`,
   `createdAt`), inbound likes by (`to`, `action`), matches by (`users` array-contains,
   `lastMessageAt`).
+- `sendMessage` moves the preview (`lastMessage`, `lastMessageAt`) only when the message is at
+  least as new, by `createdAt`, as the preview it would replace; a message that waited in the
+  page for a connection and lands after a newer one raises the unread count without replacing
+  the newer preview.
 - `listenMessages` is a real `onSnapshot` subscription; the returned function unsubscribes.
   It listens with `includeMetadataChanges`, so a message this client wrote that the server
   has not yet acknowledged arrives with `pending: true`, and arrives again without it once
@@ -343,9 +351,9 @@ demo cast never looks like it went quiet in 2026.
   round trip. After the first delivery it passes a snapshot on only when a message changed,
   its pending state included, so a connection dropping or returning on its own delivers
   nothing, as the demo adapter's `deliver()` drops an unchanged list. matches.html draws a
-  pending message "Sending…", and asks before the page is left while a send is unfinished,
-  because offline persistence is off and leaving would lose a message the server does not
-  have.
+  pending message "Sending…", and takes it off again when the server refuses it and the SDK
+  takes it back. It asks before the page is left while a send is unfinished, because offline
+  persistence is off and leaving would lose a message the server does not have.
 - Client-side filtering finishes the job the indexes cannot: mutual gender/age/distance
   filtering happens in the matching engine, not in the query, because Firestore cannot express
   a mutual predicate and the free plan has nowhere else to run one.
@@ -383,13 +391,14 @@ failing.
 `writeJson` returns false when the write did not land, and whether a caller must check it
 follows from whether the write can FAIL rather than from taste. A write that GROWS the
 stored value can hit the quota, and every one of those is checked and throws — the swipe,
-the match, the message, the user document, the report — because the Firestore adapter
-rejects on the same failure and every caller already has the branch. Reporting an unwritten
-document as written is how this adapter managed to announce a match nobody had, send a
-message it had destroyed, and confirm a safety report it had not filed. A write that only
-SHRINKS cannot fail: `unmatch`, `undoSwipe`, `markRead`, `retractReport` and
-`deleteAccountData` re-serialise the map they just read with entries removed, with no
-`await` in between, and a shorter overwrite lands even on a full origin. `bumpUsage` is the
+the match, the message, the user document, the report, and the pass `unmatch` records
+before it deletes anything — because the Firestore adapter rejects on the same failure and
+every caller already has the branch. Reporting an unwritten document as written is how
+this adapter managed to announce a match nobody had, send a message it had destroyed, and
+confirm a safety report it had not filed. A write that only SHRINKS cannot fail:
+`unmatch`'s deletes, `undoSwipe`, `markRead`, `retractReport` and `deleteAccountData`
+re-serialise the map they just read with entries removed, with no `await` in between, and a
+shorter overwrite lands even on a full origin. `bumpUsage` is the
 deliberate exception — it swallows, because the Firestore adapter swallows, and
 `store-tests` pins that contract against the emulator.
 
@@ -471,8 +480,10 @@ replayed on contention, so each attempt buffers its own writes and only the one 
 committed is added. Counting where `tx.set` is called reports twenty concurrent bumps as
 forty, measured. `store-tests/specs/19-write-cost.store.js` pins a pass at 2, an ordinary
 like at 3, a mutual like at 4, a like on a pair already passed at 0, a swipe on a decided
-mutual pair that has lost its match at 1 (the match), a message at 2 and a profile save at 2
-— with the documents named, because three writes to the wrong places is also three writes.
+mutual pair that has lost its match at 1 (the match), a message at 2, ending that
+one-message conversation at 4 (the like deleted, the pass created, the message, the match)
+and a profile save at 2 — with the documents named, because three writes to the wrong
+places is also three writes.
 
 The counter follows a reference along each of these routes — a snapshot's `ref`, `docs`,
 `forEach` or `docChanges()`, a listener's delivery however the listener was registered, a
@@ -546,7 +557,10 @@ the match document, so no extra writes — would let the badge pay for what is u
 for everything. The premium likes listener on top of that paid `1 + 2M` for M people waiting, a
 `get` per sender to learn whether it was answered, billed even though a waiting sender's answer
 is a document that does not exist; it now goes through `alreadySwiped`, ten at a time, and pays
-`M + 1 + ⌈M/10⌉`.
+`M + 1 + ⌈M/10⌉`. Switching in-app notifications in Settings costs each other open tab of that
+browser one read of `users/{uid}` (app.js `accountChanged`, a `storage` event), so those tabs
+drop or take up the badge without a reload. A tab taking the badge up subscribes it again, and
+pays for its first snapshot as a page load does; nothing is read on focus.
 
 Midnight is the part that was not only about reads. The roll-over is persisted, through the
 same transaction a bump takes, so three parallel `canSpend` calls each found the same stale
@@ -564,7 +578,9 @@ asserted and the other remembered.
   answer adds `existing: true` and the `action` that stands, so the deck neither counts nor
   learns from a swipe that was never recorded (unless it is its own retry of a write that
   came back failed yet landed). The match check still runs on the decision that stands, so a
-  mutual pair whose match document is missing gets it then. When that match check fails, the
+  mutual pair whose match document is missing gets it then. A conversation `unmatch` has
+  ended is not such a pair, since it records the ender's pass in place of their like (one
+  ended before it did so still has both likes). When that match check fails, the
   rejection is marked `swipeStored` and carries the same `existing` and `action`, so the
   deck treats it the same way: it says which decision stands, neither counts nor teaches the
   swipe, and adds that the match could not be checked, without the "Saved" it says only of a
@@ -575,10 +591,10 @@ asserted and the other remembered.
   note on any settled outcome, and keeps it only for a rejection that says the swipe itself,
   or a decision already on record, landed;
   `app.js` drains the log once per page. It is a note rather than a sweep because `unmatch`
-  leaves both swipes behind, so a mutual like with no match document is indistinguishable
-  from a conversation somebody ended — a sweep would reopen every one of them. Costs three
-  reads and one write per repair, and nothing at all when nothing is owed. Device-local: it
-  finishes what that browser began.
+  used to leave both likes behind, so a mutual like with no match document is
+  indistinguishable from a conversation ended that way — a sweep would reopen every one of
+  those. Costs three reads and one write per repair, and nothing at all when nothing is owed.
+  Device-local: it finishes what that browser began.
 - `undoSwipe` deletes the swipe, and refuses — `{ ok: false, reason: 'matched' }`, nothing
   deleted — when the pair already have a match. A match is two people's: the other side can
   have read it and written into it, so one of them pressing rewind may not take it away. The
@@ -591,6 +607,22 @@ asserted and the other remembered.
   allows them to read one, and
   `store-tests/specs/08-conversation.store.js` undoes the same swipe twice against the real
   rules.
+- `unmatch(matchId, uid)`, given the participant asking, first turns their swipe on the other
+  person into a pass, then deletes the match and its messages. In the Firestore adapter the
+  pass is a delete and then a create, as two writes, since a swipe is never updated and one
+  batch doing both is refused, and the messages go before the match, because their delete
+  rule checks membership of the match. With a pass on record the pair is no longer
+  mutual, so none of these brings the conversation back: either person's stale deck tab, a
+  pending-match note on another device, or the other person writing the match document
+  directly (`store-tests/specs/08-conversation.store.js` runs each under the real rules).
+  Only the ender can bring it back: by taking the pass back (`undoSwipe`) and liking again,
+  or by writing the match document directly, which the create rule still allows them because
+  the other person's like stands. The swipe goes first so that a failure after it leaves the
+  conversation whole for a retry. Ending a one-message conversation is four writes
+  (`store-tests/specs/19-write-cost.store.js`). A conversation ended before `unmatch` did this
+  still has both likes under it. A consequence: once the ender pauses, the other person can
+  no longer read their face, so Settings names a report the other person filed about them
+  "an account you can no longer see", as it names any account it cannot read.
 - `getUsage` auto-resets when `usage.date` is not today, so daily limits need no scheduler.
 - `canSpend(uid, field)` returns `{ allowed, remaining, limit, plan }` by reading the plan
   limits out of `ZC.config`, and is called *before* every spend. `canSpendAll(uid)` returns
@@ -600,8 +632,8 @@ asserted and the other remembered.
 - `touchActive` is throttled to one *touch* per five minutes **across page loads** — and a
   touch is TWO writes, not one: `setLastActive` stamps `users/{uid}` and then
   `discovery/{uid}`, because the projection carries `lastActiveAt` too and every other deck
-  ranks on it. If there has been a birthday since the profile was last saved, the
-  `discovery/{uid}` update also carries the new `profile.age`; that is still two writes and
+  ranks on it. The `discovery/{uid}` update also carries `profile.age` as the device's date
+  gives it, on every touch rather than only after a birthday; that is still two writes and
   no read (`store-tests/specs/06-projection-order.store.js`).
   `store-tests/specs/03-writes.store.js` executes the timing, and
   `specs/21-navigation-cost.store.js` the count. This used to hand the count to
@@ -731,9 +763,9 @@ Page guards live in `auth.js` and run first in each controller:
 
 | Guard | Behaviour |
 | --- | --- |
-| `requireAuth()` | Redirects to `auth.html` (preserving `?next=`) and never resolves when signed out. Once it has resolved, the page also leaves for `auth.html?next=…` if another tab signs out or signs in as someone else — as soon as the new account's uid is known, not after its profile loads. The page's own sign-out (`ZC.auth.signOut`, which sets the same mark itself) and account deletion (`endingSession()`) mark the session as ending here first, so they are not mistaken for that. Every navigation `auth.js` makes goes through `leaveTo`, which first fires a `zc:leaving` event on `window`, and `app.js` fires the same before its Sign out leaves; `matches.js` drops its "a message is still sending" `beforeunload` question on it, and `profile.js` stops asking its unsaved-changes question, so neither question holds a page whose session has ended. |
+| `requireAuth()` | Redirects to `auth.html` (preserving `?next=`) and never resolves when signed out. Once it has resolved, the page also leaves for `auth.html?next=…` if another tab signs out or signs in as someone else — as soon as the new account's uid is known, not after its profile loads. The page's own sign-out (`ZC.auth.signOut`, which sets the same mark itself) and account deletion (`endingSession()`) mark the session as ending here first, so they are not mistaken for that. The mark is lifted when the back-forward cache hands the page back (a `pageshow` with `persisted` set), and the session is read again then: the stored demo session, or the SDK's `currentUser`. So a page that Back brings back after its own Sign out, or after somebody else has signed in, also leaves for `auth.html?next=…`, and stops the page scripts' own `pageshow` handlers on its way out. Every navigation `auth.js` makes goes through `leaveTo`, which first fires a `zc:leaving` event on `window`, and `app.js` fires the same before its Sign out leaves; `matches.js` drops its "a message is still sending" `beforeunload` question on it, and `profile.js` stops asking its unsaved-changes question, so neither question holds a page whose session has ended. |
 | `requireGuest()` | The inverse, for `auth.html`. |
-| `requireProfile()` | `requireAuth` plus a redirect to `profile.html?onboarding=1&next=<this page>` when the profile is incomplete. "Start matching" then goes on to `resolveNext('dashboard.html')`: the page that was asked for, or the deck when there is none or it is unsafe. |
+| `requireProfile()` | `requireAuth` plus a redirect to `profile.html?onboarding=1&next=<this page>` when the profile is incomplete. "Start matching" then goes on to `resolveNext('dashboard.html')`: the page that was asked for, or the deck when there is none or it is unsafe. A profile that could not be read is not an incomplete one, and is never sent to onboarding. The guard waits for the read that replaces it: one already out, or, with the browser offline, the one auth.js starts on the `online` event. With the browser online and no read out, it rejects, for the page to show its own error. A second read that fails too ends the same way, unless the connection has gone again. |
 
 Because these never resolve on the redirect path, a controller can safely `await` one and then
 assume it has a user document.

@@ -52,7 +52,7 @@ without a row here.
 | `specs/02-discovery.rules.js` | `discovery/{uid}` — readable while discoverable, and only the public shape: interests from the editor's vocabulary, and a `lastActiveAt` in `toISOString()` shape no more than a day ahead, or none in the write at all: a projection saved without its stamp keeps the one it had, and one written first that way has none, which is how a device clock more than a day fast still saves a profile |
 | `specs/03-swipes.rules.js` | `swipes/{from_to}` — authored by you, immutable, id-pinned, a pass private to its author, probeable when absent only by its author, deletable by the one it is aimed at only while it is a like or a super like, and deletable when absent only by its author |
 | `specs/04-matches.rules.js` | `matches/{a_b}` — participants only, only with a reciprocal like, stamps no more than a day ahead (one 25 hours ahead is refused, and a match dated by the like it answers is accepted), whole-number unread counts that the other side's increment can always raise, even from the million ceiling, and probeable when absent only by the pair named in the id |
-| `specs/05-messages.rules.js` | `matches/{id}/messages` — participants only, append-only, self-authored, stamped no more than a day ahead |
+| `specs/05-messages.rules.js` | `matches/{id}/messages` — participants only, append-only, self-authored, stamped no more than a day ahead or a day behind (25 hours either way is refused, and so is 2001; 23 hours either way is accepted) |
 | `specs/06-reports.rules.js` | `reports/{from_about}` — bounded, author-only, unprobeable |
 | `specs/07-default-deny.rules.js` | everything else — denied by default |
 | `specs/08-budget.rules.js` | the rules file itself — how much of Firestore's 1000-expression-per-request ceiling `userDocOk` has left on the create, the routine update and the email-correcting update of the costliest document the store writes (a premium account with every optional field set, a location among them), and how long an `in` list the swipes read rule accepts before the same ceiling denies it. The second one binds the deck: `listCandidates` asks "have I swiped on these people" as `swipes where __name__ in [ids]`, the read rule is evaluated once per value, and going over comes back as a `permission-denied` naming nothing. Measured at 20; the store asks about 10 |
@@ -108,7 +108,8 @@ another's preconditions and mask a missing rule.
   fields a document may have and says nothing about how big one may be. Every timestamp in
   this project was checked as `is string`, which bounds nothing, so a swipe could be a
   megabyte under a name that reads like `createdAt`. Every stamp is capped now, and the ones
-  that order other people's screens are held to no more than a day past the server's clock;
+  that order other people's screens are held to no more than a day past the server's clock,
+  and a message's to no more than a day before it either;
   `unread` may only be keyed by the two participants, with whole-number counts a write may set
   up to a million and a message's increment may always raise by one; an `id` field must equal
   the document id; and `discovery/{uid}`'s `location` —
