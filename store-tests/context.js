@@ -19,8 +19,13 @@
      3. `ZC.config.mode = 'firebase'` and the plan limits canSpend reads;
      4. `ZC.firebase.db` — a compat Firestore pointed at the emulator.
 
-   public/js/seed-data.js is deliberately *not* loaded: it only feeds the demo
-   adapter's seeding, which firebase mode never runs.
+   public/js/seed-data.js is loaded too, before the store, as every page loads
+   it. It used to be left out on the grounds that it only feeds the demo
+   adapter's seeding, which firebase mode never runs; that stopped being true
+   when the projection began publishing only the interests in its vocabulary
+   (`ZC.INTEREST_BY_SLUG`), which is what firestore.rules accepts there. Left
+   out, the store would publish whatever the private profile held, and every
+   spec would be evidence about a branch no page takes.
 
    The IIFE returns early if ZC.store already exists and `require` caches, so
    the store is loaded once per process and every spec shares it. Specs
@@ -194,6 +199,7 @@ function createContext() {
   db.useEmulator(address.host, address.port);
 
   require(path.join(PUBLIC_JS, 'utils.js'));
+  require(path.join(PUBLIC_JS, 'seed-data.js'));
 
   const ZC = globalThis.window.ZC;
   // Mirrors what public/js/firebase-config.js publishes in firebase mode.

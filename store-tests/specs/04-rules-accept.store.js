@@ -224,5 +224,105 @@ module.exports = {
       !!misdirected && misdirected.rejected === 'permission-denied',
       k.show(misdirected && (misdirected.rejected ? misdirected : { email: misdirected.email }))
     );
+
+    /* ---- two more values the public half is held to more tightly ---------- */
+
+    // firestore.rules holds the projection's interests to the vocabulary and its
+    // lastActiveAt to a toISOString() stamp no later than a day past the server's
+    // clock. The private document is held only to a count, a character total and a
+    // short string, so it can carry values the projection's rules refuse — and the
+    // projection is written in the same transaction as the profile save, so either
+    // one fails the save.
+    const vuid = 'rules-vocab';
+    await k.store.updateUser(vuid, {
+      uid: vuid,
+      email: vuid + '@example.com',
+      displayName: 'Vocabulary',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      lastActiveAt: '9999-12-31T23:59:59.999Z',
+      profile: { age: 31, gender: 'woman', interests: ['hiking', '__x__', 'coffee'] }
+    });
+    k.ctx.drainWarnings();
+    const vProjected = await k.admin.get('discovery', vuid);
+
+    t.check(
+      'the shipped code publishes only the interests the vocabulary holds',
+      !!vProjected && k.same(vProjected.profile.interests, ['hiking', 'coffee']),
+      k.show(vProjected && vProjected.profile.interests)
+    );
+
+    t.check(
+      'and an activity stamp no later than now',
+      !!vProjected && Date.parse(vProjected.lastActiveAt) <= Date.now(),
+      k.show(vProjected && vProjected.lastActiveAt)
+    );
+
+    const vOwner = k.rulesEnv.authenticatedContext(vuid).firestore();
+    t.check(
+      'and firestore.rules accepts exactly that',
+      !!vProjected && await k.ok(k.testing.assertSucceeds(setDoc(doc(vOwner, 'discovery', vuid), vProjected))),
+      k.show(vProjected && { interests: vProjected.profile.interests, lastActiveAt: vProjected.lastActiveAt })
+    );
+
+    const verbatim = JSON.parse(JSON.stringify(vProjected || {}));
+    if (verbatim.profile) verbatim.profile.interests = ['hiking', '__x__', 'coffee'];
+    t.check(
+      'while the private interests copied across verbatim are refused',
+      !!vProjected && await k.ok(k.testing.assertFails(setDoc(doc(vOwner, 'discovery', vuid), verbatim))),
+      k.show(verbatim.profile && verbatim.profile.interests)
+    );
+
+    /* ---- the learning map, after a stranger's cards have filled it -------- */
+
+    // Every card's interests go into the swiper's own learning map, and the rules
+    // cap that map at 1200 key characters. Five strangers with one 239-character tag
+    // each — accepted, before the vocabulary — left 1195 of them used, and from then
+    // on a save that learned any slug longer than five characters (42 of the 48), or
+    // two new tags at once, came back permission-denied, page load after page load.
+    // The rules now refuse those tags, but maps filled before they did are
+    // still stored, and they have to heal on their next save rather than stay stuck.
+    // Run the deck's own sequence against the real ruleset as the account itself:
+    // read the stored map, fold one ordinary like into it, save it.
+    const learner = 'rules-learner';
+    const filled = { interestAffinity: {}, likeCount: 0, passCount: 5 };
+    ['a2', 'a3', 'a4', 'a5', 'a6'].forEach(function (u) {
+      filled.interestAffinity[u + '-' + 'y'.repeat(236)] = -0.0525;
+    });
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      await setDoc(doc(c.firestore(), 'users', learner), k.h.userDoc(learner, { learning: filled }));
+    });
+    const engine = require(require('path').join(k.h.ROOT, 'public', 'js', 'matching-engine.js'));
+    const dbBefore = k.ctx.ZC.firebase.db;
+    let saved = null;
+    try {
+      k.ctx.ZC.firebase.db = k.rulesEnv.authenticatedContext(learner).firestore();
+      const me = await k.store.getUser(learner);
+      const ordinary = { uid: 'ordinary', profile: { interests: ['yoga', 'cooking'] } };
+      const next = engine.updateLearning(me.learning, ordinary, 'like');
+      saved = await k.store.saveLearning(learner, next).then(function () { return 'saved'; },
+        function (err) { return (err && err.code) || String(err); });
+    } finally {
+      k.ctx.ZC.firebase.db = dbBefore;
+    }
+    k.ctx.drainWarnings();
+    let kept = null;
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      kept = ((await k.fs.getDoc(doc(c.firestore(), 'users', learner))).data() || {}).learning || null;
+    });
+
+    t.check(
+      'a learning map strangers\' tags had filled saves again on the next swipe, under the real rules',
+      saved === 'saved',
+      String(saved)
+    );
+
+    t.check(
+      'and what it saved is the vocabulary part, with the counts carried on',
+      !!kept && k.same(Object.keys(kept.interestAffinity || {}).sort(), ['cooking', 'yoga']) &&
+        kept.likeCount === 1 && kept.passCount === 5,
+      k.show(kept && { keys: Object.keys(kept.interestAffinity || {}).map(function (key) {
+        return key.length > 12 ? key.slice(0, 6) + '…(' + key.length + ')' : key;
+      }), likeCount: kept.likeCount, passCount: kept.passCount })
+    );
   }
 };

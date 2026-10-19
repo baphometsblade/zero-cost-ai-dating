@@ -251,7 +251,8 @@
      engine must also run in Node with no seed loaded, so metadata lookups are
      best-effort: an explicit index wins, then the global table, then a
      prettified slug. Scores never depend on a table being present beyond the
-     documented category bonus.
+     documented category bonus. Learning does: with a table that holds anything,
+     updateLearning keeps only the tags it holds (see there for why).
      ------------------------------------------------------------------------ */
 
   const GLOBAL_SCOPE = typeof globalThis !== 'undefined' ? globalThis : null;
@@ -657,14 +658,24 @@
 
   /**
    * Recency of activity, halving roughly every week.
+   *
+   * A stamp more than a day ahead of `now` is treated as missing. Age used to be
+   * clamped at zero, so `9999-12-31` scored 1 — active this instant — for as long
+   * as it stood, where a real year of silence scores 0.019. Inside a day it is a
+   * clock running fast, which firestore.rules allows the same day of slack for, and
+   * still reads as active now. The cost falls on a viewer whose own clock runs
+   * more than a day slow: a profile active at the true time is then that far
+   * ahead of their `now`, and its activity reads 0.3 rather than 1, in the
+   * smallest component of the default weights (0.05).
    * @param {string|Date|number} lastActiveAt
    * @param {string|Date|number} now reference time (never read from the clock here)
-   * @returns {number} 0..1 (0.3 when the timestamp is missing or unparseable)
+   * @returns {number} 0..1 (0.3 when the timestamp is missing, unparseable or
+   *   more than a day in the future)
    */
   function activityScore(lastActiveAt, now) {
     const then = toTime(lastActiveAt);
     const ref = toTime(now);
-    if (then === null || ref === null) return 0.3;
+    if (then === null || ref === null || then - ref > DAY_MS) return 0.3;
     const days = Math.max(0, (ref - then) / DAY_MS);
     return clamp(1 / (1 + days / 7), 0, 1);
   }
@@ -1080,26 +1091,51 @@
    * Fold one swipe into the affinity model. Pure — returns a new object.
    * Likes pull a tag's affinity towards +1, passes push it down gently; the map
    * is pruned and capped so the user document stays small.
+   *
+   * Only tags the tag table knows are learned, and any other key the previous
+   * map holds is dropped. A card's interests are another account's to write and
+   * they land in the swiper's own document: a tag named `__x__` made every later
+   * save of the map in that page's session an invalid-argument (Firestore will
+   * not store such a field name), and five 239-character tags filled 1195 of the
+   * 1200 key characters firestore.rules allows the map, so from then on a save
+   * that learned any slug longer than five characters (42 of the 48), or two new
+   * tags at once, was refused, page load after page load. The rules now
+   * hold published interests to the vocabulary; this is for maps filled before
+   * they did, which heal on their next save because the save replaces the map
+   * whole, and for any card that did not come through those rules. The table
+   * is found as section 3 finds it — `opts.tagIndex`, then
+   * `ZC.INTEREST_BY_SLUG`. With neither (Node with nothing loaded, or a page
+   * whose seed-data.js did not arrive), or with an empty one, every tag is
+   * learned and every key kept, as before: a table that vouches for nothing
+   * would otherwise erase everything the account had learned on its next swipe.
    * @param {Object} learning previous `learning` sub-document
    * @param {Object} candidate the swiped UserDoc
    * @param {'like'|'super'|'pass'} action
+   * @param {Object} [opts] `{ tagIndex }`, as scoreCandidate takes it
    * @returns {Object} new learning sub-document
    */
-  function updateLearning(learning, candidate, action) {
+  function updateLearning(learning, candidate, action, opts) {
     const base = (learning && typeof learning === 'object') ? learning : {};
     const next = Object.assign({}, base);
+    const index = resolveTagIndex(opts && opts.tagIndex);
+    const vetting = !!index && Object.keys(index).length > 0;
+    // Own keys only: the global table is a plain object, and `constructor` is a
+    // key every plain object answers to.
+    const known = function (slug) {
+      return !vetting || Object.prototype.hasOwnProperty.call(index, slug);
+    };
 
-    // Copy the existing map, dropping anything non-numeric.
+    // Copy the existing map, dropping anything non-numeric or unknown.
     const map = Object.create(null);
     const prev = (base.interestAffinity && typeof base.interestAffinity === 'object') ? base.interestAffinity : {};
     Object.keys(prev).forEach(function (slug) {
       const v = num(prev[slug]);
-      if (v !== null) map[slug] = clamp(v, -1, 1);
+      if (v !== null && known(slug)) map[slug] = clamp(v, -1, 1);
     });
 
     let likeCount = Math.max(0, Math.floor(num(base.likeCount) || 0));
     let passCount = Math.max(0, Math.floor(num(base.passCount) || 0));
-    const tags = uniqueStrings(prof(candidate).interests);
+    const tags = uniqueStrings(prof(candidate).interests).filter(known);
 
     if (action === 'like' || action === 'super') {
       const rate = action === 'super' ? LEARNING_RATE * SUPER_MULTIPLIER : LEARNING_RATE;

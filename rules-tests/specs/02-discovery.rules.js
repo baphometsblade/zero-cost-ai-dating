@@ -211,6 +211,46 @@ module.exports = {
         }) })
       ))));
 
+    // What an interest may SAY, and why a character total was not enough. Whoever
+    // swipes a card copies its interests into the learning map in their own private
+    // document, and that map has bounds of its own. A tag named `__x__` made every
+    // later save of the swiper's map fail for the rest of the page's session —
+    // Firestore will not store a field name that begins and ends with two
+    // underscores — and five accounts with one 239-character tag each, every one
+    // inside the old 240-character bound, filled 1195 of the 1200 key characters
+    // `affinityOk` allows: from then on a save that learned any slug longer than
+    // five characters (42 of the 48), or two new tags at once, was
+    // permission-denied, page load after page load. Another account's profile must
+    // not be able to stop yours from saving, so the tags are the vocabulary the
+    // editor offers.
+    const withInterests = function (interests) {
+      return h.discoveryDoc(ME, { profile: Object.assign({}, h.discoveryDoc(ME).profile, { interests: interests }) });
+    };
+    t.check('an interest outside the vocabulary is refused, however short',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).set(withInterests(['hiking', 'surfing'])))));
+
+    t.check('as is a tag Firestore will not store as a field name in the swiper\'s learning map',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).set(withInterests(['hiking', '__x__'])))));
+
+    t.check('and one 239-character tag, which the character bound alone let through',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).set(withInterests(['a2-' + 'y'.repeat(236)])))));
+
+    // The control, and it walks the whole list: a slug missing from the rules' copy,
+    // or misspelt there, is an interest the editor offers and the projection can
+    // never publish. Twelve at a time, which is the editor's cap.
+    const vocabulary = require(require('path').join(h.ROOT, 'public', 'js', 'seed-data.js')).INTEREST_TAGS
+      .map(function (tag) { return tag.slug; });
+    const refusedSlugs = [];
+    for (let i = 0; i < vocabulary.length; i += 12) {
+      const twelve = vocabulary.slice(i, i + 12);
+      if (!(await ok(assertSucceeds(as(ME).doc('discovery/' + ME).set(withInterests(twelve)))))) {
+        refusedSlugs.push(twelve.join(','));
+      }
+    }
+    t.check('but every one of the ' + vocabulary.length + ' slugs the editor offers still publishes',
+      vocabulary.length > 0 && refusedSlugs.length === 0,
+      refusedSlugs.length ? 'refused: ' + refusedSlugs.join(' | ') : vocabulary.length + ' slugs');
+
     // The same pair in the public copy, which is the one that matters: a
     // padded projection is downloaded by every signed-in account building a deck.
     t.check('a legal interestedIn word repeated past the length cap is refused here too',
@@ -281,6 +321,44 @@ module.exports = {
 
     t.check('the lastActiveAt-only refresh the store makes is allowed',
       await ok(assertSucceeds(as(ME).doc('discovery/' + ME).update({ lastActiveAt: '2026-02-02T00:00:00.000Z' }))));
+
+    // A stamp from the future. `listCandidates` walks this collection newest-first and
+    // the engine scored a stamp ahead of the clock as active this instant, so
+    // `9999-12-31T23:59:59.999Z` put one account at the head of every deck's scan, at
+    // full activity score, for as long as it stood — where a real year of silence
+    // scores 0.019.
+    const ahead = function (hours) { return new Date(Date.now() + hours * 3600000).toISOString(); };
+    t.check('a lastActiveAt in the far future is refused',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).update({ lastActiveAt: '9999-12-31T23:59:59.999Z' }))));
+
+    t.check('so is one more than a day ahead of the server\'s clock',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).update({ lastActiveAt: ahead(25) }))));
+
+    t.check('and a stamp that is not the shape toISOString() writes',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).update({ lastActiveAt: '2026-02-02 00:00' }))));
+
+    // The right shape is not enough on its own. The ceiling counts an hour of 25 as
+    // one in the morning of the next day, and `Date.parse` reads it as no time at all.
+    // Yesterday's date, so the moment it counts as is never past the ceiling and only
+    // the shape can be what refuses it.
+    const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    t.check('as is an hour past 23, which no clock writes',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).update({ lastActiveAt: yesterday + 'T25:00:00.000Z' }))));
+
+    t.check('and a day the calendar does not have',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).update({ lastActiveAt: '2026-02-30T00:00:00.000Z' }))));
+
+    // stampOk's size cap is gone from this field, so the pattern is what bounds it: a
+    // real stamp with padding behind it has to fail for the padding alone.
+    t.check('and a real stamp with anything after it',
+      await ok(assertFails(as(ME).doc('discovery/' + ME).update({
+        lastActiveAt: new Date().toISOString() + 'x'.repeat(200)
+      }))));
+
+    // The control on the other side of the allowance. A device whose clock runs fast
+    // is not an attacker, and every stamp the store writes comes from that clock.
+    t.check('but a device clock running hours fast still refreshes',
+      await ok(assertSucceeds(as(ME).doc('discovery/' + ME).update({ lastActiveAt: ahead(23) }))));
 
     t.check('the owner can delete their projection',
       await ok(assertSucceeds(as(ME).doc('discovery/' + ME).delete())));

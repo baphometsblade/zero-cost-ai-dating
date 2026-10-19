@@ -1930,6 +1930,46 @@
     return out;
   }
 
+  /**
+   * The interests the projection may publish: slugs from the vocabulary
+   * seed-data.js publishes, which is the list firestore.rules holds
+   * `discovery/{uid}` to. The private document is held only to a count and a
+   * character total, so without this a profile the rules accept privately
+   * could hold a tag they refuse publicly, and updateUser — which writes both in
+   * one transaction — would fail the whole save for it. With no table loaded,
+   * or an empty one (the profile editor's own failure case), the list goes
+   * across as it is, since nothing here could tell a real slug from any other.
+   * @param {*} raw the private profile's interests
+   * @returns {Array} at most twelve of them
+   */
+  function projectInterests(raw) {
+    const known = ZC.INTEREST_BY_SLUG;
+    const list = Array.isArray(raw) ? raw : [];
+    const kept = isPlainObject(known) && Object.keys(known).length > 0
+      ? list.filter(function (slug) {
+        return typeof slug === 'string' && Object.prototype.hasOwnProperty.call(known, slug);
+      })
+      : list;
+    return kept.slice(0, 12);
+  }
+
+  /**
+   * The activity stamp the projection may publish: the private one, in
+   * toISOString()'s shape, unless it is later than now — then now. A missing
+   * or unreadable one is now as well. firestore.rules holds the projection's
+   * copy to a day past the server's clock and the private one only to a size,
+   * so a stamp stored while this device's clock ran more than a day fast would
+   * otherwise fail every profile save, projection and all, until real time
+   * caught it up.
+   * @param {*} raw the private document's lastActiveAt
+   * @returns {string} an ISO timestamp
+   */
+  function projectStamp(raw) {
+    const iso = toIso(raw);
+    const now = nowIso();
+    return iso && Date.parse(iso) <= Date.parse(now) ? iso : now;
+  }
+
   function projectDiscovery(user) {
     const p = isPlainObject(user.profile) ? user.profile : {};
     const f = isPlainObject(user.preferences) ? user.preferences : {};
@@ -1942,14 +1982,14 @@
       uid: String(user.uid),
       displayName: String(user.displayName || ''),
       profileComplete: !!user.profileComplete,
-      lastActiveAt: user.lastActiveAt || nowIso(),
+      lastActiveAt: projectStamp(user.lastActiveAt),
       profile: {
         age: num(p.age),
         gender: p.gender || 'other',
         pronouns: String(p.pronouns || ''),
         bio: String(p.bio || ''),
         photos: Array.isArray(p.photos) ? p.photos.slice(0, 6) : [],
-        interests: Array.isArray(p.interests) ? p.interests.slice(0, 12) : [],
+        interests: projectInterests(p.interests),
         // Only the five axes, never whatever else the private map happens to hold.
         // `firestore.rules` closes the key list on both sides of this projection, so
         // copying it across verbatim would let a private document the rules accept

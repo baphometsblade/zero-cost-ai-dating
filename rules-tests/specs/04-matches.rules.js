@@ -51,6 +51,13 @@ module.exports = {
     t.check('a pass does not count as a like either',
       await ok(assertFails(as(ME).doc('matches/' + h.pairId(ME, 'nobody')).set(h.matchDoc(ME, 'nobody')))));
 
+    // A match with no messages sorts by when it was made, so a stamp from the future
+    // pins it above every real conversation in the other person's list.
+    t.check('but not with a createdAt from the future, even once they have',
+      await ok(assertFails(as(ME).doc('matches/' + h.pairId(ME, LIKER)).set(
+        h.matchDoc(ME, LIKER, { createdAt: '9999-12-31T23:59:59.999Z' })
+      ))));
+
     t.check('you CAN create the match once they have liked you',
       await ok(assertSucceeds(as(ME).doc('matches/' + h.pairId(ME, LIKER)).set(h.matchDoc(ME, LIKER)))));
 
@@ -153,6 +160,30 @@ module.exports = {
       await ok(assertSucceeds(as(ME).doc('matches/' + h.pairId(ME, LIKER)).update({
         lastMessage: 'hello', lastMessageAt: '2026-01-05T00:00:00.000Z'
       }))));
+
+    // Both people's conversation lists order by these two stamps, and nothing else
+    // about a match update stops a participant rewriting either.
+    t.check('a preview stamped in the future is refused',
+      await ok(assertFails(as(ME).doc('matches/' + h.pairId(ME, LIKER)).update({
+        lastMessage: 'pinned', lastMessageAt: '9999-12-31T23:59:59.999Z'
+      }))));
+
+    t.check('and so is moving when the match was made into the future',
+      await ok(assertFails(as(ME).doc('matches/' + h.pairId(ME, LIKER)).update({
+        createdAt: '9999-12-31T23:59:59.999Z'
+      }))));
+
+    // `is number && >= 0` let Infinity through, and the other side's badge printed
+    // "Infinity unread". A count is a whole number, and one no conversation reaches.
+    const countOf = function (value) {
+      const patch = {};
+      patch['unread.' + LIKER] = value;
+      return as(ME).doc('matches/' + h.pairId(ME, LIKER)).update(patch);
+    };
+    t.check('an unread count of Infinity is refused', await ok(assertFails(countOf(Infinity))));
+    t.check('as is a fractional one', await ok(assertFails(countOf(1.5))));
+    t.check('and one past a million', await ok(assertFails(countOf(1000001))));
+    t.check('while an ordinary count still saves', await ok(assertSucceeds(countOf(3))));
 
     t.check('the participant list itself is frozen',
       await ok(assertFails(as(ME).doc('matches/' + h.pairId(ME, LIKER)).update({ users: [ME, 'someone-else'].sort() }))));

@@ -56,6 +56,25 @@ module.exports = {
         Object.assign(h.messageDoc(ME, 'hello'), { createdAt: 'x'.repeat(200) })
       ))));
 
+    // A thread is ordered by these stamps on both sides, so a message dated
+    // 9999-12-31 sat below every reply ever sent after it, in both people's view.
+    t.check('a message stamped in the future is refused',
+      await ok(assertFails(as(ME).collection('matches/' + mine + '/messages').add(
+        Object.assign(h.messageDoc(ME, 'pinned'), { createdAt: '9999-12-31T23:59:59.999Z' })
+      ))));
+
+    t.check('so is one a day and an hour ahead of the server\'s clock',
+      await ok(assertFails(as(ME).collection('matches/' + mine + '/messages').add(
+        Object.assign(h.messageDoc(ME, 'pinned'), { createdAt: new Date(Date.now() + 25 * 3600000).toISOString() })
+      ))));
+
+    // The control on the other side of the allowance: a phone whose clock runs fast
+    // is not an attacker, and the store stamps every message from that clock.
+    t.check('but one from a device clock running hours fast still sends',
+      await ok(assertSucceeds(as(ME).collection('matches/' + mine + '/messages').add(
+        Object.assign(h.messageDoc(ME, 'fast clock'), { createdAt: new Date(Date.now() + 23 * 3600000).toISOString() })
+      ))));
+
     t.check('a participant can send a message as themselves',
       await ok(assertSucceeds(as(ME).collection('matches/' + mine + '/messages').add(h.messageDoc(ME, 'hello')))));
 
