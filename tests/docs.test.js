@@ -15,19 +15,28 @@
    become untrue while keeping its number is beyond any test in this file, and
    dressing that up would be worse than admitting it.
 
-   This suite reads only files. No browser, no emulator, no network — it runs
-   in `npm test` on every push, which is the whole point: the check that
-   catches stale documentation has to be the cheapest one there is.
+   Later sections hold three more promises the same way: (d) that every spec
+   file is described in its suite's README, (e) that CI runs the unit suite on
+   the oldest Node package.json admits, and (f) that the runner
+   `npm run check:claims` starts prints a summary it can read.
+
+   This suite reads files, and starts one child `node --test` over a two-test
+   fixture to see what the runner prints. No browser, no emulator, no network
+   — it runs in `npm test` on every push, which is the whole point: the check
+   that catches stale documentation has to be the cheapest one there is.
    ========================================================================== */
 'use strict';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const claims = require(path.join(ROOT, 'scripts', 'claims.js'));
+const checkClaims = require(path.join(ROOT, 'scripts', 'check-claims.js'));
 
 /** Every markdown file that describes this project to a reader. */
 const DOCS = [
@@ -378,4 +387,88 @@ test('every spec file is named in its suite\'s README', function () {
   assert.deepEqual(unmentioned, [],
     'specs that exist but are undocumented — a reader of the README would not know they run:\n  ' +
     unmentioned.join('\n  '));
+});
+
+/* --------------------------------------------------------------------------
+   (e) the Node versions package.json admits
+   -------------------------------------------------------------------------- */
+
+/**
+ * The Node majors the CI `verify` job runs the unit suite on, read from its
+ * `node: [...]` matrix line.
+ * @returns {number[]} the majors, in the order the workflow lists them
+ */
+function verifyMatrix() {
+  const workflow = read('.github/workflows/ci.yml');
+  // The job runs from its `  verify:` key to the next two-space-indented key.
+  const job = /\n {2}verify:\n([\s\S]*?)(?=\n {2}[a-z][\w-]*:\n|$)/.exec(workflow);
+  assert.ok(job, '.github/workflows/ci.yml no longer has a `verify` job for this test to read');
+  const line = /^\s+node:\s*\[([^\]]*)\]/m.exec(job[1]);
+  assert.ok(line, 'the verify job no longer lists its Node versions as `node: [...]`');
+  return line[1].split(',').map(function (entry) { return Number(entry.replace(/['"\s]/g, '')); });
+}
+
+test('the oldest Node package.json admits is one CI runs the unit suite on', function () {
+  // package.json said ">=18" while the matrix ran 20 and 22, and on 18 the
+  // suite fails four checks: the vault and uid tests reach for the global
+  // `crypto`, which Node 18 does not have. Nothing ran the floor, so the
+  // promise outlived the truth of it, and docs/DEPLOY.md repeated it. The
+  // floor is the version most likely to break, so it is the one CI must run.
+  const engines = (JSON.parse(read('package.json')).engines || {}).node || '';
+  const floor = /^>=\s*(\d+)(?:\.\d+){0,2}$/.exec(engines.trim());
+  assert.ok(floor, 'package.json engines.node is ' + JSON.stringify(engines) + '; this test reads ' +
+    'a single ">=N" floor and cannot vouch for anything else');
+
+  const matrix = verifyMatrix();
+  assert.ok(matrix.indexOf(Number(floor[1])) !== -1,
+    'package.json admits Node ' + floor[1] + ' (engines "' + engines + '"), but the CI verify ' +
+    'matrix runs only ' + JSON.stringify(matrix) + ', so nothing shows the suite passes there. ' +
+    'Add ' + floor[1] + ' to the matrix, or raise engines to the oldest version it does run.');
+});
+
+/* --------------------------------------------------------------------------
+   (f) the one total no test inside the run can see
+   -------------------------------------------------------------------------- */
+
+test('npm run check:claims can read the runner it starts, whatever Node defaults to', function () {
+  // scripts/check-claims.js holds `npm test`'s total to scripts/claims.js by
+  // running the suite again and reading "# pass N" out of the summary. That
+  // line is TAP, which Node chooses by itself only when stdout is not a
+  // terminal, and only up to Node 22. From Node 23 the default is the spec
+  // reporter everywhere, which prints "ℹ pass N", so on the current LTS the
+  // check exited 2 every time while `npm test` itself passed.
+  //
+  // So this runs the exact arguments the script uses, from a fixture with one
+  // passing and one failing test, and reads the result with the script's own
+  // parser. It has to be a real run: the default is decided by the Node doing
+  // the running, which is the one thing a captured string cannot show. It also
+  // means that on Node 22 and older this passes whether or not the script
+  // names its reporter; the 24 in CI's verify matrix is what makes it bite.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zc-claims-'));
+  let run;
+  try {
+    fs.writeFileSync(path.join(dir, 'pass.test.js'),
+      "require('node:test')('passes', function () {});\n", 'utf8');
+    fs.writeFileSync(path.join(dir, 'fail.test.js'),
+      "require('node:test')('fails', function () { throw new Error('on purpose'); });\n", 'utf8');
+    // This file is itself running under `node --test`, which marks its
+    // environment with NODE_TEST_CONTEXT; a runner that inherits the mark
+    // refuses to recurse and runs nothing. check:claims is started by npm,
+    // never from inside a test, so its runner never carries the mark.
+    const env = Object.assign({}, process.env);
+    delete env.NODE_TEST_CONTEXT;
+    // A runner that never finished would hold up the whole unit run rather
+    // than fail this test, so it is killed after a minute; spawnSync then
+    // reports ETIMEDOUT as run.error, and the first assertion below fails.
+    run = spawnSync(process.execPath, checkClaims.RUN,
+      { cwd: dir, encoding: 'utf8', env: env, timeout: 60000 });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  assert.ifError(run.error);
+  const output = (run.stdout || '') + (run.stderr || '');
+  assert.deepEqual(checkClaims.summarise(output), { pass: 1, fail: 1 },
+    'Node ' + process.version + ' ran ' + JSON.stringify(checkClaims.RUN) + ' and check:claims ' +
+    'could not read the totals back out of what it printed:\n' + output.split('\n').slice(-12).join('\n'));
 });

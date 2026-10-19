@@ -43,14 +43,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
-    # package.json advertises engines >= 18, so the suite is run on more than one major.
+    # package.json advertises engines >= 20, so the suite is run on more than one major.
     # Pinning a single version once hid a real breakage: the test runner's handling of a
     # positional directory argument changed after Node 20, so `npm test` silently ran no
-    # tests at all on newer runtimes while CI stayed green.
+    # tests at all on newer runtimes while CI stayed green. Leaving out the newest LTS hid
+    # another: from Node 23 the runner's default reporter is no longer TAP, so on Node 24
+    # `npm run check:claims` could not read the total it checks while `npm test` passed.
+    # The oldest version package.json admits must be on this list, because it is the one
+    # most likely to break: it once said >= 18, nothing ran 18, and four tests fail there.
+    # tests/docs.test.js holds the two files to that.
     strategy:
       fail-fast: false
       matrix:
-        node: ['20', '22']
+        node: ['20', '22', '24']
 
     steps:
       # Fetch the sources under test. Action majors are kept current rather than
@@ -61,7 +66,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      # Node 20 LTS and the next LTS line; package.json requires >= 18.
+      # 20 is the oldest Node package.json admits; 22 and 24 are the LTS lines after it.
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
@@ -78,10 +83,11 @@ jobs:
         run: npm test
 
       # The one number no test inside the run can see: `npm test`'s own total, which the
-      # README quotes. This runs the suite again in a child process and reads the count
-      # back out of its TAP summary — about a second, and the only way the claim can be
-      # checked at all. See scripts/claims.js for why the totals are enforced from both
-      # ends; the other three suites check their own.
+      # README quotes. This runs the suite again in a child process, naming the TAP
+      # reporter so every Node in the matrix prints the same summary, and reads the count
+      # back out of it — a couple of seconds, and the only way the claim can be checked
+      # at all. See scripts/claims.js for why the totals are enforced from both ends; the
+      # other three suites check their own.
       - name: Check the unit total matches what the README claims
         run: npm run check:claims
 

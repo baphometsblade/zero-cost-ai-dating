@@ -11,9 +11,11 @@
      • auth.js runs its boot as a side effect of loading, so "reloading the
        page" is modelled by dropping ZC.auth plus the require cache entry and
        requiring the file again — see loadAuth().
-     • Node 22 ships crypto.subtle, so the real SHA-256 path is the one under
-       test; the documented weak fallback is covered separately by hiding
-       window.crypto for one test.
+     • Every Node package.json admits (20 and later) has a global
+       crypto.subtle, so the real SHA-256 path is the one under test; the
+       documented weak fallback is covered separately by hiding window.crypto
+       for one test. Node 18 has no global crypto at all, and there the vault
+       tests fail, which is one reason package.json no longer admits it.
    ========================================================================== */
 'use strict';
 
