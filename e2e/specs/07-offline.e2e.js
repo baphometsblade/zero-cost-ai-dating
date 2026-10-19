@@ -3,7 +3,8 @@
    runs its own server precisely so it can take it away.
 
    And the other side of caching: after a deploy, a returning visitor runs that
-   deploy's scripts, not the ones their browser kept. */
+   deploy's scripts, not the ones their browser kept — and offline, the page
+   they last opened comes back with the scripts it ran, from one deploy. */
 'use strict';
 
 const fs = require('node:fs');
@@ -63,6 +64,151 @@ async function deployedScriptRuns(h, workers) {
     if (server) await server.stop();
     fs.rmSync(site, { recursive: true, force: true });
   }
+}
+
+/**
+ * Let the worker precache a returning visitor's shell, deploy a changed page
+ * and a changed script under it — and not sw.js, which is the usual deploy —
+ * visit that page online, then take the server away and open it again.
+ *
+ * Offline, the page and its script have to be the deploy the visitor last saw
+ * online. On Firebase Hosting they were not: cleanUrls answers every page at
+ * its clean URL, so the worker stored the visit under `/matches`, while an
+ * offline navigation looks a page up by its file name, `matches.html`, which
+ * only the install ever wrote. The scripts live under one name and every
+ * visit refreshed them, so offline the install's page ran the latest scripts.
+ * GitHub Pages serves the file name itself, so there the names already agreed;
+ * both shapes run, so a fix for one host cannot break the other.
+ * @param {Object} h the harness
+ * @param {Object} browser the browser to open a context of this check's own in
+ * @param {Object} viewport one of h.VIEWPORTS
+ * @param {string} mount '' for the Firebase Hosting shape, or the project
+ *   subpath GitHub Pages serves the site under
+ * @returns {Promise<Object>} what the page ran online and offline, and any errors
+ */
+async function deployedPageOffline(h, browser, viewport, mount) {
+  const site = fs.mkdtempSync(path.join(os.tmpdir(), 'zc-offline-deploy-'));
+  let server = null;
+  let session = null;
+  try {
+    fs.cpSync(h.PUBLIC_DIR, site, { recursive: true });
+    server = await h.startServer(site, mount ? { mountPath: mount } : undefined);
+    session = await h.openSession(browser, viewport);
+    const page = session.page;
+    // signIn appends '/index.html' to what it is given.
+    await h.signIn(page, server.base.replace(/\/$/, ''));
+    // An active worker has finished its install, and its install stores the
+    // whole shell before it completes — so from here the cache holds deploy 1.
+    const active = await page.evaluate(function () {
+      return Promise.race([
+        navigator.serviceWorker.ready.then(function (reg) { return !!(reg && reg.active); }),
+        new Promise(function (resolve) { setTimeout(function () { resolve(false); }, 15000); })
+      ]);
+    });
+    if (!active) return { active: false, errors: session.errors.slice() };
+
+    // The deploy: the page and its script change, sw.js does not.
+    const html = path.join(site, 'matches.html');
+    fs.writeFileSync(html, fs.readFileSync(html, 'utf8').replace('<title>', '<title>Deploy 2 · '));
+    fs.appendFileSync(path.join(site, 'js', 'matches.js'), '\n;window.__zcPageDeploy = 2;\n');
+
+    // Asked for by its file name, the way the app's own links ask: Hosting
+    // answers with a 301 to `/matches`, Pages with the page.
+    await page.goto(server.base + 'matches.html', { waitUntil: 'load' });
+    const online = await page.evaluate(function () {
+      return { path: location.pathname, title: document.title, js: window.__zcPageDeploy || 1 };
+    });
+
+    // The worker writes the cache after it has answered, so wait for those
+    // writes rather than for a delay: until the new script is stored and no
+    // copy of this page from before the deploy is left anywhere in the shell.
+    // A worker that never replaces the old copy runs out the clock, and that
+    // alone fails the check.
+    const settled = await page.evaluate(function () {
+      const deadline = Date.now() + 10000;
+      function entries(cache) {
+        return cache.keys().then(function (requests) {
+          return Promise.all(requests.map(function (request) {
+            return cache.match(request).then(function (res) { return res.text(); });
+          }));
+        });
+      }
+      function poll() {
+        return caches.keys().then(function (names) {
+          const mine = names.filter(function (name) { return name.indexOf('zc-static:') === 0; });
+          return Promise.all(mine.map(function (name) { return caches.open(name).then(entries); }));
+        }).then(function (perCache) {
+          const bodies = [].concat.apply([], perCache);
+          const script = bodies.some(function (body) { return body.indexOf('__zcPageDeploy') !== -1; });
+          const stale = bodies.some(function (body) { return body.indexOf('<title>Matches ·') !== -1; });
+          if (script && !stale) return true;
+          if (Date.now() > deadline) return false;
+          return new Promise(function (resolve) { setTimeout(resolve, 200); }).then(poll);
+        });
+      }
+      return poll();
+    });
+
+    // Offline, back to the address the visitor was on: `/matches` on Hosting,
+    // `…/matches.html` on Pages. A page served from cache with nothing behind
+    // it may log same-origin resource failures, and only those are let through.
+    session.expectNetworkErrors(true);
+    await server.stop();
+    let offline = null;
+    try {
+      await page.goto(server.origin + online.path, { waitUntil: 'load', timeout: 15000 });
+      offline = await page.evaluate(function () {
+        return { title: document.title, js: window.__zcPageDeploy || 1 };
+      });
+    } catch (err) {
+      offline = { failed: err && err.message ? err.message.split('\n')[0] : String(err) };
+    }
+    return { active: true, online: online, settled: settled, offline: offline, errors: session.errors.slice() };
+  } finally {
+    if (session) await session.context.close();
+    if (server) await server.stop();
+    fs.rmSync(site, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Which deploy a page load ran: its page by title, its script by the marker.
+ * @param {Object|null} side one load from deployedPageOffline
+ * @returns {{page:number, script:number}|null} null when the load failed
+ */
+function deployOf(side) {
+  if (!side || side.failed) return null;
+  return { page: /^Deploy 2 · /.test(side.title || '') ? 2 : 1, script: side.js };
+}
+
+/**
+ * Whether deployedPageOffline saw one deploy throughout: the new page and the
+ * new script online, the same two offline, and nothing logged as an error.
+ * And the visit has to have REPLACED the copy the worker installed, not
+ * written one beside it: a worker that stored and looked up pages under a
+ * wrong name would agree with itself on the page just visited, and serve the
+ * 404 page offline for every page it installed and nobody has visited since.
+ * @param {Object} seen what deployedPageOffline returned
+ * @returns {boolean}
+ */
+function oneDeployOffline(seen) {
+  const fresh = function (side) { const d = deployOf(side); return !!d && d.page === 2 && d.script === 2; };
+  return seen.active && seen.settled && fresh(seen.online) && fresh(seen.offline) && seen.errors.length === 0;
+}
+
+/**
+ * The same, short enough for the runner's one-line detail.
+ * @param {Object} seen what deployedPageOffline returned
+ * @returns {string}
+ */
+function describeDeploys(seen) {
+  if (!seen.active) return 'no active worker after 15 s; errors: ' + seen.errors.join(' | ');
+  const side = function (load) {
+    const d = deployOf(load);
+    return d ? 'page ' + d.page + ' script ' + d.script : 'FAILED ' + (load && load.failed);
+  };
+  return 'online ' + side(seen.online) + ' at ' + seen.online.path + '; offline ' + side(seen.offline) +
+    '; cache settled: ' + seen.settled + '; errors: ' + (seen.errors.join(' | ') || 'none');
 }
 
 module.exports = {
@@ -198,5 +344,15 @@ module.exports = {
       withWorker.controlled && withWorker.ran === 2, JSON.stringify(withWorker));
     const withoutWorker = await deployedScriptRuns(h, 'block');
     t.check('and with no service worker at all', withoutWorker.ran === 2, JSON.stringify(withoutWorker));
+
+    /* ---- after a deploy, offline: the page and its scripts from one deploy ---- */
+
+    const browser = page.context().browser();
+    const onHosting = await deployedPageOffline(h, browser, ctx.viewport, '');
+    t.check('offline after a deploy, a page visited online and its scripts are one deploy (Firebase Hosting)',
+      oneDeployOffline(onHosting), describeDeploys(onHosting));
+    const onPages = await deployedPageOffline(h, browser, ctx.viewport, '/zero-cost-ai-dating');
+    t.check('and under a GitHub Pages project subpath',
+      oneDeployOffline(onPages), describeDeploys(onPages));
   }
 };

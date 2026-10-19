@@ -110,6 +110,27 @@ function rebuilt(response) {
   });
 }
 
+/**
+ * The name a page is cached under, from the URL a navigation asked for.
+ *
+ * The address bar need not say `matches.html`: on Firebase Hosting cleanUrls
+ * answers each page at its clean URL (`/matches`) and the landing page at '/',
+ * and on GitHub Pages the app lives under the project subpath, which is its
+ * landing page.
+ * Strip BASE, then map what is left back to its file ('' -> index.html,
+ * 'matches' -> matches.html); a query string is no part of the name.
+ * Both halves of the fetch handler go through this — the write a visit makes
+ * and the lookup an offline navigation makes — so the two cannot disagree.
+ * @param {URL} url the navigation's URL
+ * @returns {string} a path relative to BASE, as CORE names it
+ */
+function pageKey(url) {
+  const rel = url.pathname.indexOf(BASE) === 0
+    ? url.pathname.slice(BASE.length)
+    : url.pathname.replace(/^\/+/, '');
+  return rel === '' ? 'index.html' : rel.replace(/\.html$/, '') + '.html';
+}
+
 self.addEventListener('install', function (event) {
   // No catch here on purpose: if any CORE asset fails to fetch, installation
   // must fail so the previous worker — and its working cache — stay active.
@@ -179,9 +200,22 @@ self.addEventListener('fetch', function (event) {
   event.respondWith(
     fetch(request).then(function (response) {
       if (response && response.ok) {
-        // Stored without its redirect for the same reason as the precache: a
-        // live visit to `/matches.html` arrives redirected, and this copy is the
-        // one an offline visit to `/matches` would be served.
+        // A page is stored under its file name, the one an offline navigation
+        // looks it up by, not under the URL the visit asked for. On Firebase
+        // Hosting those are never the same: cleanUrls answers each page at its
+        // clean URL, `/matches`, and the copy a visit wrote under that was one
+        // nothing read. Offline, the page stayed the one the worker installed
+        // with, while every visit refreshed the scripts it runs: after any
+        // deploy that left sw.js alone, the install's page ran the newer
+        // scripts. GitHub Pages names the file, but its landing page and any
+        // query string parted the two names there too.
+        const key = request.mode === 'navigate' ? pageKey(url) : request;
+        // Stored without its redirect for the same reason as the precache: on
+        // Hosting anything fetched by its `.html` name arrives redirected, and
+        // under that name it is the copy an offline navigation is served. A
+        // navigation never arrives redirected: its redirect mode is manual, so
+        // the worker is handed the 301 itself — not ok, so not stored — and the
+        // browser follows it with a second navigation, to `/matches`.
         //
         // `return cache.put(...)`: the write's promise used to be dropped inside
         // the callback, so the `.catch` below caught only `caches.open` and a
@@ -189,27 +223,16 @@ self.addEventListener('fetch', function (event) {
         const copy = response.clone();
         caches.open(CACHE)
           .then(function (cache) {
-            return unredirected(copy).then(function (clean) { return cache.put(request, clean); });
+            return unredirected(copy).then(function (clean) { return cache.put(key, clean); });
           })
           .catch(function () {});
       }
       return response;
     }).catch(function () {
-      // Navigations are cached under their file names, but the address bar
-      // says BASE, BASE + 'matches', … — on Firebase Hosting because cleanUrls
-      // drops the .html, on GitHub Pages because the app lives under the
-      // project subpath. Strip BASE first, then map what is left back to its
-      // page ('' -> index.html, 'matches' -> matches.html) so offline
-      // navigation serves the right shell on either host, never the 404 page
-      // for a page that is actually cached.
+      // A navigation is answered with its page, or with the 404 page when that
+      // page is not cached — never with a network error for a page that is.
       if (request.mode === 'navigate') {
-        const rel = url.pathname.indexOf(BASE) === 0
-          ? url.pathname.slice(BASE.length)
-          : url.pathname.replace(/^\/+/, '');
-        const page = rel === ''
-          ? 'index.html'
-          : rel.replace(/\.html$/, '') + '.html';
-        return caches.match(page).then(function (hit) {
+        return caches.match(pageKey(url)).then(function (hit) {
           return hit || caches.match('404.html');
         });
       }
