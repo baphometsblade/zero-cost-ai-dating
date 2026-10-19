@@ -682,8 +682,17 @@
     return ZC.util.fmtDate(dateLike) || key;
   }
 
-  /** The relative stamp under a bubble, with the exact time as its title. */
+  /**
+   * The relative stamp under a bubble, with the exact time as its title — or
+   * 'Sending…' for a message the server does not have yet. Only the Firestore
+   * adapter delivers those (see `listenMessages` in data-store.js): with no
+   * connection the SDK shows its own write at once and holds it in memory, so
+   * a time here would say "sent" about a message leaving the page would lose.
+   * @param {Object} message a MessageDoc
+   * @returns {string}
+   */
   function stampText(message) {
+    if (message.pending) return 'Sending…';
     return ZC.util.timeAgo(message.createdAt) || '';
   }
 
@@ -900,6 +909,10 @@
     const next = continuationOf(messages);
     let added = [];
     if (next !== -1) {
+      // The drawn copies of the overlap are swapped for this delivery's, since
+      // the same message can come back changed: sent, where it was sending.
+      // `refreshStamps` below redraws every stamp from these.
+      state.rendered = state.rendered.slice(0, state.rendered.length - next).concat(messages.slice(0, next));
       added = messages.slice(next);
       added.forEach(appendMessage);
     } else {
@@ -1009,6 +1022,29 @@
   }
 
   /**
+   * Ask before leaving while a message is on its way. In firebase mode a send
+   * made with no connection does not settle: the SDK holds the write in this
+   * page's memory until the server takes it, and the composer has already been
+   * cleared, so leaving the page is the one thing that loses the words outright.
+   * The bubble says 'Sending…' meanwhile. The question lasts until the whole
+   * send has finished, which is a little longer than the message: the
+   * conversation's preview and the other side's unread count are written after
+   * it, and leaving in between loses those. Browsers show their own wording;
+   * all this can do is ask for the prompt.
+   *
+   * sendMessage adds it for the length of a send and takes it away after,
+   * because a page with a `beforeunload` listener is never kept in Firefox's
+   * back-forward cache, and this page is built to be restored from it (see the
+   * `pageshow` handler).
+   * @param {BeforeUnloadEvent} event the page is about to be left
+   * @returns {void}
+   */
+  function askBeforeLeaving(event) {
+    event.preventDefault();
+    event.returnValue = '';
+  }
+
+  /**
    * Send whatever is in the composer. Empty and whitespace-only messages are
    * ignored; anything longer than the cap is trimmed to fit.
    * @returns {Promise<void>}
@@ -1020,6 +1056,7 @@
     if (!text) return;
 
     state.sending = true;
+    window.addEventListener('beforeunload', askBeforeLeaving);
     setComposer('');
     if (dom.send) {
       dom.send.disabled = true;
@@ -1041,6 +1078,7 @@
       announce('The message could not be sent.');
     } finally {
       state.sending = false;
+      window.removeEventListener('beforeunload', askBeforeLeaving);
       if (dom.send) dom.send.removeAttribute('aria-busy');
       syncComposer();
     }
@@ -1929,6 +1967,7 @@
 
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('focus', onVisible);
+
     window.addEventListener('pagehide', teardown);
     // `pagehide` tears the subscription down and the back-forward cache can
     // restore this document without re-running any of the boot path, so the

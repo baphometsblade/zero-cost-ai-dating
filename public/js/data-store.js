@@ -2027,6 +2027,56 @@
   }
 
   /**
+   * Each account's birthdate and the age stored beside it, as this page last
+   * read or saved its own document.
+   *
+   * Only the private document holds a birthdate; `discovery/{uid}` holds the
+   * age the last save derived from it, and nothing else rewrote that. So a
+   * birthday since the last save reached nobody else's deck: a 29-year-old
+   * went on being served as 28, and passed a 28-and-under filter, until
+   * something next saved their document through `updateUser` (Profile,
+   * Settings, Plans, a block). The demo deck reads the private documents,
+   * re-derived, so there they were 29 on the day. `setLastActive` is the
+   * write path every visit takes (at most once every five minutes, see
+   * `touchActive`), and its `discovery/{uid}` update is the one write to the
+   * projection that a visit makes when nothing is saved; this is how it
+   * knows the age without a read. auth.js loads the account's document
+   * through `getUser` (then `createUser` or `updateUser` when it must) before
+   * either caller of `touchActive` runs. If that read does not get through,
+   * auth.js goes on with an in-memory copy and nothing is noted here: the
+   * touch then carries no age, and the projection keeps the one it had.
+   */
+  const ageOnRecord = {};
+
+  /**
+   * Remember what a read or a save of `users/{uid}` said about the age.
+   * @param {string} uid the account
+   * @param {Object|null} data the document as stored, before normalizeUser
+   * @returns {void}
+   */
+  function noteAge(uid, data) {
+    const p = data && isPlainObject(data.profile) ? data.profile : null;
+    if (!uid || !p) return;
+    ageOnRecord[uid] = { birthdate: p.birthdate || '', age: num(p.age) };
+  }
+
+  /**
+   * The age a birthday has brought the account to since its profile was last
+   * saved, or null when the stored age is still right or nothing is known.
+   * @param {string} uid the account
+   * @returns {number|null}
+   */
+  function ageSinceSave(uid) {
+    const known = ageOnRecord[uid];
+    if (!known || !known.birthdate || !util.ageFromBirthdate) return null;
+    const age = util.ageFromBirthdate(known.birthdate);
+    // Inside the bounds discovery's rules put on `age`, or the refusal would
+    // take the timestamp down with it.
+    if (age === null || age === known.age || age < 18 || age > 120) return null;
+    return age;
+  }
+
+  /**
    * The last `usage` this page saw stored for each user, by uid. Only read
    * when a bump's transaction failed before its read landed — offline, in
    * practice. Without it the optimistic answer would restart the day at 1 for
@@ -2707,7 +2757,9 @@
 
     async getUser(uid) {
       if (!uid) return null;
-      const user = docToUser(await db().collection('users').doc(uid).get());
+      const snap = await db().collection('users').doc(uid).get();
+      if (snap && snap.exists) noteAge(uid, snap.data());
+      const user = docToUser(snap);
       if (user) noteUsage(uid, user.usage);
       return user;
     },
@@ -2727,6 +2779,7 @@
       user.lastActiveAt = stamp;
       user.usage = normalizeUsage({ date: todayKey() });
       await db().collection('users').doc(user.uid).set(user);
+      noteAge(user.uid, user);
       await writeDiscovery(user);
       return user;
     },
@@ -2770,6 +2823,11 @@
         tx.set(ref, merged);
         tx.set(shadow, projectDiscovery(merged));
         return merged;
+      }).then(function (merged) {
+        // After the commit, not inside the callback: an attempt Firestore
+        // replays was never stored.
+        noteAge(uid, merged);
+        return merged;
       });
     },
 
@@ -2784,7 +2842,17 @@
         // to the person themselves — meanwhile every other deck keeps scoring
         // them on a stale timestamp and quietly ranking them lower. An empty
         // catch made that indistinguishable from success.
-        await db().collection('discovery').doc(uid).update({ lastActiveAt: iso })
+        //
+        // After a birthday it carries the new age as well (see `ageOnRecord`),
+        // in the same write, so it costs nothing extra. Only the projection's
+        // copy is rewritten: the private one is re-derived on every read, and
+        // leaving it as the last save stored it means every touch until that
+        // next save carries the age again, so one that fails is retried by the
+        // next rather than lost.
+        const shadow = { lastActiveAt: iso };
+        const age = ageSinceSave(uid);
+        if (age !== null) shadow['profile.age'] = age;
+        await db().collection('discovery').doc(uid).update(shadow)
           .catch(function (err) {
             console.warn('[zc.store] Could not refresh lastActiveAt on the public projection.', err);
           });
@@ -3374,14 +3442,39 @@
         // delivered to this listener. The chat simply stops updating, with no
         // error anywhere, for as long as the conversation lives. The demo
         // adapter delivers every message and so never had the ceiling.
+        //
+        // `pending` marks a message this client has written and the server
+        // has not taken yet. The SDK delivers its own writes at once, before
+        // any acknowledgement, and with no connection it holds them in memory
+        // only: offline persistence is off, so leaving the page throws them
+        // away. Unmarked, that delivery looked exactly like a stored message,
+        // and the chat drew a message about to be lost as sent. The demo
+        // adapter delivers only what it has already stored, so it never sets
+        // the flag, and an acknowledged message here carries no `pending` key
+        // at all. `includeMetadataChanges` is what makes the acknowledgement
+        // arrive: it changes no data, only the snapshot's metadata, and
+        // without it the mark would outlive the write it describes.
+        //
+        // It also brings a snapshot every time the connection drops or comes
+        // back, with no message changed, and those are not passed on. Passed
+        // on, they were the same list again, and matches.js repainted an empty
+        // conversation's openers on each one, taking a keyboard user's focus
+        // with them. The demo adapter drops a list it has already delivered
+        // too. A message's own pending state changing is a document change
+        // here, so the acknowledgement still gets through.
+        let delivered = false;
         return db().collection('matches').doc(matchId).collection('messages')
           .orderBy('createdAt', 'desc')
           .limit(LIVE_MESSAGE_WINDOW)
-          .onSnapshot(function (snap) {
+          .onSnapshot({ includeMetadataChanges: true }, function (snap) {
+            if (delivered && !snap.docChanges({ includeMetadataChanges: true }).length) return;
+            delivered = true;
             const out = [];
             snap.forEach(function (doc) {
               const data = doc.data() || {};
-              out.push({ id: doc.id, from: data.from, text: String(data.text || ''), createdAt: toIso(data.createdAt) });
+              const message = { id: doc.id, from: data.from, text: String(data.text || ''), createdAt: toIso(data.createdAt) };
+              if (doc.metadata && doc.metadata.hasPendingWrites) message.pending = true;
+              out.push(message);
             });
             cb(out.reverse());
           }, function (err) {

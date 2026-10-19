@@ -667,6 +667,173 @@ module.exports = {
       t.check('neither swiped candidate comes back after signing in again',
         !!again && returned.length === 0, 'top card: ' + again);
 
+      /* ---- a connection that drops and comes back, in an empty conversation ---- */
+
+      // The live thread asks the SDK for snapshots whose metadata changes, so
+      // that a message the server has acknowledged stops saying 'Sending…'
+      // (see below). The connection changing is such a snapshot too, with no
+      // message changed, and it used to be delivered as the same list again:
+      // an empty conversation repainted its openers on each drop and each
+      // return, and a keyboard user's focus on one fell to the page. The
+      // witness is the store's own query (newest first, the live window of
+      // 200), so it shares the page's watch target and hears each flip in the
+      // same pass; the SDK calls listeners back on `setTimeout(0)` in the
+      // order they were added, and one more turn of the queue after the
+      // witness has heard a flip is past the page's own callback for it.
+      const quiet = CANDIDATES[1];
+      const quietId = [uid, quiet.uid].sort().join('_');
+      await emulator(FIRESTORE, 'PATCH', DOCS + '/matches/' + quietId, { fields: encodeFields({
+        id: quietId, users: [uid, quiet.uid].sort(), createdAt: '2026-08-02T00:00:00.000Z',
+        lastMessage: null, lastMessageAt: null, unread: { [uid]: 0, [quiet.uid]: 0 }
+      }) });
+      await page.goto(base + '/matches.html?m=' + encodeURIComponent(quietId), { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#chat-log .icebreaker');
+      await page.evaluate(function (id) {
+        const log = document.getElementById('chat-log');
+        const probe = { opener: log.querySelector('.icebreaker'), changes: 0, flips: [] };
+        probe.opener.focus();
+        probe.observer = new MutationObserver(function (records) { probe.changes += records.length; });
+        probe.observer.observe(log, { childList: true, subtree: true, characterData: true });
+        probe.stop = window.ZC.firebase.db.collection('matches').doc(id).collection('messages')
+          .orderBy('createdAt', 'desc').limit(200)
+          .onSnapshot({ includeMetadataChanges: true }, function (snap) { probe.flips.push(snap.metadata.fromCache); });
+        window.__zcConnectionProbe = probe;
+      }, quietId);
+      const settleOn = async function (fromCache) {
+        await page.waitForFunction(function (want) {
+          const flips = window.__zcConnectionProbe.flips;
+          return flips.length > 0 && flips[flips.length - 1] === want;
+        }, fromCache);
+        return page.evaluate(function () {
+          return new Promise(function (resolve) { setTimeout(resolve, 0); }).then(function () {
+            const probe = window.__zcConnectionProbe;
+            const opener = document.querySelector('#chat-log .icebreaker');
+            return {
+              changes: probe.changes,
+              sameOpener: opener === probe.opener,
+              focus: document.activeElement === probe.opener ? 'the opener' : (document.activeElement || {}).className || null
+            };
+          });
+        });
+      };
+      await settleOn(false);
+      await page.evaluate(function () { return window.ZC.firebase.db.disableNetwork(); });
+      const whileAway = await settleOn(true);
+      await page.evaluate(function () { return window.ZC.firebase.db.enableNetwork(); });
+      const onReturn = await settleOn(false);
+      const probeFlips = await page.evaluate(function () {
+        const probe = window.__zcConnectionProbe;
+        probe.stop();
+        probe.observer.disconnect();
+        return probe.flips;
+      });
+      t.check('a connection that drops and comes back leaves an empty conversation\'s openers, and the focus on one, where they were',
+        [whileAway, onReturn].every(function (seen) {
+          return seen.changes === 0 && seen.sameOpener && seen.focus === 'the opener';
+        }),
+        JSON.stringify({ away: whileAway, back: onReturn, witnessFromCache: probeFlips }));
+
+      /* ---- a message sent with no connection ---- */
+
+      // Offline, the SDK holds a write in memory until the server takes it,
+      // and its listener shows the message straight away. The chat drew that
+      // as sent, the composer was already empty, and with offline persistence
+      // off, leaving the page threw the message away: it never reached the
+      // server or the other person, and nothing on screen had said so.
+      // `disableNetwork()` is the SDK's own offline switch, so the write is
+      // held from here until `enableNetwork()` below and no longer.
+      const peer = CANDIDATES[CANDIDATES.length - 1];
+      const chatId = [uid, peer.uid].sort().join('_');
+      await emulator(FIRESTORE, 'PATCH', DOCS + '/matches/' + chatId, { fields: encodeFields({
+        id: chatId, users: [uid, peer.uid].sort(), createdAt: '2026-08-02T00:00:00.000Z',
+        lastMessage: 'Dinner tonight?', lastMessageAt: '2026-08-02T00:00:01.000Z', unread: { [uid]: 0, [peer.uid]: 0 }
+      }) });
+      await emulator(FIRESTORE, 'PATCH', DOCS + '/matches/' + chatId + '/messages/m1', { fields: encodeFields({
+        id: 'm1', from: peer.uid, text: 'Dinner tonight?', createdAt: '2026-08-02T00:00:01.000Z'
+      }) });
+      const stored = async function () {
+        const answer = await emulator(FIRESTORE, 'GET', DOCS + '/matches/' + chatId + '/messages');
+        return ((answer.body && answer.body.documents) || []).map(function (d) { return decodeFields(d.fields).text; });
+      };
+      const stampOf = function (text) {
+        const bubble = Array.prototype.filter.call(document.querySelectorAll('#chat-log .msg'), function (node) {
+          const body = node.querySelector('.msg-text');
+          return !!body && body.textContent === text;
+        })[0];
+        const stamp = bubble && bubble.querySelector('.msg-time');
+        return stamp ? stamp.textContent : null;
+      };
+      const thread = base + '/matches.html?m=' + encodeURIComponent(chatId);
+      await page.goto(thread, { waitUntil: 'domcontentloaded' });
+      await page.waitForFunction(function () {
+        return /Dinner tonight\?/.test((document.getElementById('chat-log') || {}).textContent || '');
+      });
+
+      const LATE = 'Running ten minutes late, see you at eight?';
+      await page.evaluate(function () { return window.ZC.firebase.db.disableNetwork(); });
+      await page.fill('#chat-input', LATE);
+      await page.click('#chat-send');
+      const drawn = await page.waitForFunction(stampOf, LATE).then(function (handle) { return handle.jsonValue(); });
+      const whileHeld = await stored();
+      t.check('a message the server does not have yet is drawn as sending, not as sent',
+        /Sending/.test(drawn || '') && whileHeld.indexOf(LATE) === -1,
+        JSON.stringify({ stamp: drawn, onServer: whileHeld.indexOf(LATE) !== -1 }));
+
+      await page.evaluate(function () { return window.ZC.firebase.db.enableNetwork(); });
+      const sentStamp = await page.waitForFunction(function (text) {
+        const bubble = Array.prototype.filter.call(document.querySelectorAll('#chat-log .msg'), function (node) {
+          const body = node.querySelector('.msg-text');
+          return !!body && body.textContent === text;
+        })[0];
+        const stamp = bubble && bubble.querySelector('.msg-time');
+        return stamp && !/Sending/.test(stamp.textContent) ? stamp.textContent : null;
+      }, LATE, { timeout: 15000 }).then(function (handle) { return handle.jsonValue(); }, function () { return null; });
+      const afterAck = await stored();
+      t.check('and once the server has it, the same bubble is drawn as sent',
+        !!sentStamp && afterAck.indexOf(LATE) !== -1,
+        JSON.stringify({ stamp: sentStamp, onServer: afterAck.indexOf(LATE) !== -1 }));
+
+      // Leaving. Once the send has finished, a reload must not ask; then a
+      // second message is held and leaving must. "Finished" is the button
+      // dropping `aria-busy`, not the stamp turning: the send goes on to write
+      // the conversation's preview and the other side's unread count after
+      // the message itself is stored, and leaving inside that is worth a
+      // question too. The session accepts every native dialog (see
+      // harness.openSession), so the page goes either way and this only
+      // records whether it was asked.
+      await page.waitForFunction(function () {
+        const send = document.getElementById('chat-send');
+        return !!send && !send.hasAttribute('aria-busy');
+      });
+      const asked = [];
+      const recordDialog = function (dialog) { asked.push(dialog.type()); };
+      page.on('dialog', recordDialog);
+      try {
+        await page.goto(thread, { waitUntil: 'domcontentloaded' });
+        await page.waitForFunction(function (text) {
+          return ((document.getElementById('chat-log') || {}).textContent || '').indexOf(text) !== -1;
+        }, LATE);
+        const askedWhenSent = asked.slice();
+        const LOST = 'Actually, make it nine.';
+        await page.evaluate(function () { return window.ZC.firebase.db.disableNetwork(); });
+        await page.fill('#chat-input', LOST);
+        await page.click('#chat-send');
+        await page.waitForFunction(stampOf, LOST);
+        await page.goto(base + '/dashboard.html', { waitUntil: 'domcontentloaded' });
+        // A card, not just the stack: the stack is in the page's own markup, so
+        // it is there before the account has loaded, and the probe below
+        // deletes that account's document and recreates it with no finished
+        // profile. A page still loading the account then finds it missing or
+        // unfinished and goes to onboarding, and the sign-out checks at the end
+        // would start from there instead of from this page.
+        await page.waitForSelector('#deck-stack .swipe-card');
+        t.check('leaving with a message still sending asks first, and leaving with none pending does not',
+          askedWhenSent.length === 0 && asked.length === 1 && asked[0] === 'beforeunload',
+          JSON.stringify({ nothingPending: askedWhenSent, oneHeld: asked.slice(askedWhenSent.length) }));
+      } finally {
+        page.off('dialog', recordDialog);
+      }
+
       /* ---- the finding ---- */
 
       // Run after everything that reads this account's document, because it
