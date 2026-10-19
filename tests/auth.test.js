@@ -495,6 +495,30 @@ test('a session pointing at a deleted account is dropped, not adopted', async fu
   assert.equal(afterCorrupt.current, null);
 });
 
+test('a demo reset keeps an account made in this browser signed in, under its own name', async function () {
+  // Settings' "Reset demo data" says the accounts made here stay signed up.
+  // The reset wiped every user document and the seed rebuilds only its own,
+  // so after the reload Settings does, the session named an account with no
+  // document: it was dropped as deleted, and signing in again with the same
+  // password made a blank document, with no name, in place of the old one.
+  const auth = await resetWorld();
+  const made = await auth.signUp('alice@example.com', 'correct horse', 'Alice');
+  assert.equal(made.ok, true);
+  await store.updateUser(made.user.uid, { profile: { bio: 'Written before the reset.' } });
+  assert.equal(await store.resetDemo(), true);
+
+  const reloaded = loadAuth();
+  const doc = await reloaded.ready;
+  assert.equal(doc && doc.uid, made.user.uid, 'the session outlives the reset');
+  assert.equal(reloaded.doc.displayName, 'Alice');
+  assert.equal(reloaded.doc.profile.bio, 'Written before the reset.');
+
+  await reloaded.signOut();
+  const again = await reloaded.signIn('alice@example.com', 'correct horse');
+  assert.equal(again.ok, true);
+  assert.equal(again.user.displayName, 'Alice', 'signing in again finds the same document');
+});
+
 test('a storage event from another tab signs out, switches account, or is ignored', async function () {
   const auth = await resetWorld();
   await auth.signInAsDemoUser();
@@ -775,7 +799,11 @@ test('every mapped Firebase code becomes a sentence, and nothing else leaks', as
     'auth/cancelled-popup-request': 'Only one Google window at a time. Try again.',
     'auth/unauthorized-domain': 'This address is not on the Firebase project list of authorised domains.',
     'auth/requires-recent-login': 'Please sign in again to finish that.',
-    'auth/internal-error': 'Sign-in failed unexpectedly. Please try again.'
+    'auth/internal-error': 'Sign-in failed unexpectedly. Please try again.',
+    'auth/api-key-not-valid.-please-pass-a-valid-api-key.':
+      'Firebase refused the apiKey in this app’s Firebase config, so no one can sign in until the config is corrected.',
+    'auth/configuration-not-found':
+      'Authentication is not set up for the Firebase project in this app’s config, so no one can sign in to it yet.'
   };
 
   const realGetUser = store.getUser;
@@ -791,6 +819,39 @@ test('every mapped Firebase code becomes a sentence, and nothing else leaks', as
       const result = await auth.signInAsDemoUser();
       assert.equal(result.ok, false, code + ' fails');
       assert.equal(result.error, expected[code], code + ' has its own sentence');
+      assert.equal(result.error.indexOf('auth/'), -1, code + ' never shows the raw code');
+    }
+  } finally {
+    store.getUser = realGetUser;
+  }
+});
+
+test('a Firebase config no one can sign in with is named as the problem, not apologised for', async function () {
+  // Settings checks that a pasted config has its keys, not that they are
+  // right. Google answers a key with one character wrong with "API key not
+  // valid. Please pass a valid API key.", the SDK lowercases and hyphenates
+  // that sentence into the first code below, and a project with
+  // Authentication never switched on comes back as the last. The sign-in page
+  // read all of them as "Something went wrong", on every attempt. The middle
+  // one stands in for Google rewording the rest of its sentence, which is why
+  // the key's code is matched on its start rather than in full.
+  const auth = await resetWorld();
+  const realGetUser = store.getUser;
+  const codes = [
+    'auth/api-key-not-valid.-please-pass-a-valid-api-key.',
+    'auth/api-key-not-valid.-check-the-key-and-try-again.',
+    'auth/configuration-not-found'
+  ];
+  try {
+    for (const code of codes) {
+      store.getUser = async function () {
+        const err = new Error('Firebase: Error (' + code + ').');
+        err.code = code;
+        throw err;
+      };
+      const result = await auth.signInAsDemoUser();
+      assert.equal(result.ok, false, code + ' fails');
+      assert.match(result.error, /Firebase config|app’s config/, code + ' names the config as the cause');
       assert.equal(result.error.indexOf('auth/'), -1, code + ' never shows the raw code');
     }
   } finally {

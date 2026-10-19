@@ -52,6 +52,11 @@
     profiles: 'zc.profiles'
   };
 
+  // auth.js's demo credential vault, `{ [email]: { uid, salt, hash } }`. Not in
+  // KEYS because the store does not own it: resetDemo reads it to learn which
+  // accounts were made in this browser, and nothing here writes it.
+  const CREDENTIALS_KEY = 'zc.demo.credentials';
+
   const SEED_VERSION = 1;
   const MESSAGE_MAX = 1000;
   const REPORT_DETAILS_MAX = 500;
@@ -1128,6 +1133,33 @@
     return true;
   }
 
+  /**
+   * The documents of the accounts made in this browser, ready to survive a
+   * demo reset. The seed rebuilds every account it has a record of, and
+   * resetDemo puts these back only where it has none. auth.js's credential
+   * vault is what says which they are; this only ever reads it.
+   *
+   * Each keeps its name, profile, preferences, plan and blocks. Its learned
+   * weights and today's usage start again, because they count swipes, and the
+   * reset deletes every swipe — the seed starts the demo account's the same way.
+   * @returns {Object} uid → UserDoc
+   */
+  function createdAccounts() {
+    const vault = readJson(CREDENTIALS_KEY, {});
+    const users = readUsers();
+    const kept = {};
+    if (!isPlainObject(vault) || !isPlainObject(users)) return kept;
+    Object.keys(vault).forEach(function (email) {
+      const uid = isPlainObject(vault[email]) ? vault[email].uid : null;
+      if (typeof uid !== 'string' || !isPlainObject(users[uid])) return;
+      const doc = cloneDeep(users[uid]);
+      doc.learning = cloneDeep(DEFAULT_USER.learning);
+      doc.usage = normalizeUsage({ date: todayKey() });
+      kept[uid] = doc;
+    });
+    return kept;
+  }
+
   const demoAdapter = {
     mode: 'demo',
 
@@ -1618,8 +1650,20 @@
     },
 
     async resetDemo() {
+      // Taken before `users` goes. They used to go with it, and Settings'
+      // "Accounts you created stay signed up" was untrue: the seed has no
+      // document for them, so the next load dropped the session as pointing at
+      // a deleted account, and signing in again made a blank one, with no name.
+      const kept = createdAccounts();
       [KEYS.users, KEYS.swipes, KEYS.matches, KEYS.messages, KEYS.reports, KEYS.seeded].forEach(removeKey);
       await demoSeed(true);
+      // Only into places the seed left empty. auth.js vaults no uid the seed
+      // uses, but the vault is only localStorage, and an entry naming a seeded
+      // account must not put back the document the reset was asked to rebuild.
+      const users = readUsers();
+      const added = Object.keys(kept).filter(function (uid) { return !users[uid]; });
+      added.forEach(function (uid) { users[uid] = kept[uid]; });
+      if (added.length) writeUsers(users);
       pollAll();
       return true;
     },
@@ -4897,7 +4941,8 @@
     },
 
     /**
-     * Wipe and re-seed the demo database. Throws in firebase mode.
+     * Wipe and re-seed the demo database, keeping the accounts made in this
+     * browser (see createdAccounts). Throws in firebase mode.
      * @returns {Promise<boolean>}
      */
     async resetDemo() {

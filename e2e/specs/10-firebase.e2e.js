@@ -22,7 +22,9 @@
    checks at all; it never passes quietly. */
 'use strict';
 
+const fs = require('node:fs');
 const http = require('node:http');
+const path = require('node:path');
 
 /* --------------------------------------------------------------------------
    1. Where the emulators are
@@ -964,6 +966,103 @@ module.exports = {
       // 400 included. The drains above take out only commits refused before it —
       // 403, 409 and 400 — and their own checks require there to be none: nothing
       // in this spec may lose a transaction to a write the same page made.
+
+      /* ---- a saved config Firebase refuses still has a way back ---- */
+
+      // Settings checks that a pasted config has its four keys and no
+      // placeholder in it, and can check no more: an apiKey with one character
+      // wrong looks like any other. Saved, it reloads the app in firebase mode,
+      // where every sign-in and sign-up is refused. "Reset to demo mode" lived
+      // only on settings.html, which sends anyone signed out to the sign-in
+      // page, and the sign-in page said "Something went wrong" and offered no
+      // way back: the browser was stuck until its site data was cleared by hand.
+      //
+      // A session of its own, because the main one is wired to the emulators on
+      // every load and the reset has to be seen to stick. It runs the real SDK,
+      // and the answer Google gives a key that is not valid is served for its
+      // API hosts, so nothing leaves the machine. The service worker is kept
+      // out, so it cannot answer any of these requests itself.
+      const refused = await h.openSession(ctx.session.context.browser(), ctx.viewport, { serviceWorkers: 'block' });
+      try {
+        const rp = refused.page;
+        // openSession aborts the CDN for a demo session. A route added later
+        // answers first, and this one serves the SDK the main session loads.
+        await refused.context.route('**://www.gstatic.com/**', function (route) {
+          const mirror = process.env.E2E_FIREBASE_SDK || '';
+          const file = mirror ? path.join(mirror, path.basename(new URL(route.request().url()).pathname)) : '';
+          if (!file || !fs.existsSync(file)) return route.continue();
+          return route.fulfill({ status: 200, contentType: 'text/javascript; charset=utf-8', body: fs.readFileSync(file) });
+        });
+        const keyNotValid = 'API key not valid. Please pass a valid API key.';
+        await refused.context.route(/^https:\/\/([a-z0-9-]+\.)*googleapis\.com\//, function (route) {
+          return route.fulfill({
+            status: 400,
+            contentType: 'application/json',
+            body: JSON.stringify({ error: {
+              code: 400, message: keyNotValid, status: 'INVALID_ARGUMENT',
+              errors: [{ message: keyNotValid, domain: 'global', reason: 'badRequest' }]
+            } })
+          });
+        });
+
+        // The way a person gets there: the demo account, Settings, a config
+        // with one wrong character in its key, Save and reload.
+        await h.signIn(rp, base);
+        await rp.goto(base + '/settings.html', { waitUntil: 'domcontentloaded' });
+        await rp.waitForSelector('#firebase-config');
+        await rp.fill('#firebase-config', JSON.stringify({
+          apiKey: 'AIzaSyB-typo-in-this-key-0000000000000',
+          authDomain: 'e2e-typo.firebaseapp.com',
+          projectId: 'e2e-typo',
+          appId: '1:123456789012:web:abcdef0123456789'
+        }));
+        await rp.click('#save-firebase');
+        await rp.waitForURL(h.pageUrl('auth'));
+        await rp.waitForSelector('#auth-form');
+        const stuckMode = await rp.evaluate(function () { return window.ZC.config.mode; });
+
+        await rp.fill('#input-email', 'locked-out@example.com');
+        await rp.fill('#input-password', 'a-long-enough-passphrase');
+        await rp.click('#submit-btn');
+        await rp.waitForFunction(function () {
+          return !document.getElementById('auth-alert').classList.contains('hidden');
+        });
+        const said = (await rp.textContent('#auth-alert')).trim();
+        t.check('a saved config Firebase refuses is named as the problem, not "Something went wrong"',
+          stuckMode === 'firebase' && /config/i.test(said) && !/something went wrong/i.test(said),
+          'mode ' + stuckMode + ', said ' + JSON.stringify(said));
+
+        // The way back, from the page every signed-out visit ends on. The demo
+        // session is still in this browser, so demo mode signs straight back
+        // into it and the page goes on to the Settings page it was asked for.
+        const offered = await rp.locator('#config-reset:visible').count();
+        let back = { url: rp.url(), mode: stuckMode, stored: 'not reset' };
+        if (offered) {
+          await rp.click('#config-reset');
+          await h.clickModalAction(rp, 'Reset and reload');
+          // Bounded, and its answer is part of the check below rather than a
+          // throw: a reset that never reaches Settings reports where it stopped.
+          await rp.waitForURL(h.pageUrl('settings'), { timeout: 10000 }).then(null, function () { /* reported below */ });
+          back = await rp.evaluate(function () {
+            return {
+              url: window.location.href,
+              mode: window.ZC.config.mode,
+              stored: window.localStorage.getItem('zc.firebaseConfig')
+            };
+          });
+        }
+        t.check('and the sign-in page it lands on resets it, back into the demo account it left',
+          offered === 1 && back.mode === 'demo' && back.stored === null && h.pageUrl('settings').test(back.url),
+          (offered ? '' : 'no reset on the sign-in page; ') + JSON.stringify(back));
+
+        // Google's refusals are what this provoked, and the browser logs each
+        // one as a failed resource. Anything else is a defect.
+        const refusals = drain(refused.errors, 'googleapis.com', 400);
+        t.check('and the whole round trip logs nothing else', refused.errors.length === 0,
+          refusals.length + ' refusal(s) set aside; ' + (refused.errors.slice(0, 3).join(' | ') || 'nothing else'));
+      } finally {
+        await refused.context.close();
+      }
 
       // A sign-out that fails leaves the page where it is, and must not leave
       // it deaf to the next change: a page marks its own sign-out so that the

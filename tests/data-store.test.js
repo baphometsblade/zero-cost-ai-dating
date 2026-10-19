@@ -998,6 +998,49 @@ test('resetDemo wipes every demo key and restores the pristine seed', async func
   assert.equal(raw(KEYS.seeded).version, 1);
 });
 
+test('resetDemo keeps the accounts made in this browser, and only what counted their swipes starts again', async function () {
+  // Settings promises "Accounts you created stay signed up". The seed has no
+  // record of an account made here, so wiping `users` erased it: the session
+  // was dropped on the next load, and signing back in made an empty document
+  // with no name in its place. auth.js's credential vault is what says which
+  // accounts were made here; the squatter in the test above has no entry in it.
+  await resetWorld();
+  const MINE = 'local-made-here';
+  // The second entry names an account the seed has a record of. auth.js mints
+  // every uid it vaults as 'local-…', so it never writes one, but a vault is
+  // only localStorage: the seed's record must still be the one that wins.
+  writeRaw('zc.demo.credentials', {
+    'made-here@example.com': { uid: MINE, salt: 'aa', hash: 'bb' },
+    'planted@example.com': { uid: YOU, salt: 'cc', hash: 'dd' }
+  });
+  await store.updateUser(YOU, { displayName: 'Renamed before the reset' });
+  await store.createUser(MINE, { email: 'made-here@example.com', displayName: 'Made Here' });
+  await store.updateUser(MINE, {
+    profileComplete: true,
+    profile: { bio: 'A bio I wrote myself and would like to keep.', birthdate: '1990-03-03' },
+    blocked: ['maya-okonkwo']
+  });
+  await store.recordSwipe(MINE, 'devin-alvarez', 'like');
+  await store.bumpUsage(MINE, 'likes', 3);
+  await store.saveLearning(MINE, { interestAffinity: { hiking: 2 }, likeCount: 1, passCount: 0 });
+
+  assert.equal(await store.resetDemo(), true);
+  const kept = await store.getUser(MINE);
+  assert.ok(kept, 'the account made here is still there');
+  assert.equal(kept.displayName, 'Made Here');
+  assert.equal(kept.email, 'made-here@example.com');
+  assert.equal(kept.profileComplete, true);
+  assert.equal(kept.profile.bio, 'A bio I wrote myself and would like to keep.');
+  assert.equal(kept.profile.birthdate, '1990-03-03');
+  assert.deepEqual(kept.blocked, ['maya-okonkwo'], 'a block is about a person, and the person is still here');
+  assert.deepEqual(await store.getSwipes(MINE), [], 'its swipes went with everyone else\'s');
+  assert.equal(kept.usage.likes, 0, 'so today\'s count of them starts again');
+  assert.deepEqual(kept.learning, { interestAffinity: {}, likeCount: 0, passCount: 0 },
+    'and so does what the deck learned from them');
+  assert.equal(Object.keys(raw(KEYS.users)).length, 33, 'the seed cast, plus the account made here');
+  assert.equal((await store.getUser(YOU)).displayName, 'You', 'the demo account is rebuilt from the seed');
+});
+
 /* ------------------------------------------------------------------------
    9. Live badge subscriptions (demo mode)
    ------------------------------------------------------------------------ */

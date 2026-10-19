@@ -41,6 +41,13 @@
           <!-- Shown only in demo mode, where there is no Firebase project -->
           <p class="notice notice-info hidden" id="demo-notice">Demo mode: no Firebase project is configured, so accounts, matches and messages live only in this browser. Sign up with any email address, or use the demo account below. You can connect a real project later from Settings.</p>
 
+          <!-- Firebase mode on a config saved from Settings only: Settings needs
+               an account, so this is the way back when no one can sign in. -->
+          <div class="stack stack-sm hidden" id="config-block">
+            <p class="notice notice-info" id="config-notice"></p>
+            <button class="btn btn-secondary btn-block" type="button" id="config-reset">Reset to demo mode</button>
+          </div>
+
           <!-- Every error and confirmation lands here, politely announced -->
           <p class="notice notice-warn hidden" id="auth-alert" role="status" aria-live="polite"></p>
 

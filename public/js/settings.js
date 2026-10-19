@@ -848,7 +848,7 @@
   async function onResetDemo() {
     const ok = typeof ui.confirm === 'function'
       ? await ui.confirm(
-        'This wipes the demo database in this browser and seeds the bundled sample profiles again.\nYour swipes, matches and messages are deleted. Accounts you created stay signed up, but their profile data is rebuilt from the seed.',
+        'This wipes the demo database in this browser and seeds the bundled sample profiles again.\nYour swipes, matches, messages and reports are deleted. Accounts you created here stay signed up and keep their profiles; the demo account’s profile is rebuilt from the seed.',
         { title: 'Reset the demo data?', confirmLabel: 'Reset it', variant: 'danger' }
       )
       : true;
