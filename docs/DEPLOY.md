@@ -144,7 +144,7 @@ has, so it is worth the five minutes.
 Everything below is also *executed* — `npm run test:rules` runs the real rules file against
 the Firestore emulator, **276 checks** including the attacks each rule exists to stop. If you
 change the data model, run it. See [`rules-tests/README.md`](../rules-tests/README.md).
-`npm run test:emulator` adds the store suite to the same emulator boot: **323 more checks** that
+`npm run test:emulator` adds the store suite to the same emulator boot: **330 more checks** that
 drive the shipped `public/js/data-store.js` against a real Firestore, which is where the
 daily counter's transaction is proven — see [`store-tests/README.md`](../store-tests/README.md).
 
@@ -297,7 +297,7 @@ firebase use --add          # pick your project, alias it "default"
 Then:
 
 ```bash
-npm test                    # 14 suites, 322 checks, no install required
+npm test                    # 14 suites, 323 checks, no install required
 npm run deploy              # firebase deploy --only hosting,firestore
 ```
 
@@ -494,7 +494,7 @@ the suite still fails: *connect-src allows only what the three Firebase SDKs the
 can contact*, in the same file, holds every source in that directive to a list of the
 sources the shipped code actually connects to, each with its reason, and names both
 loopback origins as sources nothing in this app connects to. Be clear about what that does
-**not** catch — add them to that list as well and the suite goes quiet again, all 322
+**not** catch — add them to that list as well and the suite goes quiet again, all 323
 checks passing, and the weakened policy deploys to everyone. Change the meta copy only, and
 change it back.
 
