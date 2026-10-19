@@ -387,7 +387,8 @@
     // turns off. It used to be stored and read by nothing, so off changed
     // nothing. Off holds no subscription either, rather than paying reads for
     // counts nobody is shown. Turning it back on subscribes again: Settings
-    // saves through ZC.auth.refresh(), whose change event calls back in here.
+    // saves through ZC.auth.refresh(), whose change event calls back in here,
+    // and tells this browser's other tabs to do the same (accountChanged).
     if (me.preferences && me.preferences.notifications === false) {
       stopBadgePolling();
       badge({ matches: 0, likes: 0 });
@@ -471,6 +472,55 @@
     matchStop = null;
     likeStop = null;
     badgeUid = null;
+  }
+
+  /* The other tabs of this browser. Each keeps its own copy of the account's
+     document in ZC.auth.doc, and only the tab that saves a change re-reads
+     its copy. So Settings switching in-app notifications off emptied the
+     badge in its own tab, and every other open tab of the account went on
+     showing the count and updating it, on focus too, because
+     syncBadgeListeners re-checks the same stale copy there. A save the rest
+     of the browser has to follow calls accountChanged(). The other tabs hear
+     it as a `storage` event, which the tab that writes does not get, and
+     re-read the document: one read of users/{uid} in each of them per
+     change, and nothing on focus. Another device cannot hear it, and takes
+     the change up on its next page load. The key holds the account's uid and
+     is removed as soon as it is written, so nothing is left in storage; the
+     event the write raises in the other tabs carries the uid all the same,
+     and since every write starts from an empty key, every one raises it. */
+  const ACCOUNT_CHANGED_KEY = 'zc.accountChanged';
+
+  /**
+   * Tell this browser's other tabs that the signed-in account's document has
+   * changed, so they re-read it. Best-effort: storage that refuses the write
+   * leaves them as they are until their next page load.
+   * @returns {void}
+   */
+  function accountChanged() {
+    const me = signedInDoc();
+    if (!me || !me.uid) return;
+    try {
+      window.localStorage.setItem(ACCOUNT_CHANGED_KEY, me.uid);
+      window.localStorage.removeItem(ACCOUNT_CHANGED_KEY);
+    } catch (err) {
+      // Blocked site data or a full quota refuses the write, and nothing here
+      // may surface.
+    }
+  }
+
+  /**
+   * Another tab changed this account's document: re-read it. ZC.auth.refresh()
+   * announces the new copy, and applyAuthState, which hears it, runs the badge
+   * sync again from that copy.
+   * @param {StorageEvent} event a change another tab made to storage
+   * @returns {void}
+   */
+  function onAccountChanged(event) {
+    if (event.key !== ACCOUNT_CHANGED_KEY || !event.newValue) return;
+    const me = signedInDoc();
+    if (!me || me.uid !== event.newValue || !ZC.auth || typeof ZC.auth.refresh !== 'function') return;
+    // refresh() catches its own failures and keeps the copy it had.
+    ZC.auth.refresh();
   }
 
   /* ------------------------------------------------------------------------
@@ -792,6 +842,7 @@
     onReady: onReady,
     badge: badge,
     refreshBadges: syncBadgeListeners,
+    accountChanged: accountChanged,
     url: url
   };
 
@@ -813,6 +864,8 @@
     if (document.visibilityState === 'visible') syncBadgeListeners();
   });
   window.addEventListener('pageshow', syncBadgeListeners);
+  // And what another tab of this browser changed (see accountChanged).
+  window.addEventListener('storage', onAccountChanged);
 
   // Boot as soon as the document is usable — this file loads at the end of
   // the body, so on most pages that is immediately.

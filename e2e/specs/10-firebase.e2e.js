@@ -495,6 +495,78 @@ module.exports = {
         !!swipeAgain && swipeAgain.action === 'like',
         swipeAgain ? swipeAgain.from + ' -> ' + swipeAgain.to : 'top card was ' + alsoTop);
 
+      /* ---- two Settings tabs: a pause, and the notifications switch ---- */
+      // The discovery form sent all five preferences on every save, so a
+      // Settings tab opened before the profile was paused in another put
+      // discovery/{uid} back in every deck with a save of the distance alone.
+      // The same two tabs then carry the notifications switch: each tab keeps
+      // its own copy of users/{uid}, and the one that did not save it went on
+      // reading notifications as on.
+      const settingsReady = function (tab) {
+        return tab.waitForFunction(function () {
+          const hint = document.getElementById('signout-hint');
+          return !!hint && /other devices/.test(hint.textContent) &&
+            document.getElementById('input-name').value !== '';
+        }, null, { timeout: 20000 });
+      };
+      const olderSettings = ctx.session.watch(await ctx.session.context.newPage());
+      try {
+        await olderSettings.goto(base + '/settings.html', { waitUntil: 'domcontentloaded' });
+        await settingsReady(olderSettings);
+        await page.goto(base + '/settings.html', { waitUntil: 'domcontentloaded' });
+        await settingsReady(page);
+        await page.click('label.switch:has(#switch-discoverable)');
+        await page.click('#save-discovery');
+        const paused = await awaitDoc('discovery/' + uid, function (doc) {
+          return doc.preferences && doc.preferences.discoverable === false;
+        });
+        const olderSwitchBefore = await olderSettings.isChecked('#switch-discoverable');
+        await olderSettings.locator('#distance').fill('80');
+        await olderSettings.click('#save-discovery');
+        await awaitDoc('users/' + uid, function (doc) {
+          return doc.preferences && doc.preferences.maxDistanceKm === 80;
+        });
+        const publicAfter = await readDoc('discovery/' + uid);
+        const privateAfter = await readDoc('users/' + uid);
+        t.check('a pause saved in one Settings tab survives a distance saved from one opened before it, in both documents',
+          !!paused && paused.preferences.discoverable === false && olderSwitchBefore === true &&
+            !!publicAfter && publicAfter.preferences.discoverable === false && publicAfter.preferences.maxDistanceKm === 80 &&
+            !!privateAfter && privateAfter.preferences.discoverable === false,
+          'older tab\'s switch before its save ' + (olderSwitchBefore ? 'on' : 'off') +
+            '; discovery: discoverable ' + (publicAfter && publicAfter.preferences.discoverable) +
+            ', ' + (publicAfter && publicAfter.preferences.maxDistanceKm) + ' km' +
+            '; users: discoverable ' + (privateAfter && privateAfter.preferences.discoverable));
+
+        // Notifications off in this tab; the older one re-reads its copy. Its
+        // copy saying "on" before is what makes "off" afterwards mean the re-read.
+        const olderCopy = function () {
+          return olderSettings.evaluate(function () {
+            const doc = window.ZC.auth.doc;
+            return doc && doc.preferences ? doc.preferences.notifications : null;
+          });
+        };
+        const olderCopyBefore = await olderCopy();
+        await page.click('label.switch:has(#switch-notifications)');
+        await awaitDoc('users/' + uid, function (doc) {
+          return doc.preferences && doc.preferences.notifications === false;
+        });
+        const olderCopyAfter = await olderSettings.waitForFunction(function () {
+          const doc = window.ZC.auth.doc;
+          return !!doc && !!doc.preferences && doc.preferences.notifications === false;
+        }, null, { timeout: 10000 }).then(function () { return false; }, olderCopy);
+        t.check('and switching notifications off in one tab reaches the copy of users/{uid} the other tab holds',
+          olderCopyBefore === true && olderCopyAfter === false,
+          'other tab\'s copy before ' + olderCopyBefore + ', after ' + olderCopyAfter);
+      } finally {
+        await olderSettings.close();
+      }
+      // Back to the preferences the rest of the spec was written against.
+      await page.evaluate(async function (id) {
+        await window.ZC.store.updateUser(id, {
+          preferences: { discoverable: true, maxDistanceKm: 500, notifications: true }
+        });
+      }, uid);
+
       /* ---- out, and back in ---- */
       // Every header this page shows on the way in is recorded, for the check
       // after the auth gate below. The recorder stays for this page's later
