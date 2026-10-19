@@ -370,8 +370,9 @@ async function startServer(root, opts) {
      */
     stop: function () {
       if (closing) return closing;
-      // closeAllConnections landed in Node 18.2 and package.json allows 18.0,
-      // where an unguarded call would throw and shutdown would never finish.
+      // closeAllConnections landed in Node 18.2. package.json now requires 20,
+      // so every supported Node has it; the guard only keeps a run on an older,
+      // unsupported Node from throwing here and never finishing shutdown.
       // Without it, keep-alive sockets would just close a little later.
       if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
       // Proxied requests live on a second socket this server does not own. A

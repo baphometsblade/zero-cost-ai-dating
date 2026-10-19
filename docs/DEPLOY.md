@@ -11,10 +11,12 @@ Budget about fifteen minutes, most of which is waiting for Firestore indexes to 
 ## GitHub Pages (the live demo) — and why it is not this guide
 
 The repository also publishes itself to GitHub Pages: `.github/workflows/pages.yml` uploads
-`public/` on every push to `main`, which is what serves the
-[live demo](https://baphometsblade.github.io/zero-cost-ai-dating/). That deploy is demo mode
-only — no Firebase project is attached, so there are no accounts and no shared database;
-every visitor gets the seeded cast in their own browser's `localStorage`.
+`public/` once the CI workflow has passed on a push to `main`. CI finishing wakes it, and
+its gate job checks that CI passed on main's tip before anything is published. That is what
+will serve the [live demo](https://baphometsblade.github.io/zero-cost-ai-dating/) once Pages
+is switched on (below); until then the URL returns 404. That deploy is demo mode only — no
+Firebase project is attached, so there are no accounts and no shared database; every visitor
+gets the seeded cast in their own browser's `localStorage`.
 
 **Pages has to be switched on once, by hand, before any of that works.** The workflow asks
 for the site to be created (`configure-pages` with `enablement: true`), but the token
@@ -24,8 +26,11 @@ The fix is one setting in the repository, not a change to any file here:
 
 > **Settings → Pages → Build and deployment → Source → GitHub Actions**
 
-Then re-run the workflow (**Actions → pages → Run workflow**, or push anything to `main`).
-From that point the step finds the existing site and the deploy proceeds on its own.
+Then run the workflow on `main` (**Actions → pages → Run workflow**). It publishes main's tip
+if CI passed on it. Or push to `main`, which deploys once CI passes there. Re-running one of
+the old failed runs replays the workflow as it was then, without the CI gate. From that point
+the step finds the existing site and the deploy proceeds on its own after every green CI run
+on `main`.
 
 Two further Pages constraints are worth knowing because they shaped the code:
 
@@ -42,7 +47,11 @@ Two further Pages constraints are worth knowing because they shaped the code:
   Pages sends `max-age=600` on every file instead, so for ten minutes after a deploy a
   returning visitor can mix a page and a script from either side of it; the most the app
   can do there is what `sw.js` does, which is to install a new worker's offline copy from
-  the server rather than from that cache, so the copy is one deploy.
+  the server rather than from that cache, so the copy it installs is one deploy. After that,
+  each online visit stores the page it opened and every same-origin file that page loads, as
+  its fetches answered them, which within those ten minutes can still be that cache. Only
+  those, though: offline, a page not opened since a deploy can run a shared script that a
+  visit to another page refreshed.
 
 That second point is the reason the rest of this guide exists: for a real deployment with
 accounts, a shared database, and the full header set, Firebase Hosting on the Spark plan is
@@ -55,7 +64,7 @@ the recommended host. Everything below is that path.
 | You need | Notes |
 | --- | --- |
 | A Google account | Any account can create Firebase projects. |
-| Node.js ≥ 18 | Only for the Firebase CLI and the tests. The app itself needs nothing. |
+| Node.js ≥ 20 | Only for the Firebase CLI and the tests. The app itself needs nothing. |
 | The Firebase CLI | `npm install -g firebase-tools`, then `firebase login`. |
 
 You do **not** need to run `npm install` in this repo. It has zero dependencies.
@@ -147,7 +156,9 @@ anywhere else was free to rot. It now reads every document.
   usage counters and learned affinities never leave the account. Writes are validated: `plan`
   must be `free` or `premium`, `profile.bio` ≤ 500 chars, `profile.interests` ≤ 12,
   `profile.photos` ≤ 6, `preferences.ageMin ≥ 18`, `ageMax ≤ 100`, `ageMin ≤ ageMax`, and
-  `uid` / `email` / `createdAt` are immutable after creation.
+  `uid` / `createdAt` are immutable after creation; `email` may change only to the address on
+  the caller's own ID token, which is the correction `auth.js` sends when a stored address is
+  stale.
 - `discovery/{uid}` — the public projection other users actually see: display name, age (not
   birthdate), bio, interests, personality, ~1 km-rounded coordinates and the mutual filters.
   Readable by any signed-in user, writable only by the owner, and the key list is **closed**
@@ -208,12 +219,12 @@ anywhere else was free to rot. It now reads every document.
   returning false: it is an error, so every account creation in the app began failing with
   a flat `permission-denied` naming no field and no line. Measured afterwards, the version
   before them had room for **eleven** more trivial clauses, and nothing had ever looked.
-  `rules-tests/specs/08-budget.rules.js` looks now, on every run, at both the create and
-  the update of the costliest document the store writes, and prints what is left. It used
-  to look only at creating a free account, the write with the most room, and so missed
-  that updating the same document as a premium account was already over: for an account
-  whose profile filled in every optional field, a location among them, the upgrade to
-  premium came back as that flat `permission-denied`, with nothing saying why.
+  `rules-tests/specs/08-budget.rules.js` looks now, on every run, at the create, the routine
+  update and the email-correcting update of the costliest document the store writes, and
+  prints what is left. It used to look only at creating a free account, the write with the
+  most room, and so missed that updating the same document as a premium account was already
+  over: for an account whose profile filled in every optional field, a location among them,
+  the upgrade to premium came back as that flat `permission-denied`, with nothing saying why.
   If you are adding a rule here, read its number first — and know that the costs are not
   where they look: a call such as `stampOk(d.createdAt)` is worth about 2.4 plain clauses
   and the same check inline about 2.2 (the spec measures both and prints them), `in` on a

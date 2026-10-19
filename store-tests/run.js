@@ -173,8 +173,10 @@ async function main() {
   // nothing about atomicity. The separate project below carries the *real*
   // firestore.rules. 04-rules-accept, 13-messaging and 14-reports replay what
   // the store stored against it, as the account that wrote it; 08-conversation
-  // points the shipped undoSwipe at it as a signed-in user; and 19-write-cost
-  // opens a listener on it that the rules refuse to a signed-out caller.
+  // points the shipped undoSwipe at it as a signed-in user, and 04-rules-accept
+  // also points createUser and updateUser at it as an account with an email on
+  // its token; and 19-write-cost opens a listener on it that the rules refuse
+  // to a signed-out caller.
   const env = await testing.initializeTestEnvironment({
     projectId: harness.PROJECT_ID,
     firestore: { rules: harness.OPEN_RULES, host: address.host, port: address.port }

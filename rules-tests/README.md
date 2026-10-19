@@ -55,15 +55,16 @@ without a row here.
 | `specs/05-messages.rules.js` | `matches/{id}/messages` — participants only, append-only, self-authored |
 | `specs/06-reports.rules.js` | `reports/{from_about}` — bounded, author-only, unprobeable |
 | `specs/07-default-deny.rules.js` | everything else — denied by default |
-| `specs/08-budget.rules.js` | the rules file itself — how much of Firestore's 1000-expression-per-request ceiling `userDocOk` has left on both the create and the update of the costliest document the store writes (a premium account with every optional field set, a location among them), and how long an `in` list the swipes read rule accepts before the same ceiling denies it. The second one binds the deck: `listCandidates` asks "have I swiped on these people" as `swipes where __name__ in [ids]`, the read rule is evaluated once per value, and going over comes back as a `permission-denied` naming nothing. Measured at 20; the store asks about 10 |
+| `specs/08-budget.rules.js` | the rules file itself — how much of Firestore's 1000-expression-per-request ceiling `userDocOk` has left on the create, the routine update and the email-correcting update of the costliest document the store writes (a premium account with every optional field set, a location among them), and how long an `in` list the swipes read rule accepts before the same ceiling denies it. The second one binds the deck: `listCandidates` asks "have I swiped on these people" as `swipes where __name__ in [ids]`, the read rule is evaluated once per value, and going over comes back as a `permission-denied` naming nothing. Measured at 20; the store asks about 10 |
 
 Each spec starts from an empty database, so one spec's fixtures can never satisfy
 another's preconditions and mask a missing rule.
 
 ## What is covered
 
-- **`users/{uid}`** — owner-only reads (the private-data split), the frozen `uid`/`email`/
-  `createdAt`, every documented field bound, one field at a time, and a key list closed in
+- **`users/{uid}`** — owner-only reads (the private-data split), the frozen `uid`/`createdAt`
+  and an `email` that can only be corrected to the address on the caller's own sign-in token,
+  every documented field bound, one field at a time, and a key list closed in
   every map that names its fields: one unexpected key at the top and in each of `profile`,
   `preferences`, `learning`, `usage`, `profile.personality` and `profile.location` is
   refused, as is a list where each of those maps belongs. `learning.interestAffinity` is
@@ -131,30 +132,30 @@ another's preconditions and mask a missing rule.
   `userDocOk`, with its fourteen keys and forty-odd validated fields, had room for **eleven**
   more trivial clauses and nothing had ever measured that. `08-budget` measures it now, by
   padding `userDocOk` with a known number of always-true clauses and finding where a valid
-  document stops being accepted — on create and on update, for the costliest document the
-  store writes, with the floor applied to the lower. It used to measure only the create of
-  a free account, the write with the most room, and that hid the one that binds: updating
-  the suite's fixture as a premium account, every optional field set and a location among
-  them, was already over the limit. So the shipped upgrade to premium, run as that
-  account's owner, came back as a flat `permission-denied`, while the same account without
-  its location upgraded and the spec reported five clauses to spare. The shape of the cost
-  is measured by the spec too, on a small ruleset of its own built the way `userDocOk` is,
-  and it is not what it looks like: a call such as `stampOk(d.createdAt)` costs about 2.4
-  plain clauses and the same check written inline about 2.2, so factoring repeated bounds
-  into helpers — the obvious tidy-up — spends the margin rather than saving it. Both
-  figures are printed on every run. They used to be written down from memory as 2.2 and
-  1.5, and a comment built on them called a forwarding wrapper "pure overhead"; put back,
-  it moved the headroom by nothing.
+  document stops being accepted — on create, on a routine update and on the update that
+  corrects a stored email, for the costliest document the store writes, with the floor
+  applied to the lowest. It used to measure only the create of a free account, the write
+  with the most room, and that hid the one that binds: updating the suite's fixture as a
+  premium account, every optional field set and a location among them, was already over the
+  limit. So the shipped upgrade to premium, run as that account's owner, came back as a flat
+  `permission-denied`, while the same account without its location upgraded and the spec
+  reported five clauses to spare. The shape of the cost is measured by the spec too, on a
+  small ruleset of its own built the way `userDocOk` is, and it is not what it looks like: a
+  call such as `stampOk(d.createdAt)` costs about 2.4 plain clauses and the same check
+  written inline about 2.2, so factoring repeated bounds into helpers — the obvious tidy-up
+  — spends the margin rather than saving it. Both figures are printed on every run. They
+  used to be written down from memory as 2.2 and 1.5, and a comment built on them called a
+  forwarding wrapper "pure overhead"; put back, it moved the headroom by nothing.
 
   These figures are a measurement of the rules engine's accounting rather than of anything
   in this repository, so an emulator upgrade could move them with nothing here changing.
   The single figure the spec used to print, 5 for creating a free account, read the same on
   two independent machines, and that old spec, run against the old rules on firebase-tools
-  15.32.1, which fetches the same emulator jar, still reads 5. The two it prints now, for
-  creating and for updating a premium account, have been measured on one machine only, and
-  until CI prints the same nothing says they reproduce. Whatever moves them, the response is
-  to find out what did — never to lower the floor until the build goes green, which is the
-  one thing that would make the check worthless.
+  15.32.1, which fetches the same emulator jar, still reads 5. The three it prints now, for
+  creating, updating and correcting the email of a premium account, have been measured on
+  one machine only, and until CI prints the same nothing says they reproduce. Whatever moves
+  them, the response is to find out what did — never to lower the floor until the build goes
+  green, which is the one thing that would make the check worthless.
 
 Query-level rules are covered too, not just document reads: the suite asserts that the
 constrained queries the app issues are allowed and that an unconstrained scan of the same
