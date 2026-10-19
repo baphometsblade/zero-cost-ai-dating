@@ -274,7 +274,7 @@ npm run check:seed # fails if public/js/seed-data.js drifted from seed/profiles.
 
 ### Unit suites
 
-Fourteen suites on Node's built-in runner — **323 checks**, no install, no browser, seconds:
+Fourteen suites on Node's built-in runner — **330 checks**, no install, no browser, seconds:
 
 | Suite | What it pins down |
 | --- | --- |
@@ -323,7 +323,7 @@ Firebase rather than `localStorage`: the real SDK, real Auth, real Firestore, an
 read back out of the emulator instead of off the page. It drives the pages **with their real
 CSP meta tag** — the emulators are reached through the page's own origin rather than by
 relaxing the policy, which is the whole reason it can exist; the Limitations section explains
-the constraint it is working around. With both emulators up the run is **550 checks**, all
+the constraint it is working around. With both emulators up the run is **551 checks**, all
 passing.
 
 It did not start that way. On its first run one check was red, and it had found a real bug:
@@ -462,7 +462,7 @@ the browser suite twice: once bare, which is what a contributor with nothing ins
 and which proves the Firebase spec skips rather than silently passing, and once inside
 `emulators:exec` with `--require=firebase`, which turns a skip of the Firebase spec into a
 failing check. That makes it the only run in which every spec must execute, and therefore the
-only one that can hold the 550-check total to account. The `emulator` job drives the store
+only one that can hold the 551-check total to account. The `emulator` job drives the store
 suite through the compat SDK the pages load (firebase@10.12.2, installed apart from the
 testing library and passed in as `ZC_STORE_SDK`), and `npm test` fails if that pin and the
 pages' script tags disagree. There are no secrets and no deploy step — deploying stays a
