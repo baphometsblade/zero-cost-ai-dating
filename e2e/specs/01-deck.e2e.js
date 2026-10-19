@@ -538,6 +538,100 @@ module.exports = {
       ', stored ' + JSON.stringify(counted.stored) + ', toasts ' + JSON.stringify(counted.toasts));
     await h.closeBurst(page);
 
+    /* ---- a card decided somewhere else, whose match check then fails ---- */
+
+    // The store answers a pair that already has a decision by running the
+    // match check on the decision on record, and when that check failed, its
+    // rejection said only that the swipe was stored. So the deck counted the
+    // like and taught it, for a swipe that was never recorded, and said
+    // "Saved". The like on record is made through the store, as another tab's
+    // deck would make it, after a like from the other side, so it is mutual and
+    // the check has a match to write; and the match write is refused, the way
+    // a full browser storage refuses it, for that like and for the deck's.
+    // The deck's toasts are recorded as they are raised rather than read off
+    // the page afterwards, because a toast removes itself after a few seconds.
+    const decidedThere = await topCard(page);
+    const beforeFailed = await page.evaluate(function (args) {
+      const store = window.ZC.store;
+      const realSetItem = window.Storage.prototype.setItem;
+      window.__zcRealSetItem = realSetItem;
+      window.Storage.prototype.setItem = function (key, value) {
+        if (this === window.localStorage && key === store.KEYS.matches) {
+          throw new window.DOMException('The quota has been exceeded.', 'QuotaExceededError');
+        }
+        return realSetItem.call(this, key, value);
+      };
+      return store.recordSwipe(args.uid, args.me, 'like').then(function () {
+        return store.recordSwipe(args.me, args.uid, 'like').then(function () {
+          return 'resolved';
+        }, function (err) {
+          return err && err.swipeStored ? 'stored, unchecked' : 'rejected: ' + (err && err.message);
+        });
+      }).then(function (made) {
+        window.__zcToasts = [];
+        window.__zcToastWatch = new window.MutationObserver(function (records) {
+          records.forEach(function (record) {
+            Array.prototype.forEach.call(record.addedNodes, function (node) {
+              if (node.classList && node.classList.contains('toast')) {
+                window.__zcToasts.push((node.textContent || '').trim());
+              }
+            });
+          });
+        });
+        window.__zcToastWatch.observe(document.body, { childList: true, subtree: true });
+        return Promise.all([store.getUsage(args.me), store.getUser(args.me)]).then(function (got) {
+          return {
+            made: made,
+            likes: got[0].likes,
+            learning: JSON.stringify(got[1].learning || null),
+            hint: (document.getElementById('usage-hint').textContent || '').trim()
+          };
+        });
+      });
+    }, { me: me, uid: decidedThere.uid });
+    await page.keyboard.press('ArrowRight');
+    // The like is reserved the moment it is pressed, so the hint drops; it
+    // comes back once the deck's bookkeeping for this swipe has finished.
+    const toldThere = await becomes(page, function () {
+      return window.__zcToasts.some(function (text) { return /already|saved/i.test(text); });
+    });
+    const settledThere = await becomes(page, function (hint) {
+      return (document.getElementById('usage-hint').textContent || '').trim() === hint;
+    }, beforeFailed.hint);
+    const afterFailed = await page.evaluate(function (args) {
+      const store = window.ZC.store;
+      const toasts = window.__zcToasts;
+      window.__zcToastWatch.disconnect();
+      window.Storage.prototype.setItem = window.__zcRealSetItem;
+      delete window.__zcRealSetItem;
+      delete window.__zcToastWatch;
+      delete window.__zcToasts;
+      return Promise.all([store.getUsage(args.me), store.getUser(args.me), store.getSwipes(args.me)]).then(function (got) {
+        return {
+          toasts: toasts,
+          likes: got[0].likes,
+          learning: JSON.stringify(got[1].learning || null),
+          stored: got[2].filter(function (swipe) { return swipe.to === args.uid; }).map(function (swipe) { return swipe.action; }),
+          stack: Array.prototype.map.call(
+            document.querySelectorAll('#deck-stack .swipe-card:not([data-exiting])'),
+            function (card) { return card.dataset.uid; })
+        };
+      });
+    }, { me: me, uid: decidedThere.uid });
+    t.check('a like on a card liked elsewhere, whose match check fails, says the like stands, and spends no like and teaches nothing',
+      beforeFailed.made === 'stored, unchecked' && toldThere && settledThere &&
+        afterFailed.likes === beforeFailed.likes && afterFailed.learning === beforeFailed.learning &&
+        afterFailed.stored.join() === 'like' && afterFailed.stack.indexOf(decidedThere.uid) === -1 &&
+        afterFailed.toasts.some(function (text) { return /^You had already liked .* that decision stands/.test(text); }) &&
+        afterFailed.toasts.some(function (text) { return /^We could not check for a match/.test(text); }) &&
+        !afterFailed.toasts.some(function (text) { return /^Saved/.test(text); }),
+      'likes ' + beforeFailed.likes + ' -> ' + afterFailed.likes +
+      ', learning ' + (afterFailed.learning === beforeFailed.learning ? 'unchanged' : 'changed') +
+      ', stored ' + JSON.stringify(afterFailed.stored) +
+      (afterFailed.stack.indexOf(decidedThere.uid) === -1 ? '' : ', the card is back in the stack') +
+      '; ' + decidedThere.name + ': the like elsewhere ' + beforeFailed.made + '; toasts ' + JSON.stringify(afterFailed.toasts));
+    await h.closeBurst(page);
+
     /* ---- the shortcuts modal ---- */
     await page.click('#btn-shortcuts');
     await page.waitForSelector('.modal[role="dialog"]');

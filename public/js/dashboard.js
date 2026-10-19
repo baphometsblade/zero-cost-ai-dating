@@ -1036,6 +1036,7 @@
 
   async function persistSwipe(entry) {
     let outcome = null;
+    let unchecked = null;
     try {
       outcome = await ZC.store.recordSwipe(state.me.uid, entry.result.uid, entry.action);
     } catch (err) {
@@ -1063,29 +1064,10 @@
         return;
       }
 
-      // Stored, but we never found out whether it was mutual. Say so without
-      // claiming either answer, and carry on: the swipe was spent, so the daily
-      // count below is owed either way.
-      //
-      // The wording has been wrong twice, in opposite directions, and both times
-      // because the sentence described something the code did not do.
-      //
-      // First it said the match "will show up if there is one". Nothing made that
-      // true: a match document was only ever written from inside `recordSwipe`, my
-      // swipe now exists so `listCandidates` filters this person out of my deck for
-      // good, and their swipe is answered so I drop off their who-liked-you list —
-      // neither client would call `recordSwipe` for this pair again.
-      //
-      // Then it said "rewind and swipe again", which was honest about the gap and
-      // named a recovery most of the people reading it did not have: rewinds are a
-      // premium feature, so `canSpend` refuses one on the free plan, and the deck's
-      // history is a per-page array that a navigation empties.
-      //
-      // Now the store keeps a note of the check it started and finishes it on the
-      // next page load, so the sentence can say what actually happens. It is
-      // device-local — this browser finishes what this browser began — and that
-      // limit is written down in README's Limitations rather than glossed here.
-      toast('Saved, but we could not check for a match just then. We will try again next time you open the app.', 'warn');
+      // Stored, but we never found out whether it was mutual: said below, once
+      // it is known whether the decision stored is this one. The rejection
+      // names a decision already on record the way an answer does.
+      unchecked = err;
     }
 
     // Past here the swipe — and any match it created — is in storage. Nothing
@@ -1112,9 +1094,15 @@
     // other. Another tab making that same decision on that same card in
     // between would be counted twice, as every such pair was before the store
     // said when a decision was already there.
+    //
+    // The same holds when the match check on the decision on record failed:
+    // the rejection says what stands, as the answer would have. Only the
+    // answer used to be read here, so such a swipe was counted and taught as
+    // a new one.
     const tried = putBack[entry.result.uid];
     delete putBack[entry.result.uid];
-    const stood = outcome && outcome.existing ? outcome.action : null;
+    const decided = outcome || unchecked;
+    const stood = decided && decided.existing ? decided.action : null;
     const earlier = stood && !(stood === tried && stood === entry.action) ? stood : null;
     if (earlier) {
       const said = 'You had already ' + ACTION_VERB[earlier].toLowerCase() + ' ' +
@@ -1126,6 +1114,35 @@
       // its sentence replaces this one in the deck's live region. The toast
       // is a status region of its own, so it still says this.
       announce(said);
+    }
+
+    if (unchecked) {
+      // A decision is stored and we never found out whether it was mutual. Say
+      // so without claiming either answer. When the decision stored is this
+      // swipe, it was spent, so the daily count below is owed either way; when
+      // it is an earlier one, the toast above has said so, and "Saved" would
+      // be said of a swipe that wrote nothing.
+      //
+      // The wording has been wrong twice, in opposite directions, and both times
+      // because the sentence described something the code did not do.
+      //
+      // First it said the match "will show up if there is one". Nothing made that
+      // true: a match document was only ever written from inside `recordSwipe`, my
+      // swipe now exists so `listCandidates` filters this person out of my deck for
+      // good, and their swipe is answered so I drop off their who-liked-you list —
+      // neither client would call `recordSwipe` for this pair again.
+      //
+      // Then it said "rewind and swipe again", which was honest about the gap and
+      // named a recovery most of the people reading it did not have: rewinds are a
+      // premium feature, so `canSpend` refuses one on the free plan, and the deck's
+      // history is a per-page array that a navigation empties.
+      //
+      // Now the store keeps a note of the check it started and finishes it on the
+      // next page load, so the sentence can say what actually happens. It is
+      // device-local — this browser finishes what this browser began — and that
+      // limit is written down in README's Limitations rather than glossed here.
+      toast((earlier ? 'We' : 'Saved, but we') +
+        ' could not check for a match just then. We will try again next time you open the app.', 'warn');
     }
 
     if (entry.matched) {

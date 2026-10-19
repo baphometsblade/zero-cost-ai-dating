@@ -1177,6 +1177,80 @@ test('a match whose write is refused is never announced as a match', async funct
     'and the match is not, which is what the rejection is reporting');
 });
 
+test('a match check that fails on a pair decided earlier still says which decision stands', async function () {
+  // A swipe on a pair that already has a decision writes nothing and runs the
+  // match check on the decision on record. When that check succeeds, the answer
+  // says so through `existing` and `action`, and the deck neither counts the
+  // swipe nor teaches it. When it failed, the rejection said only that the swipe
+  // was stored, so the deck counted and taught a swipe that was never recorded,
+  // and said "Saved" of it, even when it was not the decision that stands.
+  await resetWorld();
+  const me = 'demo-you';
+  const them = 'ava-nakamura';
+  await store.recordSwipe(them, me, 'like');
+
+  let first = null;
+  let again = null;
+  await withStorageRefusing([KEYS.matches], async function () {
+    try {
+      await store.recordSwipe(me, them, 'like');
+    } catch (err) {
+      first = err;
+    }
+    try {
+      await store.recordSwipe(me, them, 'pass');
+    } catch (err) {
+      again = err;
+    }
+  });
+
+  assert.ok(first && first.swipeStored, 'the like landed and its match check did not');
+  assert.equal(first.existing, undefined, 'a swipe that was written is not an earlier one');
+  assert.ok(again && again.swipeStored, 'the pass found the like and its match check failed too');
+  assert.equal(again.existing, true, 'and the rejection says the pair was decided already');
+  assert.equal(again.action, 'like', 'and that the like is what stands, not the pass');
+  assert.deepEqual((await store.getSwipes(me)).filter(function (s) { return s.to === them; })
+    .map(function (s) { return s.action; }), ['like'], 'which it is: no pass was written');
+});
+
+test('and the note it leaves is for the decision that stands, not the one pressed', async function () {
+  // The facade notes the pair before the adapter runs, from the action it was
+  // handed, and a pass is never noted because a pass can never match. A pass on
+  // a pair whose like already stands is a match check all the same, and when it
+  // failed this device noted nothing, although the deck says "We will try again
+  // next time you open the app". The like is written straight into storage, as
+  // another device's would arrive, so this one holds no note of its own for it.
+  // Notes outlive a cleared storage in memory, as they do on a page, so any an
+  // earlier test left are spent first, against a world with no swipes to finish.
+  await resetWorld();
+  const me = 'demo-you';
+  const them = 'ava-nakamura';
+  await store.reconcileMatches(me);
+  await store.recordSwipe(them, me, 'like');
+  const swipes = raw(KEYS.swipes);
+  swipes[me + '_' + them] = { id: me + '_' + them, from: me, to: them, action: 'like', createdAt: new Date().toISOString() };
+  writeRaw(KEYS.swipes, swipes);
+  assert.deepEqual(await store.reconcileMatches(me), { checked: 0, repaired: 0, pending: 0 },
+    'nothing is owed on this device before the pass');
+
+  let failed = null;
+  await withStorageRefusing([KEYS.matches], async function () {
+    try {
+      await store.recordSwipe(me, them, 'pass');
+    } catch (err) {
+      failed = err;
+    }
+  });
+  assert.ok(failed && failed.swipeStored, 'the pass found the like and could not check it');
+
+  const result = await store.reconcileMatches(me);
+  assert.deepEqual({ checked: result.checked, repaired: result.repaired, pending: result.pending },
+    { checked: 1, repaired: 1, pending: 0 },
+    'the next page load finishes the check, because the like on record is owed one');
+  assert.ok((await store.getMatches(me)).some(function (m) { return m.otherUid === them; }),
+    'and the conversation is there');
+});
+
 test('a message whose write is refused is reported as lost, not as sent', async function () {
   // matches.js gives the user their typed text back from its catch and nowhere else.
   // Resolving normally cleared the composer and destroyed the message.

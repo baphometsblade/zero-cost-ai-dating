@@ -1305,7 +1305,7 @@
         const outcome = demoMatchFor(fromUid, toUid, effective, swipes);
         return existing ? decidedEarlier(outcome, effective) : outcome;
       } catch (err) {
-        throw storedSwipeFailure(err);
+        throw storedSwipeFailure(err, existing ? effective : null);
       }
     },
 
@@ -2731,14 +2731,24 @@
    * deck down exactly the path this exists to avoid. When marking is refused,
    * the signal survives in a wrapper that keeps the code, the message and the
    * original as its cause.
+   *
+   * When the pair was decided already, the rejection says so through
+   * `decidedEarlier`, as the answer would have had the match check finished.
+   * "Stored" is then about the decision on record, not about this swipe, which
+   * wrote nothing; without the mark the deck counted and taught it as new.
    * @param {*} err the rejection to mark
+   * @param {string|null} [earlier] the action already stored, when the pair was
+   *   decided before this swipe
    * @returns {*} the same error, marked, or a wrapper that carries the mark
    */
-  function storedSwipeFailure(err) {
+  function storedSwipeFailure(err, earlier) {
     if (err && typeof err === 'object') {
       try {
         err.swipeStored = true;
-        if (err.swipeStored === true) return err;
+        if (earlier) decidedEarlier(err, earlier);
+        if (err.swipeStored === true && (!earlier || (err.existing === true && err.action === earlier))) {
+          return err;
+        }
       } catch (ignored) {
         // Not extensible. Fall through to the wrapper.
       }
@@ -2748,7 +2758,7 @@
     if (err && err.code) wrapped.code = err.code;
     wrapped.cause = err;
     wrapped.swipeStored = true;
-    return wrapped;
+    return earlier ? decidedEarlier(wrapped, earlier) : wrapped;
   }
 
   /**
@@ -2761,13 +2771,14 @@
    * same answer.
    *
    * Both adapters answer through this one function, so the shape cannot drift
-   * between them. The deck needs the word: it announces a swipe before the
-   * store has answered, and it counts a like and folds it into the learning
-   * map afterwards. For a swipe that was never recorded, both of those used to
-   * happen anyway.
-   * @param {{matched:boolean, matchId:string|null, created:boolean}} outcome the match answer
+   * between them, and so does the rejection when that match check fails: see
+   * `storedSwipeFailure`. The deck needs the word: it announces a swipe before
+   * the store has answered, and it counts a like and folds it into the
+   * learning map afterwards. For a swipe that was never recorded, both of
+   * those used to happen anyway.
+   * @param {Object} outcome the match answer, or the rejection that replaced it
    * @param {string} action the action already stored, which is the one that stands
-   * @returns {Object} the same answer, with `existing: true` and that `action`
+   * @returns {Object} the same object, with `existing: true` and that `action`
    */
   function decidedEarlier(outcome, action) {
     outcome.existing = true;
@@ -3166,7 +3177,7 @@
         const outcome = await recordMatchFor(fromUid, toUid, effective);
         return existing.exists ? decidedEarlier(outcome, effective) : outcome;
       } catch (err) {
-        throw storedSwipeFailure(err);
+        throw storedSwipeFailure(err, existing.exists ? effective : null);
       }
     },
 
@@ -4529,7 +4540,8 @@
      * already has a decision keeps it, whatever `action` says: no swipe is
      * written, and the answer carries `existing: true` and the `action` that
      * stands. The match check still runs on that action, so a mutual pair
-     * whose match document is missing gets it then.
+     * whose match document is missing gets it then. When that check fails,
+     * the rejection is marked `swipeStored` and carries the same two fields.
      * @param {string} fromUid swiper
      * @param {string} toUid swiped
      * @param {'like'|'pass'|'super'} action what they did
@@ -4559,7 +4571,13 @@
       } catch (err) {
         // A failure BEFORE the swipe landed leaves nothing to finish. Only a
         // rejection that says the swipe is stored is worth coming back to.
+        //
+        // The note above was taken from the action pressed, and a pass is
+        // never noted. A pass on a pair whose like or super like already
+        // stands runs a match check all the same, so when that check fails the
+        // pair is noted now, for the decision on record.
         if (!(err && err.swipeStored)) clearPendingMatch(fromUid, toUid);
+        else if (err.existing) notePendingMatch(fromUid, toUid, err.action);
         throw err;
       }
     },
