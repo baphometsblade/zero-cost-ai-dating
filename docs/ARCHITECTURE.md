@@ -564,10 +564,16 @@ asserted and the other remembered.
   answer adds `existing: true` and the `action` that stands, so the deck neither counts nor
   learns from a swipe that was never recorded (unless it is its own retry of a write that
   came back failed yet landed). The match check still runs on the decision that stands, so a
-  mutual pair whose match document is missing gets it then.
+  mutual pair whose match document is missing gets it then. When that match check fails, the
+  rejection is marked `swipeStored` and carries the same `existing` and `action`, so the
+  deck treats it the same way: it says which decision stands, neither counts nor teaches the
+  swipe, and adds that the match could not be checked, without the "Saved" it says only of a
+  swipe it wrote.
 - `reconcileMatches(uid)` finishes a match check that was started and never answered. The
-  facade notes the pair in `localStorage` before calling the adapter, clears the note on any
-  settled outcome, and keeps it only for a rejection that says the swipe itself landed;
+  facade notes the pair in `localStorage` before calling the adapter, whatever key was
+  pressed (a pass on a pair whose like already stands runs the match check too), clears the
+  note on any settled outcome, and keeps it only for a rejection that says the swipe itself,
+  or a decision already on record, landed;
   `app.js` drains the log once per page. It is a note rather than a sweep because `unmatch`
   leaves both swipes behind, so a mutual like with no match document is indistinguishable
   from a conversation somebody ended — a sweep would reopen every one of them. Costs three
@@ -581,8 +587,8 @@ asserted and the other remembered.
   which is the ordinary case. The Firebase adapter reads and deletes in one transaction, so
   a like landing between the read and the delete is caught on the replay rather than missed.
   Undoing a swipe that is already gone, for a pair with no match, answers `{ ok: true }` in
-  both adapters: `firestore.rules` allows deleting a missing swipe to either person its id
-  names, which is wider than reading one (only its author may), and
+  both adapters: `firestore.rules` allows its author to delete a missing swipe, as it
+  allows them to read one, and
   `store-tests/specs/08-conversation.store.js` undoes the same swipe twice against the real
   rules.
 - `getUsage` auto-resets when `usage.date` is not today, so daily limits need no scheduler.
@@ -725,7 +731,7 @@ Page guards live in `auth.js` and run first in each controller:
 
 | Guard | Behaviour |
 | --- | --- |
-| `requireAuth()` | Redirects to `auth.html` (preserving `?next=`) and never resolves when signed out. Once it has resolved, the page also leaves for `auth.html?next=…` if another tab signs out or signs in as someone else — as soon as the new account's uid is known, not after its profile loads. The page's own sign-out (`ZC.auth.signOut`, which sets the same mark itself) and account deletion (`endingSession()`) mark the session as ending here first, so they are not mistaken for that. Every navigation `auth.js` makes goes through `leaveTo`, which first fires a `zc:leaving` event on `window`, and `app.js` fires the same before its Sign out leaves; `matches.js` drops its "a message is still sending" `beforeunload` question on it, so that question never holds a page whose session has ended. (The profile page's unsaved-changes question does not listen for it yet.) |
+| `requireAuth()` | Redirects to `auth.html` (preserving `?next=`) and never resolves when signed out. Once it has resolved, the page also leaves for `auth.html?next=…` if another tab signs out or signs in as someone else — as soon as the new account's uid is known, not after its profile loads. The page's own sign-out (`ZC.auth.signOut`, which sets the same mark itself) and account deletion (`endingSession()`) mark the session as ending here first, so they are not mistaken for that. Every navigation `auth.js` makes goes through `leaveTo`, which first fires a `zc:leaving` event on `window`, and `app.js` fires the same before its Sign out leaves; `matches.js` drops its "a message is still sending" `beforeunload` question on it, and `profile.js` stops asking its unsaved-changes question, so neither question holds a page whose session has ended. |
 | `requireGuest()` | The inverse, for `auth.html`. |
 | `requireProfile()` | `requireAuth` plus a redirect to `profile.html?onboarding=1&next=<this page>` when the profile is incomplete. "Start matching" then goes on to `resolveNext('dashboard.html')`: the page that was asked for, or the deck when there is none or it is unsafe. |
 

@@ -142,9 +142,9 @@ Open [`firestore.rules`](../firestore.rules). It is the only server-side securit
 has, so it is worth the five minutes.
 
 Everything below is also *executed* — `npm run test:rules` runs the real rules file against
-the Firestore emulator, **269 checks** including the attacks each rule exists to stop. If you
+the Firestore emulator, **273 checks** including the attacks each rule exists to stop. If you
 change the data model, run it. See [`rules-tests/README.md`](../rules-tests/README.md).
-`npm run test:emulator` adds the store suite to the same emulator boot: **310 more checks** that
+`npm run test:emulator` adds the store suite to the same emulator boot: **319 more checks** that
 drive the shipped `public/js/data-store.js` against a real Firestore, which is where the
 daily counter's transaction is proven — see [`store-tests/README.md`](../store-tests/README.md).
 
@@ -189,15 +189,18 @@ anywhere else was free to rot. It now reads every document.
   unconditional allowance would answer "has Alice swiped on Bob?" for any pair, from the
   difference between an empty snapshot and a denial. A missing swipe aimed at you is refused
   exactly as a pass is, so a refusal cannot single out a pass, and the store reads that
-  refusal on the reciprocal swipe as "no like". Delete your own, or one aimed at you, or one
-  that is already gone. A missing one may be deleted by either party the id names, which is
-  wider than the read of a miss and can be: a delete answers the same whether or not the
-  swipe was there, so it tells the other party nothing. A second rewind of the same card —
-  from a second tab on the same deck, or a retry — then deletes nothing and succeeds, as it
-  does in demo mode, instead of coming back `permission-denied`. Account deletion purges the
-  likes aimed at the account; a pass aimed at it stays with its author, the only account that
-  can read it. No updates: a rewind deletes the swipe, and the next swipe on that card
-  creates it afresh.
+  refusal on the reciprocal swipe as "no like". Delete your own, whatever it says, or a like
+  or super like aimed at you, or one of your own that is already gone: who may delete a
+  swipe is exactly who may read it. A pass aimed at you is refused, because the person
+  passed on knows its `from_to` id and deleting it would put them back in its author's deck.
+  A missing swipe aimed at you is refused too; otherwise the refusal would single out a
+  pass. A second rewind of the same card — from a second tab on the same deck, or a retry —
+  then deletes nothing and succeeds, as it does in demo mode, instead of coming back
+  `permission-denied`. Account deletion purges the likes aimed at the account; a pass aimed
+  at it stays with its author, the only account that can read or delete it. If a liker
+  rewinds while the purge is deleting their like, the batch is refused and the purge asks
+  again once instead of failing. No updates: a rewind deletes the swipe, and the next swipe
+  on that card creates it afresh.
 
   A closed key list bounds how *many* fields a document may have and not how big one may
   be, which is a separate hole and was open in every collection: `createdAt` and its
@@ -294,7 +297,7 @@ firebase use --add          # pick your project, alias it "default"
 Then:
 
 ```bash
-npm test                    # 14 suites, 316 checks, no install required
+npm test                    # 14 suites, 319 checks, no install required
 npm run deploy              # firebase deploy --only hosting,firestore
 ```
 
@@ -491,7 +494,7 @@ the suite still fails: *connect-src allows only what the three Firebase SDKs the
 can contact*, in the same file, holds every source in that directive to a list of the
 sources the shipped code actually connects to, each with its reason, and names both
 loopback origins as sources nothing in this app connects to. Be clear about what that does
-**not** catch — add them to that list as well and the suite goes quiet again, all 316
+**not** catch — add them to that list as well and the suite goes quiet again, all 319
 checks passing, and the weakened policy deploys to everyone. Change the meta copy only, and
 change it back.
 

@@ -548,29 +548,34 @@ async function openSession(browser, viewport, opts) {
 
   const page = await context.newPage();
   page.setDefaultTimeout(20000);
-  // Playwright cancels dialogs by default, which would silently block any
-  // navigation the unsaved-changes guard objects to. The app's own dialogs are
-  // DOM modals, so the only native ones are beforeunload prompts.
+  // Playwright answers a beforeunload prompt itself ("Leave") only while
+  // nothing listens for dialogs. A spec that listens, to see whether a prompt
+  // was asked, would otherwise leave it open and the navigation hanging, so
+  // every prompt is accepted here whatever a spec adds. The app's own dialogs
+  // are DOM modals, so the only native ones are beforeunload prompts.
   page.on('dialog', function (dialog) { return dialog.accept(); });
-  page.on('pageerror', function (err) {
-    errors.push('pageerror @ ' + page.url() + ' :: ' + (err && err.message ? err.message : String(err)));
-  });
-  page.on('console', function (msg) {
-    if (msg.type() !== 'error') return;
-    const text = msg.text();
-    // Only a session that aborted the CDN may write its failures off as
-    // expected. When the SDK is supposed to load, a gstatic error is the
-    // whole story and has to be reported.
-    if (!firebase && isExpectedCdnNoise(msg)) return;
-    if (state.expectingNetworkErrors && isResourceFailure(text)) return;
-    if (state.expectedError && state.expectedError.test(text)) return;
-    // Chromium points a failed-resource message at the resource, not at the
-    // page. Recording that is what lets a spec tell one "Failed to load
-    // resource" apart from another — "status 400" alone names nothing.
-    const location = (typeof msg.location === 'function' && msg.location()) || {};
-    const where = location.url && location.url !== page.url() ? location.url : page.url();
-    errors.push('console.error @ ' + where + ' :: ' + text);
-  });
+  const watch = function (target) {
+    target.on('pageerror', function (err) {
+      errors.push('pageerror @ ' + target.url() + ' :: ' + (err && err.message ? err.message : String(err)));
+    });
+    target.on('console', function (msg) {
+      if (msg.type() !== 'error') return;
+      const text = msg.text();
+      // Only a session that aborted the CDN may write its failures off as
+      // expected. When the SDK is supposed to load, a gstatic error is the
+      // whole story and has to be reported.
+      if (!firebase && isExpectedCdnNoise(msg)) return;
+      if (state.expectingNetworkErrors && isResourceFailure(text)) return;
+      if (state.expectedError && state.expectedError.test(text)) return;
+      // Chromium points a failed-resource message at the resource, not at the
+      // page. Recording that is what lets a spec tell one "Failed to load
+      // resource" apart from another — "status 400" alone names nothing.
+      const location = (typeof msg.location === 'function' && msg.location()) || {};
+      const where = location.url && location.url !== target.url() ? location.url : target.url();
+      errors.push('console.error @ ' + where + ' :: ' + text);
+    });
+  };
+  watch(page);
 
   return {
     context: context,
@@ -594,7 +599,17 @@ async function openSession(browser, viewport, opts) {
      * @param {RegExp|null} pattern the message this spec is about to provoke
      * @returns {void}
      */
-    expectConsoleError: function (pattern) { state.expectedError = pattern || null; }
+    expectConsoleError: function (pattern) { state.expectedError = pattern || null; },
+
+    /**
+     * Report another tab's page errors and console errors into this session's
+     * list, by the same filter as its first page, so a spec's closing no-errors
+     * check covers every tab it opens in this context. Native dialogs are left
+     * to the spec: a tab that records them answers them itself.
+     * @param {Object} other a Playwright Page in this session's context
+     * @returns {Object} the same page
+     */
+    watch: function (other) { watch(other); return other; }
   };
 }
 

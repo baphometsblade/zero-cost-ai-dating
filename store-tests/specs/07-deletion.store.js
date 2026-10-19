@@ -26,8 +26,10 @@
    queue is for, and DEPLOY.md says so. A test that demanded its removal would
    be encoding a bug as a requirement. The other is a pass aimed at the
    account: firestore.rules keeps a pass private to its author, so the account
-   can neither read nor find one, and it stays with the account that made it.
-   The sweep seeds none; the last section, run under the real rules, does.
+   can neither read, find nor delete one, and it stays with the account that
+   made it.
+   The sweep seeds none; the last two sections, run under the real rules, do —
+   the second with a pass its author makes while the purge is running.
    ========================================================================== */
 'use strict';
 
@@ -243,5 +245,125 @@ module.exports = {
     // demo adapter leaves it the same way, and tests/data-store.test.js says so.
     t.check('while a pass aimed at it stays with the account that made it',
       left['swipes/' + passer + '_' + leaving] === true, k.show(left));
+
+    /* ---- a like rewound while the purge is deleting it ------------------ */
+
+    // The rules let the account a swipe is aimed at delete it only while it is a
+    // like or a super like: the id is `from_to`, so somebody passed on knows it,
+    // and a pass they deleted would put them back in its author's deck. A miss
+    // aimed at them is refused too, or the refusal would be the pass.
+    //
+    // That makes one race in the purge matter. It lists the likes aimed at the
+    // account and deletes them in a batch, which commits all or nothing; a liker
+    // who rewinds in between leaves that batch deleting a miss, or a pass if they
+    // swiped again, and the whole batch is refused. Each case below rewinds
+    // exactly there, as the liker, under the real rules — between the query and
+    // the commit of a batch that holds the like, once per liker — and a super
+    // like from somebody who does not rewind shares the batch, to show what the
+    // refusal took with it.
+    async function raceRewind(leaver, rewinders, again) {
+      const bystander = 'swipes/' + leaver + '-bystander_' + leaver;
+      const raced = [];
+      for (let i = 0; i < rewinders; i += 1) raced.push('swipes/' + leaver + '-rewinder' + i + '_' + leaver);
+      const swipeAt = function (path, action) {
+        const from = path.slice('swipes/'.length, path.lastIndexOf('_'));
+        return k.h.swipeDoc(from, leaver, action);
+      };
+      await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+        const db = rdb(c);
+        await k.fs.setDoc(k.fs.doc(db, 'users', leaver), k.h.userDoc(leaver));
+        await k.fs.setDoc(k.fs.doc(db, 'discovery', leaver), k.h.discoveryDoc(leaver));
+        for (const path of raced) await k.fs.setDoc(k.fs.doc(db, path), swipeAt(path, 'like'));
+        await k.fs.setDoc(k.fs.doc(db, bystander), swipeAt(bystander, 'super'));
+      });
+      const own = k.rulesEnv.authenticatedContext(leaver).firestore();
+      const fired = [];
+      const racing = new Proxy(own, {
+        get: function (obj, prop) {
+          const value = obj[prop];
+          if (typeof value !== 'function') return value;
+          if (prop !== 'batch') return value.bind(obj);
+          return function () {
+            const batch = value.apply(obj, arguments);
+            const paths = [];
+            const remove = batch.delete.bind(batch);
+            const commit = batch.commit.bind(batch);
+            batch.delete = function (ref) { paths.push(ref.path); return remove(ref); };
+            batch.commit = async function () {
+              const next = raced.find(function (path) {
+                return paths.indexOf(path) !== -1 && fired.indexOf(path) === -1;
+              });
+              if (next) {
+                fired.push(next);
+                const theirs = k.rulesEnv.authenticatedContext(swipeAt(next).from).firestore();
+                await theirs.doc(next).delete();
+                if (again) await theirs.doc(next).set(swipeAt(next, again));
+              }
+              return commit();
+            };
+            return batch;
+          };
+        }
+      });
+      const run = async function (db) {
+        try {
+          k.ctx.ZC.firebase.db = db;
+          return await k.store.deleteAccountData(leaver).catch(function (err) {
+            return { rejected: (err && err.code) || String(err) };
+          });
+        } finally {
+          k.ctx.ZC.firebase.db = real;
+          k.ctx.drainWarnings();
+        }
+      };
+      const look = async function () {
+        const out = {};
+        await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+          const db = rdb(c);
+          for (const path of ['users/' + leaver, 'discovery/' + leaver].concat(raced, [bystander])) {
+            const snap = await k.fs.getDoc(k.fs.doc(db, path));
+            out[path] = snap.exists() ? (snap.data().action || 'present') : false;
+          }
+        });
+        return out;
+      };
+      const outcome = await run(racing);
+      return { outcome: outcome, after: await look(), fired: fired.length,
+               raced: raced, bystander: bystander, run: run, look: look };
+    }
+
+    const gone = await raceRewind('purge-race-gone', 1, null);
+    t.check('a like rewound between the purge\'s query and its delete does not stop the purge',
+      gone.fired === 1 && gone.outcome === true &&
+        !gone.after['users/purge-race-gone'] && !gone.after['discovery/purge-race-gone'],
+      'rewound ' + gone.fired + ' time(s); returned ' + k.show(gone.outcome) + '; left ' + k.show(gone.after));
+
+    t.check('and the other like that batch held is purged with the rest',
+      gone.after[gone.bystander] === false && gone.after[gone.raced[0]] === false, k.show(gone.after));
+
+    const passed = await raceRewind('purge-race-pass', 1, 'pass');
+    t.check('nor does one rewound and swiped again as a pass',
+      passed.fired === 1 && passed.outcome === true &&
+        !passed.after['users/purge-race-pass'] && !passed.after['discovery/purge-race-pass'] &&
+        passed.after[passed.bystander] === false,
+      'rewound ' + passed.fired + ' time(s); returned ' + k.show(passed.outcome) + '; left ' + k.show(passed.after));
+
+    t.check('and that pass stays with the account that made it',
+      passed.after[passed.raced[0]] === 'pass', k.show(passed.after));
+
+    // The purge asks again once. Refused a second time, it throws like any other
+    // failure, with the account's own documents still there, which is what lets
+    // the person's retry finish it.
+    const twice = await raceRewind('purge-race-twice', 2, null);
+    t.check('a purge refused again says so, and keeps the documents a retry starts from',
+      twice.fired === 2 && twice.outcome && twice.outcome.rejected === 'permission-denied' &&
+        twice.after['users/purge-race-twice'] === 'present' && twice.after['discovery/purge-race-twice'] === 'present',
+      'rewound ' + twice.fired + ' time(s); returned ' + k.show(twice.outcome) + '; left ' + k.show(twice.after));
+
+    const retried = await twice.run(k.rulesEnv.authenticatedContext('purge-race-twice').firestore());
+    const afterRetry = await twice.look();
+    t.check('and the retry does',
+      retried === true && Object.keys(afterRetry).every(function (path) { return afterRetry[path] === false; }),
+      'returned ' + k.show(retried) + '; left ' + k.show(afterRetry));
   }
 };

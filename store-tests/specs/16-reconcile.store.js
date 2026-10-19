@@ -34,9 +34,10 @@
  * @param {Object} real the emulator-backed compat Firestore
  * @param {{denied:number}} tally counts refusals, so a spec cannot pass because
  *   the injection silently stopped working
+ * @param {Function} rejection builds the error each refused write rejects with
  * @returns {Object} a stand-in for ZC.firebase.db
  */
-function refusingMatchWrites(real, tally) {
+function refusingMatchWrites(real, tally, rejection) {
   function bound(obj, key) {
     const value = obj[key];
     return typeof value === 'function' ? value.bind(obj) : value;
@@ -57,9 +58,7 @@ function refusingMatchWrites(real, tally) {
                   if (inner !== 'set') return bound(r, inner);
                   return function () {
                     tally.denied += 1;
-                    const err = new Error('PERMISSION_DENIED: Missing or insufficient permissions.');
-                    err.code = 'permission-denied';
-                    return Promise.reject(err);
+                    return Promise.reject(rejection());
                   };
                 }
               });
@@ -69,6 +68,27 @@ function refusingMatchWrites(real, tally) {
       };
     }
   });
+}
+
+/** What a rules refusal looks like coming back from the compat SDK. */
+function denial() {
+  const err = new Error('PERMISSION_DENIED: Missing or insufficient permissions.');
+  err.code = 'permission-denied';
+  return err;
+}
+
+/** Anything else: offline, an exhausted quota, a transient failure. */
+function unavailable() {
+  const err = new Error('Failed to get document because the client is offline.');
+  err.code = 'unavailable';
+  return err;
+}
+
+/** An outage whose error cannot be written to, so it can only be wrapped. */
+function frozenOutage() {
+  const err = new Error('Backend unavailable.');
+  err.code = 'unavailable';
+  return Object.freeze(err);
 }
 
 module.exports = {
@@ -227,7 +247,7 @@ module.exports = {
     note(me, blocked);
 
     const denials = { denied: 0 };
-    k.ctx.ZC.firebase.db = refusingMatchWrites(real, denials);
+    k.ctx.ZC.firebase.db = refusingMatchWrites(real, denials, denial);
     let threw = null;
     try {
       await k.store.reconcileMatches(me);
@@ -275,6 +295,64 @@ module.exports = {
     t.check('an outage leaves the note where it is, to try again later',
       outage.checked === 0 && notesFor(me).indexOf(offline) !== -1,
       'checked ' + outage.checked + ', notes left: ' + k.show(notesFor(me)));
+
+    /* ---- 6. a pair decided earlier, whose match check fails ------------- */
+
+    // A swipe on a pair that already has a decision writes nothing and runs the
+    // match check on the decision on record. When that check succeeds, the
+    // answer says the pair was decided already and which decision stands, and
+    // the deck neither counts the swipe nor teaches it. When it failed, the
+    // rejection said only that the swipe was stored, so the deck counted and
+    // taught a swipe that was never recorded. The like here was made where this
+    // device kept no note of it (another device, or a write reported lost that
+    // landed), and the swipe made now is a pass, which this device used to
+    // leave unnoted.
+    const decided = 'rec-decided';
+    await k.admin.set('swipes', decided + '_' + me, k.h.swipeDoc(decided, me, 'like'));
+    await k.admin.set('swipes', me + '_' + decided, k.h.swipeDoc(me, decided, 'like'));
+    const frozen = 'rec-frozen';
+    await k.admin.set('swipes', frozen + '_' + me, k.h.swipeDoc(frozen, me, 'like'));
+    await k.admin.set('swipes', me + '_' + frozen, k.h.swipeDoc(me, frozen, 'like'));
+
+    const failing = { denied: 0 };
+    let failed = null;
+    let frozenFailed = null;
+    try {
+      k.ctx.ZC.firebase.db = refusingMatchWrites(real, failing, unavailable);
+      await k.store.recordSwipe(me, decided, 'pass').catch(function (err) { failed = err; });
+      k.ctx.ZC.firebase.db = refusingMatchWrites(real, failing, frozenOutage);
+      await k.store.recordSwipe(me, frozen, 'like').catch(function (err) { frozenFailed = err; });
+    } finally {
+      k.ctx.ZC.firebase.db = real;
+    }
+    k.ctx.drainWarnings();
+    const told = function (err) {
+      return err ? { code: err.code, swipeStored: err.swipeStored, existing: err.existing, action: err.action }
+        : 'resolved instead of throwing';
+    };
+
+    // And the like is what is on record: no pass was written over it.
+    const onRecord = await k.admin.get('swipes', me + '_' + decided);
+    t.check('a match check that fails on a pair decided earlier says which decision stands',
+      failing.denied === 2 && !!failed && failed.code === 'unavailable' && failed.swipeStored === true &&
+        failed.existing === true && failed.action === 'like' && !!onRecord && onRecord.action === 'like',
+      failing.denied + ' failed match write(s); ' + k.show(told(failed)) + ', on record: ' +
+        (onRecord ? onRecord.action : 'nothing'));
+
+    t.check('and says so through an error that cannot be marked, too',
+      !!frozenFailed && frozenFailed.code === 'unavailable' && frozenFailed.swipeStored === true &&
+        frozenFailed.existing === true && frozenFailed.action === 'like',
+      k.show(told(frozenFailed)));
+
+    // The note is what makes "We will try again next time you open the app"
+    // true, and the facade notes the action it is handed before the adapter
+    // runs, so the pass alone left none.
+    const owed = notesFor(me).indexOf(decided) !== -1;
+    await k.store.reconcileMatches(me);
+    const finished = await k.admin.get('matches', [me, decided].sort().join('_'));
+    t.check('and the check is owed to the like on record, so the next page load finishes it',
+      owed && !!finished,
+      (owed ? 'noted' : 'NO NOTE') + ', match ' + (finished ? 'created' : 'MISSING'));
 
     globalThis.localStorage.removeItem(KEY);
   }

@@ -856,10 +856,10 @@
       };
       // Checked, like the swipe write that precedes it. `recordSwipe` catches this and
       // rethrows it as a stored-swipe failure, so the deck keeps the swipe, skips the
-      // match burst and shows "Saved, but we could not check for a match just then. We will
-      // try again next time you open the app." — and it will: the facade noted this pair
-      // before calling in here, and `reconcileMatches` finishes it on the next page load.
-      // byte for byte what the Firestore adapter produces when `matchRef.set` fails.
+      // match burst and says it could not check for a match just then and will try again
+      // next time the app is opened — and it will: the facade noted this pair before
+      // calling in here, and `reconcileMatches` finishes it on the next page load. The
+      // Firestore adapter answers the same way when `matchRef.set` fails.
       // Announcing a match that was never written is the one thing this must not do:
       // the person is told they matched, the conversation is not there on reload, and
       // nothing ever writes it, because both clients have spent their swipe.
@@ -1305,7 +1305,7 @@
         const outcome = demoMatchFor(fromUid, toUid, effective, swipes);
         return existing ? decidedEarlier(outcome, effective) : outcome;
       } catch (err) {
-        throw storedSwipeFailure(err);
+        throw storedSwipeFailure(err, existing ? effective : null);
       }
     },
 
@@ -2731,14 +2731,24 @@
    * deck down exactly the path this exists to avoid. When marking is refused,
    * the signal survives in a wrapper that keeps the code, the message and the
    * original as its cause.
+   *
+   * When the pair was decided already, the rejection says so through
+   * `decidedEarlier`, as the answer would have, had the match check finished.
+   * "Stored" is then about the decision on record, not about this swipe, which
+   * wrote nothing; without the mark the deck counted and taught it as new.
    * @param {*} err the rejection to mark
+   * @param {string|null} [earlier] the action already stored, when the pair was
+   *   decided before this swipe
    * @returns {*} the same error, marked, or a wrapper that carries the mark
    */
-  function storedSwipeFailure(err) {
+  function storedSwipeFailure(err, earlier) {
     if (err && typeof err === 'object') {
       try {
         err.swipeStored = true;
-        if (err.swipeStored === true) return err;
+        if (earlier) decidedEarlier(err, earlier);
+        if (err.swipeStored === true && (!earlier || (err.existing === true && err.action === earlier))) {
+          return err;
+        }
       } catch (ignored) {
         // Not extensible. Fall through to the wrapper.
       }
@@ -2748,12 +2758,13 @@
     if (err && err.code) wrapped.code = err.code;
     wrapped.cause = err;
     wrapped.swipeStored = true;
-    return wrapped;
+    return earlier ? decidedEarlier(wrapped, earlier) : wrapped;
   }
 
   /**
-   * Mark a recordSwipe answer as one that found the pair already decided, so
-   * wrote no swipe, and name the decision that stands.
+   * Mark a recordSwipe answer (or the rejection of its match check) as one
+   * that found the pair already decided, so wrote no swipe, and name the
+   * decision that stands.
    *
    * That is not the same as writing nothing. The match check still runs on
    * that decision, and a mutual pair whose match document is missing (what a
@@ -2761,13 +2772,14 @@
    * same answer.
    *
    * Both adapters answer through this one function, so the shape cannot drift
-   * between them. The deck needs the word: it announces a swipe before the
-   * store has answered, and it counts a like and folds it into the learning
-   * map afterwards. For a swipe that was never recorded, both of those used to
-   * happen anyway.
-   * @param {{matched:boolean, matchId:string|null, created:boolean}} outcome the match answer
+   * between them, and so does the rejection when that match check fails: see
+   * `storedSwipeFailure`. The deck needs the word: it announces a swipe before
+   * the store has answered, and it counts a like and folds it into the
+   * learning map afterwards. For a swipe that was never recorded, both of
+   * those used to happen anyway.
+   * @param {Object} outcome the match answer, or the rejection that replaced it
    * @param {string} action the action already stored, which is the one that stands
-   * @returns {Object} the same answer, with `existing: true` and that `action`
+   * @returns {Object} the same object, with `existing: true` and that `action`
    */
   function decidedEarlier(outcome, action) {
     outcome.existing = true;
@@ -3166,7 +3178,7 @@
         const outcome = await recordMatchFor(fromUid, toUid, effective);
         return existing.exists ? decidedEarlier(outcome, effective) : outcome;
       } catch (err) {
-        throw storedSwipeFailure(err);
+        throw storedSwipeFailure(err, existing.exists ? effective : null);
       }
     },
 
@@ -3222,10 +3234,9 @@
         if (snap.exists) return { ok: false, reason: 'matched' };
         // Whether the swipe is still there is not asked: another tab may have rewound
         // it first, or this may be a retry, and the delete goes ahead either way.
-        // firestore.rules allows deleting a missing swipe to either person its id
-        // names (wider than reading one, which only its author may), so a second
-        // undo answers `{ ok: true }` exactly as the demo adapter's does, and no
-        // read is spent finding out.
+        // firestore.rules allows the author its id names to delete a missing swipe,
+        // as it allows them to read one, so a second undo answers `{ ok: true }`
+        // exactly as the demo adapter's does, and no read is spent finding out.
         tx.delete(swipeRef);
         return { ok: true };
       });
@@ -3770,6 +3781,17 @@
       // as that account's own record of a decision, readable by nobody else; the
       // demo adapter leaves it the same way. settings.html promises to remove
       // "every swipe you have made", which this still does.
+      //
+      // The rules let this account delete a swipe aimed at it only while that
+      // swipe is a like or a super like, and refuse it a missing one — so a liker
+      // who rewinds between the query and the batch below leaves the batch
+      // deleting a miss, or a pass if they swiped again, and the whole batch is
+      // refused. Nothing in it was deleted and nothing is wrong: the like it was
+      // for is gone. So a refused batch of inbound likes is answered by asking
+      // again, once, which no longer lists that swipe. A second refusal is thrown
+      // like any other failure, before the account's documents go, so the person
+      // can retry. Their own swipes are not asked twice: the rules let the author
+      // delete one whatever it says, and a missing one too.
       const swipes = db().collection('swipes');
       const queries = [
         swipes.where('from', '==', uid),
@@ -3777,7 +3799,13 @@
       ];
       for (let q = 0; q < queries.length; q += 1) {
         const snap = await queries[q].get();
-        await batchDelete(snap.docs.map(function (doc) { return doc.ref; }));
+        try {
+          await batchDelete(snap.docs.map(function (doc) { return doc.ref; }));
+        } catch (err) {
+          if (q === 0 || !isPermissionDenied(err)) throw err;
+          const again = await queries[q].get();
+          await batchDelete(again.docs.map(function (doc) { return doc.ref; }));
+        }
       }
 
       // Every match this account is in, messages first (see unmatch).
@@ -3985,16 +4013,16 @@
   }
 
   /** Remember that a match check is about to be attempted for this pair. */
-  function notePendingMatch(fromUid, toUid, action) {
-    // A pass can never produce a match, so it can never leave one unfinished.
-    // No check pins this line and it would be dishonest to imply one does: a
-    // pass never reaches the match path at all, so its note is always cleared
-    // when the swipe write succeeds, and removing this guard changes nothing
-    // observable. It stays because it is true and it keeps the log to entries
-    // that could actually be owed. What IS pinned is the half a stale note can
-    // reach — `finishMatchCheck` reads the stored action, so a `pass` cannot
-    // become a match however the note got there.
-    if (!isPositive(normalizeAction(action))) return;
+  function notePendingMatch(fromUid, toUid) {
+    // Whatever key was pressed. A pass used to go unnoted, on the grounds that
+    // a pass can never match — but a pass on a pair whose like or super like
+    // already stands runs the match check on the decision on record, and a tab
+    // that left during that check lost it, with nothing on this device to say
+    // it was owed. The note is free while it lasts: any settled answer clears
+    // it, and one left by a pass whose write never landed costs the 1-read
+    // check `recordSwipe` already accepts for a like. What a stale note can
+    // reach is pinned — `finishMatchCheck` reads the stored action, so a
+    // `pass` cannot become a match however the note got there.
     const map = readPendingMatches();
     if (!isPlainObject(map[fromUid])) map[fromUid] = {};
     if (map[fromUid][toUid]) return;
@@ -4513,7 +4541,8 @@
      * already has a decision keeps it, whatever `action` says: no swipe is
      * written, and the answer carries `existing: true` and the `action` that
      * stands. The match check still runs on that action, so a mutual pair
-     * whose match document is missing gets it then.
+     * whose match document is missing gets it then. When that check fails,
+     * the rejection is marked `swipeStored` and carries the same two fields.
      * @param {string} fromUid swiper
      * @param {string} toUid swiped
      * @param {'like'|'pass'|'super'} action what they did
@@ -4535,14 +4564,15 @@
       // The cost of being early is one wasted 1-read check on the next load when
       // the swipe itself never landed, and `finishMatchCheck` answers that
       // without writing anything.
-      notePendingMatch(fromUid, toUid, action);
+      notePendingMatch(fromUid, toUid);
       try {
         const outcome = await adapter.recordSwipe(fromUid, toUid, action);
         clearPendingMatch(fromUid, toUid);
         return outcome;
       } catch (err) {
         // A failure BEFORE the swipe landed leaves nothing to finish. Only a
-        // rejection that says the swipe is stored is worth coming back to.
+        // rejection that says the swipe is stored — this one, or a decision
+        // already on record — is worth coming back to.
         if (!(err && err.swipeStored)) clearPendingMatch(fromUid, toUid);
         throw err;
       }
