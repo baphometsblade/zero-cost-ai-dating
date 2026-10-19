@@ -2072,8 +2072,8 @@
   }
 
   /**
-   * Each account's birthdate and the age stored beside it, as this page last
-   * read or saved its own document.
+   * Each account's birthdate, as this page last read or saved its own
+   * document.
    *
    * Only the private document holds a birthdate; `discovery/{uid}` holds the
    * age the last save derived from it, and nothing else rewrote that. So a
@@ -2094,7 +2094,7 @@
   const ageOnRecord = {};
 
   /**
-   * Remember what a read or a save of `users/{uid}` said about the age.
+   * Remember the birthdate a read or a save of `users/{uid}` found.
    * @param {string} uid the account
    * @param {Object|null} data the document as stored, before normalizeUser
    * @returns {void}
@@ -2102,22 +2102,34 @@
   function noteAge(uid, data) {
     const p = data && isPlainObject(data.profile) ? data.profile : null;
     if (!uid || !p) return;
-    ageOnRecord[uid] = { birthdate: p.birthdate || '', age: num(p.age) };
+    ageOnRecord[uid] = { birthdate: p.birthdate || '' };
   }
 
   /**
-   * The age a birthday has brought the account to since its profile was last
-   * saved, or null when the stored age is still right or nothing is known.
+   * The account's age by this device's date, for the presence touch to
+   * publish, or null when no birthdate is known.
+   *
+   * Every time, and not only when it differs from the age the private
+   * document stored. That comparison was what this used to make, and the
+   * private copy is one a touch never rewrites: a touch from a device whose
+   * date was behind the last save's (a clock running slow, or a second
+   * device in a time zone where the birthday has not come yet) published the
+   * year before's age, and from then on every visit from a device with the
+   * right date derived the age the private copy already held, sent none, and
+   * left the wrong one in every other deck until the next save. Sent every
+   * time, the touch that put it there is undone by the next one from a
+   * device with the right date, for nothing: the field rides in an update
+   * the touch makes anyway.
    * @param {string} uid the account
    * @returns {number|null}
    */
-  function ageSinceSave(uid) {
+  function ageToday(uid) {
     const known = ageOnRecord[uid];
     if (!known || !known.birthdate || !util.ageFromBirthdate) return null;
     const age = util.ageFromBirthdate(known.birthdate);
     // Inside the bounds discovery's rules put on `age`, or the refusal would
     // take the timestamp down with it.
-    if (age === null || age === known.age || age < 18 || age > 120) return null;
+    if (age === null || age < 18 || age > 120) return null;
     return age;
   }
 
@@ -2639,12 +2651,41 @@
   }
 
   /**
+   * When somebody was last on the app, as their own projection says: from a
+   * face this page has cached, else one read of `discovery/{uid}`.
+   *
+   * `discoveryOk` holds `lastActiveAt` to the server's clock with
+   * `currentStampOk`, the rule a match's `createdAt` is held to, so a stamp
+   * read here passes that rule again now. A projection last written before
+   * the rule existed can hold a later one; `matchDocumentFor` passes over a
+   * stamp later than the one its own clock wrote, and one in between is
+   * refused like that one was, which answers as a block does.
+   *
+   * Null when it cannot say, and never a rejection: the caller is choosing a
+   * date, and without a better one it keeps the one it has. Nothing is logged
+   * for the same reason: a failure here changes no answer.
+   * @param {string} uid the other person
+   * @returns {Promise<string|null>} an ISO stamp, or null
+   */
+  async function lastSeenAt(uid) {
+    const cached = cachedFaces([uid], Date.now())[uid];
+    if (cached) return toIso(cached.lastActiveAt);
+    try {
+      const snap = await db().collection('discovery').doc(uid).get();
+      return snap.exists ? toIso((snap.data() || {}).lastActiveAt) : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  /**
    * The match document for a pair that has just been found mutual: created once
    * and only once, and answered as "no match" when the rules refuse it.
    * @param {string} fromUid the swiper
    * @param {string} toUid the swiped
    * @param {string|null} likedAt when the other person liked the swiper, as their
-   *   swipe records it: the date a match this device's clock cannot date gets
+   *   swipe records it: the earliest date a match this device's clock cannot
+   *   date gets
    * @returns {Promise<{matched:boolean, matchId:string|null, created:boolean}>}
    */
   async function matchDocumentFor(fromUid, toUid, likedAt) {
@@ -2694,8 +2735,18 @@
       // dated by the like it answers. That stamp is earlier, written by the other
       // person's device, and accepted unless that device's clock ran fast as well. A
       // block refuses both, and the blocked account still gets the same plain no-match.
+      //
+      // Or by the other person's last visit, when that is later. The like can be
+      // weeks old, and both people's lists sort and label a match by `createdAt`:
+      // dated by a like twenty days old, a match made now went below a conversation
+      // three days quiet in the other person's list, and its header said "matched"
+      // and the like's date. Their `lastActiveAt` is held to the server's clock by
+      // the rule this write is held to (see `lastSeenAt`), so it passes here too.
+      // It costs a read when their face is not cached, and only after a refusal.
       if (refused && likedAt && Date.parse(likedAt) < Date.parse(match.createdAt)) {
-        match.createdAt = likedAt;
+        const seen = await lastSeenAt(toUid);
+        match.createdAt = seen && Date.parse(seen) > Date.parse(likedAt) &&
+          Date.parse(seen) < Date.parse(match.createdAt) ? seen : likedAt;
         try {
           await matchRef.set(match);
           refused = false;
@@ -2955,14 +3006,13 @@
         // them on a stale timestamp and quietly ranking them lower. An empty
         // catch made that indistinguishable from success.
         //
-        // After a birthday it carries the new age as well (see `ageOnRecord`),
-        // in the same write, so it costs nothing extra. Only the projection's
-        // copy is rewritten: the private one is re-derived on every read, and
-        // leaving it as the last save stored it means every touch until that
-        // next save carries the age again, so one that fails is retried by the
-        // next rather than lost.
+        // It carries the age as well (see `ageOnRecord` and `ageToday`), in the
+        // same write, so a birthday since the last save reaches other decks for
+        // nothing extra. Only the projection's copy is rewritten: the private
+        // one is re-derived on every read. Every touch carries it, so one that
+        // fails is retried by the next rather than lost.
         const shadow = { lastActiveAt: iso };
-        const age = ageSinceSave(uid);
+        const age = ageToday(uid);
         if (age !== null) shadow['profile.age'] = age;
         await db().collection('discovery').doc(uid).update(shadow)
           .catch(function (err) {
@@ -3344,13 +3394,30 @@
       // Update the conversation preview + the other side's unread counter.
       try {
         const snap = await matchRef.get();
-        const other = otherOf(snap.data() || {}, fromUid);
-        const patch = { lastMessage: body, lastMessageAt: message.createdAt };
+        const data = snap.data() || {};
+        const other = otherOf(data, fromUid);
+        const patch = {};
+        // The preview only when this message is the thread's latest. A message
+        // sent with no connection waits in the page and is committed when the
+        // connection comes back, which can be after the other person has
+        // written; an unconditional preview then put the older message back as
+        // the latest in both lists, and took `lastMessageAt`, which they sort
+        // by, back in time with it. The thread is ordered by `createdAt`, and
+        // this compares the same stamps. The count is owed either way. This
+        // reads and then writes, so a newer preview from the other side that
+        // lands between the two can still be replaced; a transaction would
+        // close that window, and would answer every such meeting with a
+        // rejected commit and a retry instead.
+        const shown = toIso(data.lastMessageAt);
+        if (!shown || Date.parse(message.createdAt) >= Date.parse(shown)) {
+          patch.lastMessage = body;
+          patch.lastMessageAt = message.createdAt;
+        }
         const FV = fieldValue();
         if (other) {
-          patch['unread.' + other] = FV ? FV.increment(1) : (Number(((snap.data() || {}).unread || {})[other]) || 0) + 1;
+          patch['unread.' + other] = FV ? FV.increment(1) : (Number((data.unread || {})[other]) || 0) + 1;
         }
-        await matchRef.update(patch);
+        if (Object.keys(patch).length) await matchRef.update(patch);
       } catch (err) {
         console.warn('[zc.store] Message sent but the conversation preview did not update.', err);
       }

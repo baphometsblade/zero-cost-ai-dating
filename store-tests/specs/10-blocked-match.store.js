@@ -407,5 +407,61 @@ module.exports = {
       noMatch(fastOutcomes.blocked) && blockedMatch === null && blockedWarned.length === 1 &&
         !/permission|denied/i.test(blockedWarned[0]),
       k.show({ answered: fastOutcomes.blocked, stored: blockedMatch ? 'EXISTS' : 'none', warnings: fastWarnings }));
+
+    /* ---- a like answered long after it was given ------------------------- */
+
+    // A like can be weeks old when it is answered, and `createdAt` is what both
+    // people's lists sort and label a match by: the new-matches strip sorts by it,
+    // the conversation list by `lastMessageAt` or it, and the conversation header
+    // says "matched" and its date. Dated by a like twenty days old, a match made
+    // now went below a conversation that had been quiet for three days, in the
+    // list of the other person, whose clock is right. They were on the app ten
+    // minutes ago here, and that stamp went through the same rule.
+    const oldLiker = 'fast-old-liker';
+    const talker = 'fast-old-talker';
+    const oldLike = new Date(Date.now() - 20 * 86400000).toISOString();
+    const seenAt = new Date(Date.now() - 10 * 60000).toISOString();
+    const quietAt = new Date(Date.now() - 3 * 86400000).toISOString();
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      const db = c.firestore();
+      await k.fs.setDoc(k.fs.doc(db, 'users', oldLiker), k.h.userDoc(oldLiker));
+      await k.fs.setDoc(k.fs.doc(db, 'users', talker), k.h.userDoc(talker));
+      await k.fs.setDoc(k.fs.doc(db, 'discovery', fast), k.h.discoveryDoc(fast));
+      await k.fs.setDoc(k.fs.doc(db, 'discovery', talker), k.h.discoveryDoc(talker));
+      await k.fs.setDoc(k.fs.doc(db, 'discovery', oldLiker), k.h.discoveryDoc(oldLiker, { lastActiveAt: seenAt }));
+      await k.fs.setDoc(k.fs.doc(db, 'swipes', oldLiker + '_' + fast),
+        Object.assign(k.h.swipeDoc(oldLiker, fast, 'like'), { createdAt: oldLike }));
+      await k.fs.setDoc(k.fs.doc(db, 'matches', k.h.pairId(oldLiker, talker)), k.h.matchDoc(oldLiker, talker, {
+        createdAt: new Date(Date.now() - 30 * 86400000).toISOString(), lastMessage: 'see you', lastMessageAt: quietAt
+      }));
+    });
+    const lateTally = { reads: 0, calls: 0, writes: 0, wrote: [] };
+    let answeredLate = null;
+    let theirList = null;
+    try {
+      k.ctx.ZC.firebase.db = k.h.countingDb(k.rulesEnv.authenticatedContext(fast).firestore(), lateTally);
+      globalThis.Date = FastDate;
+      answeredLate = await k.store.recordSwipe(fast, oldLiker, 'like').catch(answer);
+      globalThis.Date = RealDate;
+      k.ctx.ZC.firebase.db = k.rulesEnv.authenticatedContext(oldLiker).firestore();
+      theirList = (await k.store.getMatches(oldLiker)).map(function (view) {
+        return { other: view.otherUid, createdAt: view.createdAt, lastMessageAt: view.lastMessageAt };
+      });
+    } finally {
+      globalThis.Date = RealDate;
+      k.ctx.ZC.firebase.db = openDb;
+    }
+    const lateWarnings = k.ctx.drainWarnings();
+    let lateMatch = null;
+    await k.rulesEnv.withSecurityRulesDisabled(async function (c) {
+      lateMatch = (await k.fs.getDoc(k.fs.doc(c.firestore(), 'matches', k.h.pairId(fast, oldLiker)))).data() || null;
+    });
+    t.check('a like twenty days old is answered with a match dated by the liker\'s last visit, ' +
+        'which their list puts above a conversation quiet for three days',
+      !!answeredLate && answeredLate.matched === true && answeredLate.created === true &&
+        !!lateMatch && lateMatch.createdAt === seenAt &&
+        !!theirList && theirList.length === 2 && theirList[0].other === fast && lateWarnings.length === 0,
+      k.show({ answered: answeredLate, createdAt: lateMatch && lateMatch.createdAt, likedAt: oldLike, seenAt: seenAt,
+        reads: lateTally.reads, list: theirList, warnings: lateWarnings }));
   }
 };

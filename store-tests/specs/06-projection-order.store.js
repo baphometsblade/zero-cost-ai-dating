@@ -87,6 +87,18 @@ function birthdayLastMonth(years) {
     String(then.getDate()).padStart(2, '0');
 }
 
+/**
+ * A birthdate whose birthday is today, by this machine's local date.
+ * @param {number} years how old the person turns today; a multiple of four,
+ *   so that a run on February 29 names a date that exists
+ * @returns {string} YYYY-MM-DD
+ */
+function birthdayToday(years) {
+  const now = new Date();
+  return (now.getFullYear() - years) + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' +
+    String(now.getDate()).padStart(2, '0');
+}
+
 module.exports = {
   title: 'A racing save cannot leave the public projection behind',
 
@@ -213,5 +225,43 @@ module.exports = {
         under: card ? { age: card.profile.age, hardFail: verdict && verdict.hardFail } : 'not in the deck',
         upTo: shown ? { age: shown.profile.age, hardFail: shownVerdict && shownVerdict.hardFail } : 'not in the deck'
       }));
+
+    /* ---- a touch from a device whose date is behind the save's ---------- */
+
+    // The touch used to send an age only when it differed from the one the
+    // private document stored, and a touch never rewrites that copy. A touch
+    // from a device whose date was behind the last save's (a clock running
+    // slow, or a second device in a time zone where the birthday has not come
+    // yet) published the year before's age; after it, every visit from a device
+    // with the right date derived the age the private copy already held, sent
+    // none, and the wrong one stood until the next save through `updateUser`.
+    // Two days slow rather than one, so that no daylight-saving change can put
+    // the slow device's date back on the birthday itself.
+    const behind = 'projection-behind';
+    const turned = 28;
+    await k.store.createUser(behind, { email: behind + '@example.com', displayName: 'Zia' });
+    await k.store.updateUser(behind, {
+      profileComplete: true,
+      profile: { birthdate: birthdayToday(turned), gender: 'woman', bio: 'Saved today.', interests: ['hiking'] },
+      preferences: { interestedIn: ['man'], ageMin: 18, ageMax: 100 }
+    });
+    const published = async function () {
+      return ((await k.admin.get('discovery', behind)) || { profile: {} }).profile.age;
+    };
+    const savedAs = await published();
+    const slowTouch = await inThePast(2 * 86400000, async function () {
+      await k.store.getUser(behind);
+      return k.store.touchActive(behind);
+    });
+    const slowAs = await published();
+    await k.store.getUser(behind);
+    const rightTouch = await k.store.touchActive(behind);
+    const rightAs = await published();
+    k.ctx.drainWarnings();
+    t.check('a touch from a device two days slow publishes ' + (turned - 1) + ', and the next visit from a device ' +
+        'with the right date puts ' + turned + ' back',
+      savedAs === turned && slowTouch === true && slowAs === turned - 1 && rightTouch === true && rightAs === turned,
+      k.show({ saved: savedAs, slow: { touched: slowTouch, published: slowAs },
+        right: { touched: rightTouch, published: rightAs } }));
   }
 };
